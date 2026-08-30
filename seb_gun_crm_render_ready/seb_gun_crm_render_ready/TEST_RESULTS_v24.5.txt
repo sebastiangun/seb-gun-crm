@@ -1,0 +1,21 @@
+seb_gun CRM + VK DIRECT v24.5 — LOCAL TEST RESULTS
+
+2026-08-31
+
+- node --check server.js: OK
+- node --check lib/bluesales-web.js: OK
+- node --check public/api.js: OK
+- node --check public/app.js: OK
+- node --check public/sw.js: OK
+- npm test: OK (all regression tests + integration-v245.js)
+- temporary server smoke test: GET /api/health -> 200, version 24.5
+
+v24.5 regression coverage:
+- /api/meta does not scan all customers
+- client-side meta/service/orders request dedupe
+- cached /api/orders GET
+- targeted order cache invalidation
+- non-blocking New Order UI
+- service search updates only service result list
+- background order refresh after save
+- queue wait diagnostics

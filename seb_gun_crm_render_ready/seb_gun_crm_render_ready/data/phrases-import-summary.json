@@ -1,0 +1,18 @@
+{
+  "source": "phrases-blueSales-20260830-171207.md",
+  "phrases": 143,
+  "groups": 23,
+  "emojiPreserved": true,
+  "attachments": 35,
+  "attachmentsByType": {
+    "doc": 1,
+    "audio_message": 21,
+    "photo": 13
+  },
+  "managerNames": [
+    "0.1 Сергей К.",
+    "0.1 Софа С.",
+    "0.2 Адель Х."
+  ],
+  "sergeyAllowed": 143
+}

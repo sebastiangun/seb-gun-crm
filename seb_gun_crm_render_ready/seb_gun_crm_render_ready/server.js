@@ -1,0 +1,2539 @@
+'use strict';
+
+const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
+const { URL } = require('url');
+const BlueSalesWeb = require('./lib/bluesales-web');
+
+const ROOT = __dirname;
+const PUBLIC = path.join(ROOT, 'public');
+
+// Local private configuration. This file stays on the server and is never sent to the browser.
+function loadLocalEnv(file) {
+  try {
+    if (!fs.existsSync(file)) return;
+    const text = fs.readFileSync(file, 'utf8');
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const idx = line.indexOf('=');
+      if (idx <= 0) continue;
+      const key = line.slice(0, idx).trim();
+      let value = line.slice(idx + 1).trim();
+      if ((value.startsWith('\"') && value.endsWith('\"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+      if (!(key in process.env)) process.env[key] = value;
+    }
+  } catch (err) {
+    console.error('[config] Could not read .env.local:', err.message);
+  }
+}
+loadLocalEnv(path.join(ROOT, '.env.local'));
+
+const PORT = Number(process.env.PORT || 9050);
+const HOST = process.env.HOST || '0.0.0.0';
+const BS_BASE = process.env.BLUESALES_API_URL || 'https://bluesales.ru/app/Customers/WebServer.aspx';
+const BS_WEB_BASE = process.env.BLUESALES_WEB_BASE || 'https://bluesales.ru';
+const BS_WEB_SYNC_ENABLED = String(process.env.BLUESALES_WEB_SYNC ?? '1') !== '0';
+const ALLOW_LOCAL_PHRASE_FALLBACK = String(process.env.ALLOW_LOCAL_PHRASE_FALLBACK ?? '0') === '1';
+const VK_API_BASE = process.env.VK_API_BASE || 'https://api.vk.com/method/';
+const VK_API_VERSION = process.env.VK_API_VERSION || '5.199';
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const API_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS || 60000);
+const MAX_BUSY_RETRIES = Number(process.env.MAX_BUSY_RETRIES || 3);
+const BS_ORG_BUSY_RETRIES = Number(process.env.BS_ORG_BUSY_RETRIES || 8);
+const BS_QUEUE_GAP_MS = Number(process.env.BS_QUEUE_GAP_MS || 300);
+const SEARCH_SCAN_LIMIT = Number(process.env.SEARCH_SCAN_LIMIT || 50000);
+const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); // fallback only; normal reminders use date-filtered API paging
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
+const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
+const COOKIE_NAME = 'bs_mobile_session';
+const VERSION = '24.5';
+const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
+const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
+const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
+const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+
+const BS_SCREENSHOT_STATUS_COLORS = {
+  'Не учитывать в лидах':'#848B8C',
+  'Вступил в группу':'#3B3B3B',
+  'Запустил воронку':'#3B3B3B',
+  'Заявка':'#0165B0',
+  'Диагностика':'#FF99CC',
+  'Отправлен урок':'#008000',
+  'Рассказ про курс':'#FF9900',
+  'Цена озвучена':'#FF9900',
+  'Принимает решение':'#FF9900',
+  'Оплатил':'#0165B0',
+  'Допродажа':'#008000',
+  'Отказ':'#FF003A',
+  'Черный список':'#000000',
+  'Работа с игнором':'#848B8C',
+  'Отложил покупку':'#FF99CC'
+};
+const BS_SCREENSHOT_MANAGER_COLORS = {
+  '0.0 Даша Алексеева':'#737373',
+  'Даша Алексеева':'#737373',
+  '0.1 Расиль М.':'#86BA67',
+  'Расиль М.':'#86BA67',
+  '0.1 Гульназ У':'#FF9BA9',
+  'Гульназ У':'#FF9BA9',
+  '0.2 Юлия':'#B80206',
+  'Юлия':'#B80206',
+  '0.1 Ильгиз Ш.':'#00FF00',
+  'Ильгиз Ш.':'#00FF00'
+};
+
+const sessions = new Map();
+const cache = new Map();
+const inflight = new Map();
+let blueSalesQueueTail = Promise.resolve();
+let blueSalesQueueDepth = 0;
+let blueSalesLastFinishedAt = 0;
+
+function now() { return Date.now(); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function randomToken(bytes = 24) { return crypto.randomBytes(bytes).toString('hex'); }
+function md5Upper(value) { return crypto.createHash('md5').update(String(value), 'utf8').digest('hex').toUpperCase(); }
+function safeJson(value) { try { return JSON.stringify(value); } catch { return '{}'; } }
+
+function isLoopbackHost(hostname='') {
+  const h=String(hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
+  return h==='localhost'||h==='127.0.0.1'||h==='::1'||h==='0.0.0.0';
+}
+function preferredLanIpv4() {
+  const nets=os.networkInterfaces();
+  const candidates=[];
+  for(const [name,entries] of Object.entries(nets)){
+    for(const n of entries||[]){
+      if(n.family!=='IPv4'||n.internal)continue;
+      const a=String(n.address||'');
+      const virtualBySubnet=/^192\.168\.56\./.test(a)||/^169\.254\./.test(a);
+      const virtualByName=/virtual|vmware|vbox|host-only|hyper-v|wsl|vethernet|loopback|tailscale/i.test(name);
+      if(virtualBySubnet||virtualByName)continue;
+      const privateIp=/^10\./.test(a)||/^192\.168\./.test(a)||/^172\.(1[6-9]|2\d|3[01])\./.test(a);
+      candidates.push({address:a,privateIp});
+    }
+  }
+  return (candidates.find(x=>x.privateIp)||candidates[0]||{}).address||'';
+}
+function shareBaseUrl(req) {
+  if(PUBLIC_BASE_URL){
+    try{return new URL(PUBLIC_BASE_URL).toString().replace(/\/$/,'')}catch{}
+  }
+  const host=String(req?.headers?.host||`localhost:${PORT}`);
+  let hostname=host;
+  try{hostname=new URL(`http://${host}`).hostname}catch{}
+  const protocol=req?.socket?.encrypted?'https':'http';
+  if(!isLoopbackHost(hostname))return `${protocol}://${host}`;
+  const lan=preferredLanIpv4();
+  return lan?`http://${lan}:${PORT}`:`${protocol}://${host}`;
+}
+function safeUiDetails(value){
+  if(value==null)return '';
+  const raw=typeof value==='string'?value:safeJson(value);
+  return raw.replace(/[\r\n\t]+/g,' ').slice(0,500);
+}
+
+function parseCookies(req) {
+  const raw = req.headers.cookie || '';
+  const out = {};
+  for (const part of raw.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx < 0) continue;
+    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return out;
+}
+
+function getSession(req) {
+  const sid = parseCookies(req)[COOKIE_NAME];
+  if (!sid) return null;
+  const s = sessions.get(sid);
+  if (!s) return null;
+  if (s.expiresAt < now()) {
+    sessions.delete(sid);
+    return null;
+  }
+  s.expiresAt = now() + SESSION_TTL_MS;
+  return s;
+}
+
+function sessionCookie(sid, req, maxAgeSec = Math.floor(SESSION_TTL_MS / 1000)) {
+  const forwarded = String(req.headers['x-forwarded-proto'] || '').toLowerCase();
+  const secure = forwarded === 'https' || process.env.COOKIE_SECURE === '1';
+  return `${COOKIE_NAME}=${encodeURIComponent(sid)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${secure ? '; Secure' : ''}`;
+}
+
+function clearSessionCookie(req) {
+  const forwarded = String(req.headers['x-forwarded-proto'] || '').toLowerCase();
+  const secure = forwarded === 'https' || process.env.COOKIE_SECURE === '1';
+  return `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`;
+}
+
+function sendJson(res, status, data, extraHeaders = {}) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    ...extraHeaders
+  });
+  res.end(JSON.stringify(data));
+}
+
+function sendText(res, status, text, contentType = 'text/plain; charset=utf-8') {
+  res.writeHead(status, { 'Content-Type': contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  res.end(text);
+}
+
+async function readBody(req, limit = 1024 * 1024) {
+  return await new Promise((resolve, reject) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > limit) reject(Object.assign(new Error('Слишком большой запрос'), { status: 413 }));
+    });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
+async function readJson(req, limit = 1024 * 1024) {
+  const raw = await readBody(req, limit);
+  if (!raw) return {};
+  try { return JSON.parse(raw); }
+  catch { throw Object.assign(new Error('Некорректный JSON'), { status: 400 }); }
+}
+
+function extractBusySeconds(errorText) {
+  const text = String(errorText || '');
+  if (!text.includes('Другой пользователь находится онлайн под логином')) return null;
+  const htmlMatch = text.match(/countdown[^>]*>\s*(\d+)\s*</i);
+  if (htmlMatch) return Number(htmlMatch[1]);
+  const plainMatch = text.match(/через\s+(\d+)\s+сек/i);
+  if (plainMatch) return Number(plainMatch[1]);
+  return 15;
+}
+
+function isBlueSalesOrganizationBusy(errorText) {
+  const text = String(errorText || '');
+  return /уже выполняется одно или несколько других обращений к api/i.test(text) ||
+    /дождитесь завершения существующих обращений к api/i.test(text) ||
+    /another api request is already/i.test(text);
+}
+
+class BlueSalesError extends Error {
+  constructor(message, code = 'BLUESALES_ERROR', details = null) {
+    super(message);
+    this.name = 'BlueSalesError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+function blueSalesBodySnippet(text, max = 900) {
+  const raw = String(text || '').replace(/\u0000/g, '').trim();
+  if (!raw) return '';
+  const plain = raw
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (plain || raw).slice(0, max);
+}
+
+function blueSalesHttpPost(url, data) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const body = Buffer.from(JSON.stringify(data), 'utf8');
+    const transport = target.protocol === 'https:' ? https : http;
+    const req = transport.request(target, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Encoding': 'identity',
+        'Content-Length': String(body.length),
+        'Connection': 'close'
+      }
+    }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      response.on('end', () => {
+        resolve({
+          status: Number(response.statusCode || 0),
+          headers: response.headers || {},
+          text: Buffer.concat(chunks).toString('utf8')
+        });
+      });
+    });
+    req.setTimeout(API_TIMEOUT_MS, () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
+async function bsCallDirect(session, command, data = null, attempt = 0) {
+  const url = new URL(BS_BASE);
+  url.searchParams.set('login', session.login);
+  url.searchParams.set('password', session.passwordHash);
+  url.searchParams.set('command', command);
+
+  let response;
+  try {
+    // BlueSales' public SDK sends raw JSON bytes and does NOT set Content-Type.
+    // Using native http/https here avoids fetch automatically adding text/plain.
+    response = await blueSalesHttpPost(url, data);
+  } catch (err) {
+    if (err && (err.code === 'ETIMEDOUT' || /timeout/i.test(err.message || ''))) {
+      if (attempt < MAX_BUSY_RETRIES) {
+        const waitMs = 1200 + attempt * 900;
+        console.warn(`[BlueSales ${command}] timeout; повтор ${attempt + 1}/${MAX_BUSY_RETRIES} через ${waitMs} мс`);
+        await sleep(waitMs);
+        return bsCallDirect(session, command, data, attempt + 1);
+      }
+      throw new BlueSalesError('BlueSales не ответил вовремя после автоматических повторов', 'TIMEOUT');
+    }
+    throw new BlueSalesError(`Не удалось подключиться к BlueSales: ${err.message}`, 'NETWORK');
+  }
+
+  const text = String(response.text || '').replace(/^\uFEFF/, '').trim();
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { parsed = undefined; }
+
+  if (parsed && typeof parsed === 'object' && parsed.isValid === false) {
+    const errText = parsed.error || 'BlueSales отклонил запрос';
+    const busySeconds = extractBusySeconds(errText);
+    if (busySeconds != null && attempt < MAX_BUSY_RETRIES) {
+      await sleep((Math.min(Math.max(busySeconds, 1), 60) + 1) * 1000);
+      return bsCallDirect(session, command, data, attempt + 1);
+    }
+    if (isBlueSalesOrganizationBusy(errText)) {
+      if (attempt < BS_ORG_BUSY_RETRIES) {
+        const waitMs = Math.min(900 + attempt * 650, 4200);
+        console.warn(`[BlueSales ${command}] API занят другим обращением; повтор ${attempt + 1}/${BS_ORG_BUSY_RETRIES} через ${waitMs} мс`);
+        await sleep(waitMs);
+        return bsCallDirect(session, command, data, attempt + 1);
+      }
+      throw new BlueSalesError('BlueSales API организации всё ещё занят другим запросом. Сервер уже выполнял автоматические повторы. Повторите действие через несколько секунд.', 'API_BUSY', errText);
+    }
+    if (/Неправильный логин или пароль/i.test(errText)) {
+      throw new BlueSalesError('Неверный логин или пароль BlueSales', 'AUTH');
+    }
+    if (busySeconds != null) {
+      throw new BlueSalesError('BlueSales сообщает, что этот пользователь уже занят. Для стабильной одновременной работы используйте отдельного пользователя BlueSales для API.', 'BUSY', errText);
+    }
+    throw new BlueSalesError(String(errText).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(), 'API', parsed);
+  }
+
+  if (response.status < 200 || response.status >= 300) {
+    const snippet = blueSalesBodySnippet(text);
+    console.error(`[BlueSales ${command}] HTTP ${response.status}; content-type=${response.headers['content-type'] || ''}; body=${snippet || '[empty]'}`);
+    throw new BlueSalesError(`BlueSales HTTP ${response.status}${snippet ? `: ${snippet}` : ''}`, 'HTTP', {
+      status: response.status,
+      contentType: response.headers['content-type'] || '',
+      body: snippet
+    });
+  }
+
+  if (parsed === undefined) {
+    const snippet = blueSalesBodySnippet(text);
+    console.error(`[BlueSales ${command}] non-JSON; content-type=${response.headers['content-type'] || ''}; body=${snippet || '[empty]'}`);
+    throw new BlueSalesError(`BlueSales вернул ответ не в JSON${snippet ? `: ${snippet}` : ''}`, 'BAD_RESPONSE', {
+      contentType: response.headers['content-type'] || '',
+      body: snippet
+    });
+  }
+
+  return parsed;
+}
+
+// BlueSales rejects overlapping API calls at organization level. Every BlueSales call
+// from this process goes through one FIFO queue. This is intentionally global rather
+// than per browser request/session because the upstream lock is organization-wide.
+function bsCall(session, command, data = null) {
+  const queuedAt = now();
+  const job = async () => {
+    blueSalesQueueDepth += 1;
+    try {
+      const waited = now() - queuedAt;
+      if (waited >= 1200) console.log(`[BlueSales queue] ${command} waited ${waited}ms before start`);
+      const gap = Math.max(0, BS_QUEUE_GAP_MS - (now() - blueSalesLastFinishedAt));
+      if (gap) await sleep(gap);
+      return await bsCallDirect(session, command, data, 0);
+    } finally {
+      blueSalesLastFinishedAt = now();
+      blueSalesQueueDepth = Math.max(0, blueSalesQueueDepth - 1);
+    }
+  };
+  const result = blueSalesQueueTail.then(job, job);
+  blueSalesQueueTail = result.catch(() => undefined);
+  return result;
+}
+
+async function cachedLoad(key, ttl, loader) {
+  const cached = cacheGet(key);
+  if (cached !== null && cached !== undefined) return cached;
+  if (inflight.has(key)) return inflight.get(key);
+  const promise = Promise.resolve().then(loader).then(value => {
+    cacheSet(key, value, ttl);
+    return value;
+  }).finally(() => inflight.delete(key));
+  inflight.set(key, promise);
+  return promise;
+}
+
+class VkApiError extends Error {
+  constructor(message, code = 'VK_ERROR', details = null) {
+    super(message);
+    this.name = 'VkApiError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+async function vkCall(token, method, params = {}) {
+  if (!token) throw new VkApiError('VK не подключён. Войдите заново и укажите новый ключ сообщества.', 'VK_NOT_CONNECTED');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  const body = new URLSearchParams();
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value === undefined || value === null || value === '') continue;
+    if (Array.isArray(value)) body.set(key, value.join(','));
+    else body.set(key, String(value));
+  }
+  body.set('access_token', token);
+  body.set('v', VK_API_VERSION);
+  let response;
+  try {
+    response = await fetch(`${VK_API_BASE}${encodeURIComponent(method)}`, {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8' },
+      body,
+      signal: controller.signal
+    });
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err?.name === 'AbortError') throw new VkApiError('VK API не ответил вовремя', 'VK_TIMEOUT');
+    throw new VkApiError(`Не удалось подключиться к VK API: ${err.message}`, 'VK_NETWORK');
+  }
+  clearTimeout(timeout);
+  const text = await response.text();
+  if (!response.ok) throw new VkApiError(`VK API HTTP ${response.status}`, 'VK_HTTP', text.slice(0, 800));
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch { throw new VkApiError('VK API вернул ответ не в JSON', 'VK_BAD_RESPONSE', text.slice(0, 800)); }
+  if (parsed?.error) {
+    const e = parsed.error;
+    const code = Number(e.error_code || 0);
+    const msg = String(e.error_msg || 'VK API error');
+    if (code === 5) throw new VkApiError('Ключ VK недействителен или был отозван. Создайте новый ключ сообщества.', 'VK_AUTH', e);
+    if (code === 7 || code === 15) throw new VkApiError('У ключа VK недостаточно прав. Нужен доступ к сообщениям сообщества.', 'VK_PERMISSIONS', e);
+    if (code === 6) throw new VkApiError('VK API временно ограничил частоту запросов. Повторите через несколько секунд.', 'VK_RATE_LIMIT', e);
+    throw new VkApiError(`VK API: ${msg}`, `VK_${code || 'ERROR'}`, e);
+  }
+  return parsed?.response;
+}
+
+function normalizeVkCommunityHint(value) {
+  let raw = String(value || '').trim();
+  if (!raw) return { groupId: 0, screenName: '' };
+  const numeric = raw.match(/^-?\d+$/);
+  if (numeric) return { groupId: Math.abs(Number(raw) || 0), screenName: '' };
+  raw = raw.replace(/^https?:\/\/(?:www\.)?(?:vk\.com|vk\.ru)\//i, '');
+  raw = raw.split(/[?#/]/)[0].trim();
+  raw = raw.replace(/^club(?=\d+$)/i, '');
+  if (/^\d+$/.test(raw)) return { groupId: Math.abs(Number(raw) || 0), screenName: '' };
+  return { groupId: 0, screenName: raw.replace(/^@/, '') };
+}
+
+async function probeVk(token, groupHint = null) {
+  const hint = normalizeVkCommunityHint(groupHint);
+  let group = null;
+  let resolvedGroupId = hint.groupId || 0;
+
+  // Resolve the configured vk.ru/<screen_name> once on the server.
+  try {
+    const gp = { fields: 'photo_100,screen_name' };
+    if (resolvedGroupId) gp.group_ids = String(resolvedGroupId);
+    else if (hint.screenName) gp.group_ids = hint.screenName;
+    const raw = await vkCall(token, 'groups.getById', gp);
+    const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.groups) ? raw.groups : []);
+    group = list[0] || null;
+    if (group?.id) resolvedGroupId = Number(group.id) || resolvedGroupId;
+  } catch (err) {
+    // If the token itself is valid, messages.getConversations below will return the useful error.
+    if (!resolvedGroupId && hint.screenName) {
+      throw new VkApiError(`Не удалось определить VK-сообщество ${hint.screenName}: ${err.message}`, err.code || 'VK_GROUP_RESOLVE', err.details || null);
+    }
+  }
+
+  const params = { count: 1, extended: 1, fields: 'photo_100' };
+  if (resolvedGroupId) params.group_id = resolvedGroupId;
+  const conv = await vkCall(token, 'messages.getConversations', params);
+
+  return {
+    groupId: Number(group?.id || resolvedGroupId || 0) || null,
+    groupName: String(group?.name || hint.screenName || 'VK Сообщество'),
+    groupScreenName: String(group?.screen_name || hint.screenName || ''),
+    groupPhoto: String(group?.photo_100 || ''),
+    conversationsCount: Number(conv?.count || 0)
+  };
+}
+
+function vkIdentityMaps(raw) {
+  const profiles = new Map();
+  for (const p of raw?.profiles || []) profiles.set(Number(p.id), p);
+  const groups = new Map();
+  for (const g of raw?.groups || []) groups.set(Number(g.id), g);
+  return { profiles, groups };
+}
+
+function vkNameForPeer(peer, conversation, maps) {
+  const id = Number(peer?.id || 0);
+  if (peer?.type === 'user') {
+    const p = maps.profiles.get(id);
+    return p ? `${p.first_name || ''} ${p.last_name || ''}`.trim() || `VK ${id}` : `VK ${id}`;
+  }
+  if (peer?.type === 'group') {
+    const g = maps.groups.get(Math.abs(id));
+    return g?.name || `Сообщество ${Math.abs(id)}`;
+  }
+  if (peer?.type === 'chat') return conversation?.chat_settings?.title || `Беседа ${peer?.local_id || id}`;
+  return `Диалог ${id}`;
+}
+
+function vkAvatarForPeer(peer, conversation, maps) {
+  const id = Number(peer?.id || 0);
+  if (peer?.type === 'user') return String(maps.profiles.get(id)?.photo_100 || '');
+  if (peer?.type === 'group') return String(maps.groups.get(Math.abs(id))?.photo_100 || '');
+  if (peer?.type === 'chat') return String(conversation?.chat_settings?.photo?.photo_100 || '');
+  return '';
+}
+
+function bestPhotoUrl(photo) {
+  const sizes = Array.isArray(photo?.sizes) ? photo.sizes : [];
+  const sorted = [...sizes].sort((a, b) => (Number(b.width || 0) * Number(b.height || 0)) - (Number(a.width || 0) * Number(a.height || 0)));
+  return String(sorted[0]?.url || photo?.photo_807 || photo?.photo_604 || photo?.photo_130 || '');
+}
+
+function stickerUrl(x) {
+  const plain = Array.isArray(x?.images) ? [...x.images] : [];
+  const withBg = Array.isArray(x?.images_with_background) ? [...x.images_with_background] : [];
+  const bySize = rows => [...rows].sort((a,b)=>(Number(b.width||0)*Number(b.height||0))-(Number(a.width||0)*Number(a.height||0)));
+  const best = bySize(plain)[0]?.url || bySize(withBg)[0]?.url || x?.animation_url || x?.photo_512 || x?.photo_352 || x?.photo_256 || x?.photo_128 || x?.photo_64 || '';
+  if (best) return String(best);
+  const stickerId = Number(x?.sticker_id || 0);
+  return stickerId > 0 ? `https://vk.com/sticker/1-${stickerId}-512` : '';
+}
+
+function normalizeVkAttachments(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(a => {
+    const type = String(a?.type || '');
+    const x = a?.[type] || {};
+    if (type === 'photo') return { type, url: bestPhotoUrl(x), preview: bestPhotoUrl(x), title: 'Фото' };
+    if (type === 'sticker') return { type, url: stickerUrl(x), preview: stickerUrl(x), title: 'Стикер', stickerId: Number(x?.sticker_id || 0) };
+    if (type === 'doc') return { type, url: String(x?.url || ''), preview: String(x?.preview?.photo?.sizes?.slice?.(-1)?.[0]?.src || ''), title: String(x?.title || 'Документ'), ext: String(x?.ext || '') };
+    if (type === 'video') {
+      const owner = Number(x?.owner_id || 0), id = Number(x?.id || 0);
+      const external = owner && id ? `https://vk.com/video${owner}_${id}` : '';
+      return { type, url: external, preview: String(x?.image?.slice?.(-1)?.[0]?.url || ''), title: String(x?.title || 'Видео') };
+    }
+    if (type === 'audio_message') return { type, url: String(x?.link_mp3 || x?.link_ogg || ''), title: 'Голосовое сообщение', duration: Number(x?.duration || 0) };
+    if (type === 'link') return { type, url: String(x?.url || ''), preview: String(x?.photo ? bestPhotoUrl(x.photo) : ''), title: String(x?.title || x?.caption || x?.url || 'Ссылка') };
+    return { type, url: '', title: type || 'Вложение' };
+  }).filter(a => a.type);
+}
+
+function normalizeVkMessage(m, maps) {
+  const from = Number(m?.from_id || 0);
+  let author = '';
+  if (from > 0) {
+    const p = maps.profiles.get(from);
+    author = p ? `${p.first_name || ''} ${p.last_name || ''}`.trim() : `VK ${from}`;
+  } else if (from < 0) author = maps.groups.get(Math.abs(from))?.name || `Сообщество ${Math.abs(from)}`;
+  return {
+    id: String(m?.id ?? m?.conversation_message_id ?? ''),
+    conversationMessageId: Number(m?.conversation_message_id || 0),
+    peerId: Number(m?.peer_id || 0),
+    fromId: from,
+    author,
+    text: String(m?.text || ''),
+    date: Number(m?.date || 0),
+    out: Number(m?.out || 0) === 1,
+    attachments: normalizeVkAttachments(m?.attachments),
+    reply: m?.reply_message ? normalizeVkMessage(m.reply_message, maps) : null
+  };
+}
+
+
+function normalizeDialogSearchText(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('ru-RU')
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\p{N}@+._-]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractPeerIdFromDialogSearch(query) {
+  const raw = String(query || '').trim();
+  if (!raw) return 0;
+  const patterns = [
+    /(?:[?&]dialog=|#\/?dialog\/|\/dialog\/|\/convo\/|[?&]peer_id=)(-?\d+)/i,
+    /(?:vk\.(?:com|ru)\/id)(\d+)/i
+  ];
+  for (const re of patterns) {
+    const m = raw.match(re);
+    if (m) return Number(m[1]) || 0;
+  }
+  return /^-?\d{5,}$/.test(raw) ? Number(raw) : 0;
+}
+
+function dialogSearchScore(query, values = []) {
+  const q = normalizeDialogSearchText(query);
+  if (!q) return 1;
+  const qDigits = q.replace(/\D/g, '');
+  const tokens = q.split(' ').filter(Boolean);
+  let best = 0;
+  for (const value of values) {
+    const v = normalizeDialogSearchText(value);
+    if (!v) continue;
+    if (v === q) best = Math.max(best, 1000);
+    else if (v.startsWith(q)) best = Math.max(best, 800);
+    else if (v.includes(q)) best = Math.max(best, 650);
+    const words = v.split(' ').filter(Boolean);
+    if (tokens.length && tokens.every(t => words.some(w => w === t || w.startsWith(t)) || v.includes(t))) {
+      best = Math.max(best, 500 + tokens.length * 10);
+    }
+    if (qDigits.length >= 5) {
+      const d = v.replace(/\D/g, '');
+      if (d === qDigits) best = Math.max(best, 950);
+      else if (d.includes(qDigits)) best = Math.max(best, 700);
+    }
+  }
+  return best;
+}
+
+function customerDialogSearchValues(c) {
+  return [
+    c?.fullName, c?.phone, c?.email, c?.social?.vkId, c?.social?.vkName,
+    c?.raw?.vkName, c?.raw?.screenName
+  ];
+}
+
+function dialogSearchValues(d) {
+  return [d?.name, d?.peerId, d?.crm?.fullName, d?.crm?.phone, d?.crm?.email, d?.crm?.vkId];
+}
+
+function sortDialogsBySearchScore(dialogs, query) {
+  return (dialogs || [])
+    .map((d, i) => ({d, i, score: dialogSearchScore(query, dialogSearchValues(d))}))
+    .filter(x => x.score > 0)
+    .sort((a,b) => b.score - a.score || a.i - b.i)
+    .map(x => x.d);
+}
+
+function normalizeVkDialog(item, maps) {
+  const c = item?.conversation || {};
+  const peer = c?.peer || {};
+  const m = item?.last_message || {};
+  return {
+    id: String(peer?.id || ''),
+    peerId: Number(peer?.id || 0),
+    peerType: String(peer?.type || ''),
+    name: vkNameForPeer(peer, c, maps),
+    avatar: vkAvatarForPeer(peer, c, maps),
+    unreadCount: Number(c?.unread_count || 0),
+    lastMessage: String(m?.text || ''),
+    lastMessageAt: Number(m?.date || 0),
+    lastMessageOut: Number(m?.out || 0) === 1,
+    lastMessageAuthorId: Number(m?.from_id || 0),
+    crm: null
+  };
+}
+
+function normalizeVkConversation(c, maps) {
+  const conversation = c?.conversation || c || {};
+  const peer = conversation?.peer || {};
+  return {
+    id: String(peer?.id || ''),
+    peerId: Number(peer?.id || 0),
+    peerType: String(peer?.type || ''),
+    name: vkNameForPeer(peer, conversation, maps),
+    avatar: vkAvatarForPeer(peer, conversation, maps),
+    unreadCount: Number(conversation?.unread_count || 0),
+    lastMessage: '',
+    lastMessageAt: 0,
+    lastMessageOut: false,
+    lastMessageAuthorId: 0,
+    crm: null
+  };
+}
+
+function arrayFromResponse(raw, keys) {
+  if (Array.isArray(raw)) return raw;
+  if (!raw || typeof raw !== 'object') return [];
+  for (const key of keys) if (Array.isArray(raw[key])) return raw[key];
+  if (Array.isArray(raw.items)) return raw.items;
+  if (Array.isArray(raw.data)) return raw.data;
+  return [];
+}
+
+function firstDefined(obj, keys, fallback = '') {
+  for (const k of keys) {
+    if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== '') return obj[k];
+  }
+  return fallback;
+}
+
+function objectName(v) {
+  if (v == null) return '';
+  if (typeof v === 'string' || typeof v === 'number') return String(v);
+  if (typeof v === 'object') return String(v.name ?? v.fullName ?? v.login ?? v.title ?? v.id ?? '');
+  return '';
+}
+
+
+function normalizeCssColor(value) {
+  const direct = BlueSalesWeb.normalizeColor(value);
+  if (direct) return direct;
+  return '';
+}
+
+function colorFromObject(value, depth = 0) {
+  if (value == null || depth > 3) return '';
+  if (typeof value === 'string') return normalizeCssColor(value);
+  if (typeof value !== 'object') return '';
+  const priority = ['color','colour','backgroundColor','background_color','bgColor','labelColor','textColor','htmlColor','cssColor'];
+  for (const key of priority) {
+    if (value[key] != null) {
+      const c = normalizeCssColor(value[key]);
+      if (c) return c;
+    }
+  }
+  for (const [key,v] of Object.entries(value)) {
+    if (/color|colour|background/i.test(key)) {
+      const c = normalizeCssColor(v);
+      if (c) return c;
+    }
+  }
+  for (const key of ['style','settings','meta','ui','display']) {
+    if (value[key] && typeof value[key] === 'object') {
+      const c = colorFromObject(value[key], depth + 1);
+      if (c) return c;
+    }
+  }
+  return '';
+}
+
+function normalizeTags(tags) {
+  if (!Array.isArray(tags)) return [];
+  return tags.map(t => typeof t === 'string' ? { name: t, color: '', textColor:'' } : {
+    id: t?.id ?? null,
+    name: String(t?.name ?? t?.title ?? t?.tagName ?? ''),
+    color: colorFromObject(t),
+    textColor: String(t?.textColor ?? t?.text_color ?? '')
+  }).filter(t => t.name);
+}
+
+function normalizeCustomer(c) {
+  const vk = c?.vk || c?.vkontakte || {};
+  const tg = c?.telegram || {};
+  const wa = c?.whatsApp || c?.whatsapp || {};
+  return {
+    id: String(firstDefined(c, ['id', 'customerId', 'customerID'], '')),
+    fullName: String(firstDefined(c, ['fullName', 'name', 'fio'], 'Без имени')),
+    phone: String(firstDefined(c, ['phone', 'mobilePhone', 'mobile'], '')),
+    email: String(firstDefined(c, ['email', 'eMail'], '')),
+    country: objectName(c?.country),
+    city: objectName(c?.city),
+    crmStatus: objectName(c?.crmStatus || c?.status),
+    crmStatusColor: colorFromObject(c?.crmStatus || c?.status),
+    manager: objectName(c?.manager),
+    managerColor: colorFromObject(c?.manager),
+    managerLogin: String(c?.manager?.login ?? ''),
+    firstContactDate: String(firstDefined(c, ['firstContactDate', 'dateFirstContact'], '')),
+    lastContactDate: String(firstDefined(c, ['lastContactDate', 'dateLastContact'], '')),
+    nextContactDate: String(firstDefined(c, ['nextContactDate', 'dateNextContact'], '')),
+    shortNotes: String(firstDefined(c, ['shortNotes', 'note', 'notes'], '')),
+    comments: String(firstDefined(c, ['comments', 'comment'], '')),
+    source: objectName(c?.source),
+    salesChannel: objectName(c?.salesChannel),
+    tags: normalizeTags(c?.tags),
+    social: {
+      vkId: String(vk?.id ?? c?.vkId ?? ''),
+      telegramId: String(tg?.id ?? c?.telegramId ?? ''),
+      telegramLogin: String(tg?.login ?? ''),
+      whatsappId: String(wa?.id ?? c?.whatsAppId ?? '')
+    },
+    raw: c
+  };
+}
+
+function normalizeOrder(o) {
+  const positions = Array.isArray(o?.goodsPositions) ? o.goodsPositions : (Array.isArray(o?.positions) ? o.positions : []);
+  return {
+    id: String(firstDefined(o, ['id', 'orderId'], '')),
+    internalNumber: String(firstDefined(o, ['internalNumber', 'number'], '')),
+    date: String(firstDefined(o, ['date', 'orderDate'], '')),
+    status: objectName(o?.orderStatus || o?.status),
+    manager: objectName(o?.manager),
+    sum: Number(firstDefined(o, ['sum', 'total', 'totalSum'], 0)) || 0,
+    prepay: Number(firstDefined(o, ['prepay', 'prepayment'], 0)) || 0,
+    discount: Number(firstDefined(o, ['discount'], 0)) || 0,
+    comments: String(firstDefined(o, ['internalComments', 'comments'], '')),
+    positions: positions.map(p => ({
+      id: p?.id ?? null,
+      name: objectName(p?.goods || p?.product) || String(p?.name ?? ''),
+      marking: String(p?.goods?.marking ?? p?.marking ?? ''),
+      quantity: Number(p?.quantity ?? 1) || 1,
+      price: Number(p?.price ?? 0) || 0,
+      size: String(p?.size ?? '')
+    })),
+    raw: o
+  };
+}
+
+
+function servicesFilePath(){return path.join(ROOT,'data','services.json')}
+function loadServiceCatalog(){
+  try{
+    const raw=JSON.parse(fs.readFileSync(servicesFilePath(),'utf8'));
+    const rows=Array.isArray(raw)?raw:(Array.isArray(raw.services)?raw.services:[]);
+    return rows.map((x,i)=>({
+      id:String(x.id??x.marking??`service-${i+1}`),
+      marking:String(x.marking??x.article??''),
+      name:String(x.name??x.title??''),
+      defaultPrice:Number(x.defaultPrice??x.price??0)||0,
+      active:x.active!==false
+    })).filter(x=>x.name||x.marking);
+  }catch{return[]}
+}
+
+function normalizeUser(u) {
+  return {
+    id: String(firstDefined(u, ['id', 'userId'], '')),
+    name: String(firstDefined(u, ['name', 'fullName', 'fio'], '')),
+    login: String(firstDefined(u, ['login', 'email'], '')),
+    color: colorFromObject(u),
+    raw: u
+  };
+}
+
+function customerPageMeta(raw, list) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { count: list.length, notReturnedCount: 0 };
+  return {
+    count: Number(raw.count ?? raw.returnedCount ?? list.length) || list.length,
+    notReturnedCount: Number(raw.notReturnedCount ?? raw.not_returned_count ?? raw.notReturned ?? 0) || 0
+  };
+}
+
+async function getCustomersPage(session, { count = 100, offset = 0, ids, vkIds, phone, nextFrom, nextTo, managers, tags, sources } = {}) {
+  const safeCount = Math.min(Math.max(Number(count) || BLUESALES_PAGE_SIZE, 1), BLUESALES_PAGE_SIZE);
+  const payload = {
+    firstContactDateFrom: null,
+    firstContactDateTill: null,
+    nextContactDateFrom: nextFrom || null,
+    nextContactDateTill: nextTo || null,
+    lastContactDateFrom: null,
+    lastContactDateTill: null,
+    ids: Array.isArray(ids) && ids.length ? ids.map(Number).filter(Number.isFinite) : null,
+    vkIds: Array.isArray(vkIds) && vkIds.length ? vkIds.map(Number).filter(Number.isFinite) : null,
+    pageSize: safeCount,
+    startRowNumber: Math.max(Number(offset) || 0, 0),
+    tags: Array.isArray(tags) && tags.length ? tags.map(String).filter(Boolean) : [],
+    managers: Array.isArray(managers) && managers.length ? managers.map(x => /^\d+$/.test(String(x)) ? Number(x) : String(x)).filter(Boolean) : [],
+    sources: Array.isArray(sources) && sources.length ? sources : null,
+    phone: phone ? String(phone).replace(/\D/g, '') : null
+  };
+  const raw = await bsCall(session, 'customers.get', payload);
+  const source = arrayFromResponse(raw, ['customers', 'Customers']);
+  const customers = source.map(normalizeCustomer);
+  return { raw, customers, ...customerPageMeta(raw, customers) };
+}
+
+async function getAllCustomers(session, maxRows) {
+  const safeMax = Math.max(1, Number(maxRows) || SEARCH_SCAN_LIMIT);
+  const cacheKey = `${session.login}:customers-all:${safeMax}`;
+  return cachedLoad(cacheKey, Math.max(CACHE_TTL_MS, 60000), async () => {
+    const out = [];
+    let offset = 0;
+    while (out.length < safeMax) {
+      const take = Math.min(BLUESALES_PAGE_SIZE, safeMax - out.length);
+      const page = await getCustomersPage(session, { count: take, offset });
+      out.push(...page.customers);
+      if (!page.customers.length) break;
+      offset += page.customers.length;
+      if (page.notReturnedCount <= 0) break;
+      if (page.customers.length < take && page.notReturnedCount <= 0) break;
+    }
+    return out;
+  });
+}
+
+async function getAllCustomersComplete(session) {
+  const cacheKey = `${session.login}:customers-complete:v23`;
+  return cachedLoad(cacheKey, Math.max(CACHE_TTL_MS, 90000), async () => {
+    const out = [];
+    let offset = 0;
+    for (;;) {
+      const page = await getCustomersPage(session, { count: BLUESALES_PAGE_SIZE, offset });
+      out.push(...page.customers);
+      if (!page.customers.length || page.notReturnedCount <= 0) break;
+      offset += page.customers.length;
+      if (offset > 250000) break;
+    }
+    return out;
+  });
+}
+function sameText(a,b){return String(a??'').trim().toLocaleLowerCase('ru-RU')===String(b??'').trim().toLocaleLowerCase('ru-RU')}
+function customerHasTag(c,tag){if(!tag)return true;return(c.tags||[]).some(t=>sameText(t?.name??t,tag))}
+function customerMatchesManager(c,manager){if(!manager)return true;return sameText(c.manager,manager)||sameText(c.managerLogin,manager)}
+function customerMatchesStatus(c,status){if(!status)return true;return sameText(c.crmStatus,status)}
+
+async function getCustomersByNextContactRange(session, nextFrom = null, nextTo = null) {
+  const key = `${session.login}:next-contact:${nextFrom || '*'}:${nextTo || '*'}`;
+  return cachedLoad(key, Math.max(CACHE_TTL_MS, 60000), async () => {
+    const out = [];
+    let offset = 0;
+    // BlueSales customers.get allows max 500 per page. There is no artificial
+    // total limit here: continue until notReturnedCount reaches zero.
+    for (;;) {
+      const page = await getCustomersPage(session, {
+        count: BLUESALES_PAGE_SIZE, offset, nextFrom, nextTo
+      });
+      out.push(...page.customers);
+      if (!page.customers.length || page.notReturnedCount <= 0) break;
+      offset += page.customers.length;
+      if (page.customers.length < 1) break;
+    }
+    return out;
+  });
+}
+
+function cachedCustomerById(session, id) {
+  const n = String(id);
+  for (const [key, entry] of cache.entries()) {
+    if (!key.startsWith(`${session.login}:customers-all:`) || !entry || entry.expiresAt < now() || !Array.isArray(entry.value)) continue;
+    const hit = entry.value.find(c => String(c.id) === n);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function cachedCustomerByVkId(session, vkId) {
+  const n = String(vkId);
+  for (const [key, entry] of cache.entries()) {
+    if (!key.startsWith(`${session.login}:customers-all:`) || !entry || entry.expiresAt < now() || !Array.isArray(entry.value)) continue;
+    const hit = entry.value.find(c => String(c.social?.vkId || '') === n);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+async function getCustomerById(session, id) {
+  const cached = cachedCustomerById(session, id);
+  if (cached) return cached;
+  const key = `${session.login}:customer-id:${id}`;
+  return cachedLoad(key, 60000, async () => {
+    const page = await getCustomersPage(session, { count: 10, ids: [id] });
+    return page.customers.find(c => Number(c.id) === Number(id)) || page.customers[0] || null;
+  });
+}
+
+async function getCustomerByVkId(session, vkId) {
+  const cached = cachedCustomerByVkId(session, vkId);
+  if (cached) return cached;
+  const key = `${session.login}:customer-vk:${vkId}`;
+  return cachedLoad(key, 60000, async () => {
+    const page = await getCustomersPage(session, { count: 10, vkIds: [vkId] });
+    return page.customers.find(c => Number(c.social?.vkId) === Number(vkId)) || page.customers[0] || null;
+  });
+}
+
+async function getCustomersByVkIds(session, vkIds) {
+  const ids = [...new Set((vkIds || []).map(Number).filter(Number.isFinite))].sort((a,b)=>a-b);
+  if (!ids.length) return [];
+  const cachedHits = ids.map(id => cachedCustomerByVkId(session, id)).filter(Boolean);
+  if (cachedHits.length === ids.length) return cachedHits;
+  const key = `${session.login}:customers-vk:${ids.join(',')}`;
+  return cachedLoad(key, 45000, async () => {
+    const page = await getCustomersPage(session, { count: Math.min(BLUESALES_PAGE_SIZE, Math.max(ids.length, 1)), vkIds: ids });
+    return page.customers;
+  });
+}
+
+function cacheGet(key) {
+  const v = cache.get(key);
+  if (!v || v.expiresAt < now()) { cache.delete(key); return null; }
+  return v.value;
+}
+function cacheSet(key, value, ttl = CACHE_TTL_MS) { cache.set(key, { value, expiresAt: now() + ttl }); return value; }
+function clearCachePrefix(prefix) {
+  for (const key of cache.keys()) if (key.startsWith(prefix)) cache.delete(key);
+  for (const key of inflight.keys()) if (key.startsWith(prefix)) inflight.delete(key);
+}
+function clearOrdersCache(login, customerId = '') {
+  const base = `${login}:orders:`;
+  if (!customerId) return clearCachePrefix(base);
+  // There can be several limit/offset variants for one customer.
+  clearCachePrefix(`${base}${Number(customerId) || customerId}:`);
+}
+function clearAccountCache(login) {
+  clearCachePrefix(`${login}:`);
+}
+
+function ymdLocal(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function parseLooseDate(value) {
+  if (!value) return null;
+  const s = String(value).trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  m = s.match(/^(\d{2})[.\/-](\d{2})[.\/-](\d{4})/);
+  if (m) return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function dateKey(value) {
+  const d = parseLooseDate(value);
+  return d ? ymdLocal(d) : '';
+}
+
+function matchesCustomer(c, q) {
+  const needle = String(q || '').trim().toLowerCase();
+  if (!needle) return true;
+  const hay = [c.fullName, c.phone, c.email, c.city, c.crmStatus, c.manager, c.social.vkId, c.social.telegramId, ...c.tags.map(t => t.name)].join(' ').toLowerCase();
+  return hay.includes(needle);
+}
+
+
+
+function isAllowedMediaHost(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  const exact = new Set(['vk.com','www.vk.com','vk.ru','www.vk.ru','vk.me','www.vk.me']);
+  if (exact.has(h)) return true;
+  const suffixes = ['.userapi.com','.vkuserphoto.ru','.vkuseraudio.net','.vkuserlive.net','.vkcdn.ru','.vk-cdn.net'];
+  return suffixes.some(s => h.endsWith(s)) || ['userapi.com','vkuserphoto.ru','vkuseraudio.net','vkuserlive.net','vkcdn.ru','vk-cdn.net'].includes(h);
+}
+
+async function proxyVkMedia(req, res, rawUrl) {
+  let target;
+  try { target = new URL(String(rawUrl || '')); }
+  catch { return sendJson(res, 400, { ok:false, message:'Некорректный URL медиа' }); }
+  if (target.protocol !== 'https:' || !isAllowedMediaHost(target.hostname)) {
+    return sendJson(res, 400, { ok:false, message:'Этот медиа-хост не разрешён' });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  let upstream;
+  try {
+    upstream = await fetch(target, {
+      method: 'GET',
+      redirect: 'follow',
+      headers: {
+        'Accept': req.headers.accept || 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        'User-Agent': req.headers['user-agent'] || `BlueSales-Mobile-Web/${VERSION}`,
+        'Referer': 'https://vk.com/'
+      },
+      signal: controller.signal
+    });
+  } catch (err) {
+    clearTimeout(timeout);
+    const status = err?.name === 'AbortError' ? 504 : 502;
+    return sendJson(res, status, { ok:false, message: err?.name === 'AbortError' ? 'VK media timeout' : `VK media network error: ${err.message}` });
+  }
+  clearTimeout(timeout);
+
+  if (!upstream.ok) {
+    return sendJson(res, upstream.status || 502, { ok:false, message:`VK media HTTP ${upstream.status}` });
+  }
+
+  const type = upstream.headers.get('content-type') || 'application/octet-stream';
+  const len = upstream.headers.get('content-length');
+  const headers = {
+    'Content-Type': type,
+    'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400',
+    'X-Content-Type-Options': 'nosniff',
+    'Cross-Origin-Resource-Policy': 'same-origin'
+  };
+  if (len) headers['Content-Length'] = len;
+  res.writeHead(200, headers);
+  if (!upstream.body) return res.end();
+  try {
+    for await (const chunk of upstream.body) res.write(chunk);
+    res.end();
+  } catch (err) {
+    try { res.destroy(err); } catch {}
+  }
+}
+
+function requireAuth(req, res) {
+  const s = getSession(req);
+  if (!s) { sendJson(res, 401, { ok: false, error: 'AUTH_REQUIRED', message: 'Войдите в BlueSales' }); return null; }
+  return s;
+}
+
+function requireCsrf(req, res, s) {
+  const token = req.headers['x-csrf-token'];
+  if (!token || token !== s.csrf) { sendJson(res, 403, { ok: false, error: 'CSRF', message: 'Сессия устарела. Обновите страницу.' }); return false; }
+  return true;
+}
+
+function publicFile(reqPath) {
+  let p = decodeURIComponent(reqPath.split('?')[0]);
+  if (p === '/') p = '/index.html';
+  const full = path.normalize(path.join(PUBLIC, p));
+  if (!full.startsWith(PUBLIC)) return null;
+  return full;
+}
+
+const mime = {
+  '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon'
+};
+
+function serveStatic(req, res, pathname) {
+  const file = publicFile(pathname);
+  if (!file) return sendText(res, 403, 'Forbidden');
+  fs.stat(file, (err, st) => {
+    let target = file;
+    if (!err && st.isDirectory()) target = path.join(file, 'index.html');
+    fs.readFile(target, (err2, data) => {
+      if (err2) return sendText(res, 404, 'Not Found');
+      res.writeHead(200, {
+        'Content-Type': mime[path.extname(target).toLowerCase()] || 'application/octet-stream',
+        'Cache-Control': path.basename(target) === 'sw.js' ? 'no-cache, no-store' : 'no-cache',
+        'X-Content-Type-Options': 'nosniff'
+      });
+      res.end(data);
+    });
+  });
+}
+
+function blueSalesUiSeedPath(){ return path.join(ROOT,'data','bluesales-ui-seed.json'); }
+function loadBlueSalesUiSeed(){
+  try{
+    const raw=JSON.parse(fs.readFileSync(blueSalesUiSeedPath(),'utf8'));
+    return raw&&typeof raw==='object'?raw:{};
+  }catch{return{};}
+}
+function statusOptions(customers) {
+  const seed=loadBlueSalesUiSeed();
+  const defaults=(Array.isArray(seed.statuses)?seed.statuses.map(x=>String(x?.name||'')).filter(Boolean):[
+    'Не учитывать в лидах','Вступил в группу','Запустил воронку','Заявка','Диагностика','Отправлен урок',
+    'Рассказ про курс','Цена озвучена','Принимает решение','Оплатил','Допродажа','Отказ','Черный список','Работа с игнором','Отложил покупку'
+  ]);
+  const set = new Set(defaults);
+  (customers||[]).forEach(c => { if (c.crmStatus) set.add(c.crmStatus); });
+  return [...set];
+}
+
+
+function quickPhrasesPath() { return path.join(ROOT, 'data', 'quick_phrases.json'); }
+function managerColorsPath() { return path.join(ROOT, 'data', 'manager-colors.json'); }
+function loadManagerColorOverrides() {
+  try { const raw=JSON.parse(fs.readFileSync(managerColorsPath(),'utf8')); return raw && typeof raw==='object' && !Array.isArray(raw) ? raw : {}; }
+  catch { return {}; }
+}
+function uiSyncDir() { return path.join(ROOT, 'data', 'ui-sync'); }
+function uiSyncFile(login) {
+  const key = crypto.createHash('sha256').update(String(login || '').toLowerCase()).digest('hex').slice(0, 16);
+  return path.join(uiSyncDir(), `${key}.json`);
+}
+function loadQuickPhrases() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(quickPhrasesPath(), 'utf8'));
+    return Array.isArray(raw?.groups) ? raw.groups : [];
+  } catch (err) {
+    console.warn('[Quick phrases]', err?.message || err);
+    return [];
+  }
+}
+function readUiSync(login) {
+  try {
+    const file = uiSyncFile(login);
+    if (!fs.existsSync(file)) return null;
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return raw && typeof raw === 'object' ? raw : null;
+  } catch { return null; }
+}
+function writeUiSync(login, profile) {
+  try {
+    fs.mkdirSync(uiSyncDir(), { recursive: true });
+    const safe = {
+      savedAt: new Date().toISOString(), source: profile.source || 'bluesales-web',
+      phrases: Array.isArray(profile.phrases) ? profile.phrases : [],
+      statusColors: profile.statusColors || {}, managerColors: profile.managerColors || {}, tagColors: profile.tagColors || {},
+      tagTextColors: profile.tagTextColors || {},
+      managers: Array.isArray(profile.managers) ? profile.managers : [],
+      statuses: Array.isArray(profile.statuses) ? profile.statuses : [],
+      tags: Array.isArray(profile.tags) ? profile.tags : [],
+      loggedManager: profile.loggedManager || null,
+      selectedManagerId: profile.selectedManagerId || '',
+      capabilities: profile.capabilities || {}, discovered: profile.discovered || {}
+    };
+    fs.writeFileSync(uiSyncFile(login), JSON.stringify(safe, null, 2), 'utf8');
+  } catch (err) { console.warn('[BlueSales UI sync cache]', err?.message || err); }
+}
+function currentUserFrom(users, login) {
+  const needle = String(login || '').trim().toLowerCase();
+  const found=(users || []).find(u => String(u.login || '').trim().toLowerCase() === needle);
+  if(found)return found;
+  const seed=loadBlueSalesUiSeed();
+  if(String(seed?.loggedManager?.login||'').trim().toLowerCase()===needle){
+    return normalizeUser(seed.loggedManager);
+  }
+  return { id:'', name:'', login:String(login || ''), color:'' };
+}
+function localPhrasesForAccount(session) {
+  // Local phrase export is an account-scoped fallback generated from the user's BlueSales export. v22.0 does not
+  // grant scripts locally: BlueSales itself must confirm what this account can use.
+  return BlueSalesWeb.filterPhraseGroups(
+    loadQuickPhrases(), session.currentUser || null, session.login,
+    { allowWildcard:false }
+  );
+}
+function phrasePayloadForSession(session) {
+  const profile = session.uiProfile || readUiSync(session.login);
+  const localGroups = ALLOW_LOCAL_PHRASE_FALLBACK ? localPhrasesForAccount(session) : [];
+  const profileGroups = Array.isArray(profile?.phrases) ? profile.phrases : [];
+  const profileSource = String(profile?.source || '');
+
+  // v24.2: the user supplied a complete BlueSales phrase export with original emoji.
+  // It contains the Managers column and attachment tokens, which the public API
+  // does not expose. Use this account-filtered export as the stable phrase
+  // source; live BlueSales web sync still supplies UI metadata/capabilities and
+  // can be retried/imported, but it is not allowed to replace the complete
+  // exported set with a partial/zero parse.
+  if (localGroups.length) {
+    return {
+      groups: localGroups,
+      source: 'bluesales-emoji-export',
+      capabilities: { ...(profile?.capabilities || {}), quickPhrases: true },
+      discovered: profile?.discovered || {},
+      syncedAt: profile?.savedAt || null,
+      message: 'База скриптов загружена из экспортированной таблицы BlueSales и отфильтрована по колонке «Менеджеры» для текущего логина.'
+    };
+  }
+  if (profile && Array.isArray(profile.phrases) && /^bluesales-(?:web|html-import)/.test(profileSource)) {
+    return {
+      groups: profileGroups,
+      source: profileSource || 'bluesales-web-cache',
+      capabilities: profile.capabilities || {},
+      discovered: profile.discovered || {},
+      syncedAt: profile.savedAt || null,
+      message: profileGroups.length ? '' : 'BlueSales вернул 0 доступных быстрых фраз для этого аккаунта.'
+    };
+  }
+  return {
+    groups: [], source: 'bluesales-account-only', capabilities: profile?.capabilities || {},
+    discovered: profile?.discovered || {}, syncedAt: profile?.savedAt || null,
+    message: session.uiSyncMessage || 'BlueSales ещё не подтвердил доступ этого аккаунта к быстрым фразам.'
+  };
+}
+
+async function syncBlueSalesUi(session, password, users, {force=false}={}) {
+  if (session.uiSyncPromise && !force) return session.uiSyncPromise;
+  const secret=password || session.webPassword || '';
+  if (!secret || !BS_WEB_SYNC_ENABLED) {
+    session.uiSyncState = BS_WEB_SYNC_ENABLED ? 'no-password' : 'disabled';
+    return null;
+  }
+  const runner=(async()=>{
+    session.uiSyncState = 'syncing';
+    session.uiSyncMessage = '';
+    try {
+      const managerNames = (users || []).map(u => u.name).filter(Boolean);
+      const profile = await BlueSalesWeb.bootstrap({
+        base: BS_WEB_BASE,
+        login: session.login,
+        password: secret,
+        currentUser: session.currentUser,
+        statusNames: statusOptions([]),
+        managerNames,
+        busyRetries: 3,
+        busyWaitMinMs: 5000,
+        busyWaitMaxMs: 10000
+      });
+      if (!profile.ok) {
+        session.uiSyncState = profile.code || 'unavailable';
+        session.uiSyncMessage = profile.message || '';
+        const cached = readUiSync(session.login);
+        if (cached) session.uiProfile = { ...cached, source: 'bluesales-web-cache' };
+        return profile;
+      }
+      session.uiSyncState = 'ready';
+      session.uiSyncMessage = '';
+      session.uiProfile = { ...profile, savedAt: new Date().toISOString() };
+      writeUiSync(session.login, session.uiProfile);
+      console.log(`[BlueSales UI sync] ${session.login}: phrases=${profile.phraseCount || 0}, statuses=${(profile.statuses||[]).length}, tags=${(profile.tags||[]).length}, managers=${(profile.managers||[]).length}, managerColors=${Object.keys(profile.managerColors || {}).length}`);
+      return profile;
+    } catch (err) {
+      session.uiSyncState = 'error';
+      session.uiSyncMessage = err?.message || String(err);
+      const cached = readUiSync(session.login);
+      if (cached) session.uiProfile = { ...cached, source: 'bluesales-web-cache' };
+      console.warn('[BlueSales UI sync]', session.uiSyncMessage);
+      return null;
+    }
+  })();
+  session.uiSyncPromise=runner;
+  try{return await runner;}finally{if(session.uiSyncPromise===runner)session.uiSyncPromise=null;}
+}
+
+function accountStyleProfile(session, users, customers) {
+  const seed=loadBlueSalesUiSeed();
+  const statusColors={...BS_SCREENSHOT_STATUS_COLORS};
+  const managerColors={...BS_SCREENSHOT_MANAGER_COLORS,...(seed.managerColors||{}),...loadManagerColorOverrides()};
+  for(const u of loadUserAccess().users||[]) if(u?.name&&u?.color) managerColors[u.name]=u.color;
+  const tagColors={};
+  const tagTextColors={};
+  for(const x of seed.statuses||[]) if(x?.name&&x?.color) statusColors[x.name]=x.color;
+  for(const x of seed.tags||[]){
+    if(x?.name&&x?.color) tagColors[x.name]=x.color;
+    if(x?.name&&x?.textColor) tagTextColors[x.name]=x.textColor;
+  }
+  for (const u of users || []) if (u.name && u.color) managerColors[u.name] = u.color;
+  for (const c of customers || []) {
+    if (c.crmStatus && c.crmStatusColor) statusColors[c.crmStatus] = c.crmStatusColor;
+    if (c.manager && c.managerColor) managerColors[c.manager] = c.managerColor;
+    for(const t of c.tags || []){
+      if(t?.name && t?.color) tagColors[t.name]=t.color;
+      if(t?.name && t?.textColor) tagTextColors[t.name]=t.textColor;
+    }
+  }
+  const ui = session?.uiProfile || readUiSync(session?.login || '');
+  Object.assign(statusColors, ui?.statusColors || {});
+  Object.assign(managerColors, ui?.managerColors || {});
+  Object.assign(tagColors, ui?.tagColors || {});
+  Object.assign(tagTextColors, ui?.tagTextColors || {});
+  return {
+    statusColors, managerColors, tagColors, tagTextColors,
+    source: ui?.source || 'captured-bluesales-bootstrap+api+manager-overrides'
+  };
+}
+
+function attachmentId(prefix, x) {
+  const owner = Number(x?.owner_id || 0), id = Number(x?.id || x?.video_id || 0);
+  if (!owner || !id) return '';
+  const access = String(x?.access_key || '');
+  return `${prefix}${owner}_${id}${access ? `_${access}` : ''}`;
+}
+
+async function postMultipart(uploadUrl, fieldName, buffer, filename, mimeType) {
+  const form = new FormData();
+  form.append(fieldName, new Blob([buffer], { type: mimeType || 'application/octet-stream' }), filename || 'file');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(API_TIMEOUT_MS, 60000));
+  try {
+    const response = await fetch(uploadUrl, { method:'POST', body:form, signal:controller.signal });
+    const text = await response.text();
+    let data = null; try { data = JSON.parse(text); } catch {}
+    if (!response.ok) throw new VkApiError(`VK upload HTTP ${response.status}: ${blueSalesBodySnippet(text, 450)}`, 'VK_UPLOAD');
+    if (!data) throw new VkApiError(`VK upload вернул не JSON: ${blueSalesBodySnippet(text, 450)}`, 'VK_UPLOAD');
+    return data;
+  } finally { clearTimeout(timer); }
+}
+
+async function uploadVkDocument(session, peerId, buffer, filename, mimeType, type='doc') {
+  const p = { peer_id: peerId, type: type === 'audio_message' ? 'audio_message' : 'doc' };
+  const info = await vkCall(session.vkToken, 'docs.getMessagesUploadServer', p);
+  const uploaded = await postMultipart(info?.upload_url, 'file', buffer, filename, mimeType);
+  const saved = await vkCall(session.vkToken, 'docs.save', { file: uploaded?.file, title: filename || 'Файл' });
+  const obj = saved?.audio_message || saved?.doc || saved?.graffiti || (Array.isArray(saved) ? saved[0] : null);
+  const attachment = attachmentId('doc', obj);
+  if (!attachment) throw new VkApiError('VK сохранил файл, но не вернул owner_id/id', 'VK_UPLOAD', saved);
+  return { attachment, kind: type, raw: saved };
+}
+
+function safeVkPhotoFilename(filename, mimeType) {
+  const mt = String(mimeType || '').toLowerCase();
+  const name = String(filename || '').toLowerCase();
+  if (mt.includes('png') || name.endsWith('.png')) return 'upload.png';
+  if (mt.includes('gif') || name.endsWith('.gif')) return 'upload.gif';
+  if (mt.includes('webp') || name.endsWith('.webp')) return 'upload.webp';
+  return 'upload.jpg';
+}
+
+function serializeVkMessagePhoto(value) {
+  if (typeof value === 'string') return value.trim();
+  if (Array.isArray(value) || (value && typeof value === 'object')) {
+    try { return JSON.stringify(value); } catch { return ''; }
+  }
+  return value === undefined || value === null ? '' : String(value);
+}
+
+function validVkMessagePhotoUpload(data){
+  const photo = serializeVkMessagePhoto(data?.photo);
+  return Boolean(data && photo && photo !== '[]' && photo !== '{}' && data.server !== undefined && data.server !== null && data.hash);
+}
+
+function retryableVkPhotoSaveError(err) {
+  const msg = String(err?.message || '');
+  return String(err?.code || '') === 'VK_100' || /photos_list is invalid|photo is undefined/i.test(msg);
+}
+
+async function uploadAndSaveVkMessagePhoto(session, peerId, info, buffer, filename, mimeType){
+  if(!info?.upload_url)throw new VkApiError('VK не вернул upload_url для фото', 'VK_UPLOAD', info);
+  const safeName = safeVkPhotoFilename(filename, mimeType);
+  const isBulk = /\/v2\/bulk_upload(?:\?|$)/i.test(String(info.upload_url));
+  const fields = isBulk ? ['photo','file','file1'] : ['photo','file'];
+  const attempts = [];
+  let lastError = null;
+
+  for(const fieldName of fields){
+    try{
+      const uploaded = await postMultipart(info.upload_url, fieldName, buffer, safeName, mimeType || 'image/jpeg');
+      const photo = serializeVkMessagePhoto(uploaded?.photo);
+      const record = {
+        fieldName,
+        keys:Object.keys(uploaded||{}),
+        hasPhoto:validVkMessagePhotoUpload(uploaded),
+        photoType:Array.isArray(uploaded?.photo)?'array':typeof uploaded?.photo
+      };
+      attempts.push(record);
+      if(!validVkMessagePhotoUpload(uploaded))continue;
+
+      console.log(`[VK upload] photo peer=${peerId} field=${fieldName} bytes=${buffer.length} endpoint=${isBulk?'bulk':'classic'}`);
+      try{
+        const saved = await vkCall(session.vkToken, 'photos.saveMessagesPhoto', {
+          photo,
+          server: uploaded.server,
+          hash: uploaded.hash
+        });
+        return {saved, fieldName, endpoint:isBulk?'bulk':'classic'};
+      }catch(err){
+        lastError = err;
+        record.saveError = err?.code || err?.message || 'save failed';
+        if(retryableVkPhotoSaveError(err))continue;
+        throw err;
+      }
+    }catch(err){
+      lastError = err;
+      attempts.push({fieldName, uploadError:err?.code || err?.message || 'upload failed'});
+    }
+  }
+
+  if(isBulk){
+    throw new VkApiError(
+      'VK вернул временный v2/bulk_upload без совместимого поля photo. Повторите отправку через несколько секунд; CRM не будет передавать пустой photos_list.',
+      'VK_UPLOAD_BULK_INCOMPATIBLE',
+      {attempts}
+    );
+  }
+  if(lastError && !retryableVkPhotoSaveError(lastError))throw lastError;
+  throw new VkApiError(
+    'VK upload не удалось сохранить: upload-сервер не вернул корректные photo/server/hash или VK отклонил photos_list.',
+    'VK_UPLOAD_BAD_RESPONSE',
+    {attempts}
+  );
+}
+
+async function uploadVkMedia(session, { peerId, type, filename, mimeType, dataBase64 }) {
+  const buffer = Buffer.from(String(dataBase64 || ''), 'base64');
+  if (!buffer.length) throw Object.assign(new Error('Файл пустой'), {status:400});
+  if (buffer.length > 30 * 1024 * 1024) throw Object.assign(new Error('Файл больше 30 МБ'), {status:413});
+  if (type === 'photo') {
+    // VK API schema for photos.getMessagesUploadServer accepts peer_id for user/group tokens.
+    // Do not add group_id here: it is not a parameter of this method.
+    const info = await vkCall(session.vkToken, 'photos.getMessagesUploadServer', { peer_id: peerId });
+    const result = await uploadAndSaveVkMessagePhoto(session, peerId, info, buffer, filename || 'photo.jpg', mimeType || 'image/jpeg');
+    const saved = result.saved;
+    const photo = Array.isArray(saved) ? saved[0] : saved?.[0] || saved;
+    const attachment = attachmentId('photo', photo);
+    if (!attachment) throw new VkApiError('VK сохранил фото, но не вернул owner_id/id', 'VK_UPLOAD', saved);
+    return { attachment, kind:'photo' };
+  }
+  if (type === 'audio_message') return uploadVkDocument(session, peerId, buffer, filename || 'voice.ogg', mimeType || 'audio/ogg', 'audio_message');
+  if (type === 'video') {
+    try {
+      const p = { name: filename || 'Видео из CRM', is_private: 1 }; if (session.vkGroupId) p.group_id = session.vkGroupId;
+      const info = await vkCall(session.vkToken, 'video.save', p);
+      if (!info?.upload_url) throw new VkApiError('VK не вернул upload_url для видео', 'VK_UPLOAD', info);
+      await postMultipart(info.upload_url, 'video_file', buffer, filename || 'video.mp4', mimeType || 'video/mp4');
+      const owner = Number(info?.owner_id || (session.vkGroupId ? -Math.abs(session.vkGroupId) : 0));
+      const vid = Number(info?.video_id || 0);
+      const attachment = owner && vid ? `video${owner}_${vid}` : '';
+      if (!attachment) throw new VkApiError('VK не вернул video_id', 'VK_UPLOAD', info);
+      return { attachment, kind:'video' };
+    } catch (err) {
+      console.warn('[VK video] video.save недоступен, отправляю видео как документ:', err?.message || err);
+      return uploadVkDocument(session, peerId, buffer, filename || 'video.mp4', mimeType || 'video/mp4', 'doc');
+    }
+  }
+  return uploadVkDocument(session, peerId, buffer, filename || 'file', mimeType || 'application/octet-stream', 'doc');
+}
+
+async function createCustomerFromDraft(session, draft) {
+  const vkId = Number(draft?.vkId || 0);
+  if (vkId > 0) {
+    const existing = await getCustomerByVkId(session, vkId);
+    if (existing?.id) return { created:false, client:existing };
+  }
+  const payload = {
+    fullName: String(draft?.fullName || '').trim() || (vkId ? `VK ${vkId}` : 'Новый клиент'),
+    firstContactDate: String(draft?.firstContactDate || ymdLocal())
+  };
+  if (vkId > 0) payload.vk = { id:String(vkId), name:String(draft?.vkName || '') };
+  if (draft?.city) payload.city = { name:String(draft.city) };
+  if (draft?.crmStatus) payload.crmStatus = { name:String(draft.crmStatus) };
+  if (draft?.nextContactDate) payload.nextContactDate = String(draft.nextContactDate);
+  if (draft?.phone) payload.phone = String(draft.phone);
+  if (draft?.email) payload.email = String(draft.email);
+  if (draft?.managerLogin) payload.manager = { login:String(draft.managerLogin) };
+  if (draft?.shortNotes) payload.shortNotes = String(draft.shortNotes);
+  if (draft?.comments) payload.comments = String(draft.comments);
+
+  let raw;
+  try {
+    raw = await bsCall(session, 'customers.add', payload);
+  } catch (err) {
+    // Some BlueSales installations currently return an internal HTML error on customers.add.
+    // The public API also exposes customers.addMany; use a one-item batch as a compatibility fallback.
+    if (!['BAD_RESPONSE','HTTP','API'].includes(String(err?.code || ''))) throw err;
+    console.warn('[BlueSales customers.add] пробую совместимый fallback customers.addMany');
+    raw = await bsCall(session, 'customers.addMany', [payload]);
+  }
+  clearAccountCache(session.login);
+  let client = null;
+  if (vkId > 0) {
+    try { client = await getCustomerByVkId(session, vkId); } catch {}
+  }
+  if (!client) {
+    const candidate = Array.isArray(raw) ? raw[0] : raw?.customer || raw?.Customer || raw;
+    client = normalizeCustomer(candidate || payload);
+  }
+  return { created:true, client };
+}
+
+
+// -----------------------------------------------------------------------------
+// v22.0: local mirror of BlueSales system-user permissions and admin phrase CRUD.
+// Public BlueSales API exposes users.get but no documented users.add/update or
+// permission/quick-phrase write API. Therefore users are read from users.get and
+// enriched with the exact roles/status/section access shown in the user's
+// BlueSales "Пользователи системы" screenshots. Phrase editing is persisted
+// locally and remains scoped by the BlueSales Managers column.
+// -----------------------------------------------------------------------------
+const ADMIN_SECTION_KEYS = [
+  'Клиенты','Заказы','Мессенджер','Рассылки','Боты','Выручка и конверсия',
+  'Выручка по источникам','Выручка по менеджерам','Предоплаты от клиентов',
+  'Продажи по услугам','Быстрые фразы','Справочники'
+];
+
+function userAccessPath(){ return path.join(ROOT,'data','user-access.json'); }
+function loadUserAccess(){
+  try{
+    const raw=JSON.parse(fs.readFileSync(userAccessPath(),'utf8'));
+    return Array.isArray(raw?.users)?raw:{version:1,users:[]};
+  }catch{return {version:1,users:[]};}
+}
+function saveUserAccess(raw){
+  const out={version:Number(raw?.version||1),source:raw?.source||'mobile-admin',updatedAt:new Date().toISOString(),users:Array.isArray(raw?.users)?raw.users:[]};
+  fs.writeFileSync(userAccessPath(),JSON.stringify(out,null,2),'utf8');
+  return out;
+}
+function accessRecordFor(value){
+  const key=String(value?.login||value?.email||value?.name||value?.id||value||'').trim().toLowerCase();
+  if(!key)return null;
+  return loadUserAccess().users.find(u=>[u.login,u.email,u.name,u.id].some(x=>String(x||'').trim().toLowerCase()===key))||null;
+}
+function decorateUserAccess(user){
+  const u={...(user||{})};
+  const rec=accessRecordFor(u)||null;
+  if(rec){
+    u.role=rec.role||u.role||'manager';
+    u.status=rec.status||u.status||'active';
+    u.sections=Array.isArray(rec.sections)?rec.sections:[];
+    u.color=rec.color||u.color||'';
+    u.email=rec.email||u.email||u.login||'';
+    u.blueSalesEditUrl=rec.blueSalesEditUrl||'';
+  }else{
+    u.role=u.role||'manager';u.status=u.status||'active';u.sections=Array.isArray(u.sections)?u.sections:[];
+  }
+  return u;
+}
+function isAdminRole(role){
+  return ['admin','administrator','creator_admin','creator'].includes(String(role||'').toLowerCase());
+}
+function isAdminSession(session){
+  return isAdminRole(decorateUserAccess(session?.currentUser||{login:session?.login}).role);
+}
+function requireAdminSession(session,res){
+  if(!isAdminSession(session)){sendJson(res,403,{ok:false,error:'ADMIN_REQUIRED',message:'Раздел доступен только администраторам BlueSales.'});return false;}
+  return true;
+}
+function phraseStore(){
+  try{
+    const raw=JSON.parse(fs.readFileSync(quickPhrasesPath(),'utf8'));
+    if(raw&&Array.isArray(raw.groups))return raw;
+  }catch{}
+  return {version:4,source:'mobile-admin',groups:[]};
+}
+function savePhraseStore(store){
+  const safe={...(store||{}),version:Math.max(Number(store?.version||4),4),source:store?.source||'mobile-admin',updatedAt:new Date().toISOString(),groups:Array.isArray(store?.groups)?store.groups:[]};
+  fs.writeFileSync(quickPhrasesPath(),JSON.stringify(safe,null,2),'utf8');
+  return safe;
+}
+function phraseId(){return 'p-'+crypto.randomBytes(7).toString('hex');}
+function groupId(name){return 'g-'+crypto.createHash('sha1').update(String(name||'Без раздела')).digest('hex').slice(0,10);}
+function cleanPhraseInput(b){
+  const rawText=String(b?.text||'').replace(/\r\n/g,'\n');
+  const attachmentRe=/\[((?:photo|video|doc|audio_message)-?\d+_\d+(?:_[A-Za-z0-9]+)?)\]/gi;
+  const fromText=[];
+  let m;
+  while((m=attachmentRe.exec(rawText))) fromText.push(m[1]);
+  const fromField=(Array.isArray(b?.attachments)?b.attachments:[]).map(x=>String(x||'').trim());
+  const attachments=[...new Set([...fromField,...fromText].filter(x=>/^(?:photo|video|doc|audio_message)-?\d+_\d+(?:_[A-Za-z0-9]+)?$/i.test(x)))];
+  // BlueSales stores VK attachments alongside the phrase. If an admin pastes
+  // [photo...], [video...], [audio_message...] or [doc...] back into the text,
+  // keep it as a real attachment instead of showing the service token to the client.
+  const text=rawText.replace(attachmentRe,'').replace(/\n{3,}/g,'\n\n').trim();
+  return {
+    name:String(b?.name||'').trim(),
+    text,
+    hotkey:String(b?.hotkey||'').trim(),
+    managers:(Array.isArray(b?.managers)?b.managers:[]).map(x=>String(x||'').trim()).filter(Boolean),
+    attachments
+  };
+}
+function findPhrase(store,id){
+  for(const g of store.groups||[]){
+    const i=(g.phrases||[]).findIndex(p=>String(p.id)===String(id));
+    if(i>=0)return {group:g,index:i,phrase:g.phrases[i]};
+  }
+  return null;
+}
+function ensurePhraseGroup(store,name){
+  const n=String(name||'Без раздела').trim()||'Без раздела';
+  let g=(store.groups||[]).find(x=>String(x.name||'').trim().toLowerCase()===n.toLowerCase());
+  if(!g){g={id:groupId(n),name:n,phrases:[]};store.groups.push(g);}
+  if(!Array.isArray(g.phrases))g.phrases=[];
+  return g;
+}
+function movePhraseInStore(store,id,{groupName='',beforeId='',afterId='',index=null,position=''}={}){
+  const found=findPhrase(store,id);
+  if(!found)return null;
+  const phrase=found.phrase;
+  const sourceName=found.group.name;
+  found.group.phrases.splice(found.index,1);
+  const target=ensurePhraseGroup(store,String(groupName||sourceName).trim()||sourceName);
+  let targetIndex=target.phrases.length;
+  if(beforeId){
+    const i=target.phrases.findIndex(p=>String(p.id)===String(beforeId));
+    if(i>=0)targetIndex=i;
+  }else if(afterId){
+    const i=target.phrases.findIndex(p=>String(p.id)===String(afterId));
+    if(i>=0)targetIndex=i+1;
+  }else if(Number.isFinite(Number(index))){
+    targetIndex=Math.max(0,Math.min(target.phrases.length,Number(index)));
+  }else if(position==='start'){
+    targetIndex=0;
+  }
+  target.phrases.splice(targetIndex,0,phrase);
+  store.groups=store.groups.filter(g=>(g.phrases||[]).length);
+  return {phrase,group:target.name,index:targetIndex,fromGroup:sourceName};
+}
+async function adminUsersForSession(session){
+  let apiUsers=[];
+  try{
+    const raw=await bsCall(session,'users.get',null);
+    apiUsers=arrayFromResponse(raw,['users','Users']).map(normalizeUser);
+  }catch(err){console.warn('[Admin users] users.get:',err?.message||err);}
+  const seed=loadUserAccess().users||[];
+  const out=[];const seen=new Set();
+  for(const raw of [...apiUsers,...seed]){
+    const u=decorateUserAccess(raw);
+    const k=String(u.login||u.id||u.name).toLowerCase();
+    if(!k||seen.has(k))continue;seen.add(k);out.push(u);
+  }
+  return out;
+}
+
+async function apiRouter(req, res, url) {
+  const pathname = url.pathname;
+
+  if (pathname === '/api/health' && req.method === 'GET') {
+    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null });
+  }
+
+  if (pathname === '/api/auth/login' && req.method === 'POST') {
+    const body = await readJson(req);
+    const login = String(body.login || '').trim();
+    const password = String(body.password || '');
+    const vkToken = PRESET_VK_TOKEN;
+    const vkGroupId = PRESET_VK_COMMUNITY || null;
+    if (!login || !password) return sendJson(res, 400, { ok: false, message: 'Введите логин и пароль BlueSales' });
+    if (!vkToken) return sendJson(res, 500, { ok: false, message: 'VK не настроен на сервере. Проверьте файл .env.local.' });
+    const probe = { login, passwordHash: md5Upper(password) };
+    let users, vkInfo;
+    try {
+      [users, vkInfo] = await Promise.all([bsCall(probe, 'users.get', null), probeVk(vkToken, vkGroupId)]);
+    } catch (err) { return handleApiError(res, err); }
+    const userList = arrayFromResponse(users, ['users', 'Users']).map(normalizeUser).map(decorateUserAccess);
+    const currentUser = decorateUserAccess(currentUserFrom(userList, login));
+    const sid = randomToken();
+    const cachedUi = readUiSync(login);
+    const s = {
+      login,
+      passwordHash: probe.passwordHash,
+      webPassword: password, // RAM only; never written to disk; used for manual BlueSales UI re-sync
+      currentUser,
+      uiProfile: cachedUi ? { ...cachedUi, source: 'bluesales-web-cache' } : null,
+      uiSyncState: cachedUi ? 'cached' : 'pending',
+      uiSyncMessage: '',
+      vkToken,
+      vkGroupId: vkInfo.groupId,
+      vkGroupName: vkInfo.groupName,
+      vkGroupScreenName: vkInfo.groupScreenName || '',
+      vkGroupPhoto: vkInfo.groupPhoto,
+      csrf: randomToken(16),
+      expiresAt: now() + SESSION_TTL_MS,
+      createdAt: now()
+    };
+    sessions.set(sid, s);
+    // Best-effort account sync: uses the same BlueSales credentials only to create an in-memory
+    // authenticated web session and read the account's own Quick Phrases / UI metadata.
+    // The plaintext password is not stored in the mobile session or written to disk.
+    setImmediate(() => syncBlueSalesUi(s, password, userList).catch(err => console.warn('[BlueSales UI sync background]', err?.message || err)));
+    return sendJson(res, 200, {
+      ok: true, authenticated: true, login, csrf: s.csrf, users: userList, account: currentUser, isAdmin:isAdminSession(s), shareBaseUrl:shareBaseUrl(req),
+      uiSync: { state: s.uiSyncState, source: s.uiProfile?.source || null },
+      vk: { connected: true, groupId: s.vkGroupId, groupName: s.vkGroupName, groupScreenName: s.vkGroupScreenName || '', groupUrl: PRESET_VK_COMMUNITY_URL || '', groupPhoto: s.vkGroupPhoto, conversationsCount: vkInfo.conversationsCount }
+    }, { 'Set-Cookie': sessionCookie(sid, req) });
+  }
+
+  if (pathname === '/api/auth/logout' && req.method === 'POST') {
+    const cookies = parseCookies(req);
+    if (cookies[COOKIE_NAME]) sessions.delete(cookies[COOKIE_NAME]);
+    return sendJson(res, 200, { ok: true }, { 'Set-Cookie': clearSessionCookie(req) });
+  }
+
+  if (pathname === '/api/session' && req.method === 'GET') {
+    const s = getSession(req);
+    if (!s) return sendJson(res, 200, { authenticated: false, version: VERSION });
+    return sendJson(res, 200, { authenticated: true, login: s.login, csrf: s.csrf, version: VERSION, shareBaseUrl:shareBaseUrl(req), account: decorateUserAccess(s.currentUser || {login:s.login}), isAdmin:isAdminSession(s), uiSync: {state:s.uiSyncState || 'unknown', source:s.uiProfile?.source || null, message:s.uiSyncMessage || ''}, vk: { connected: Boolean(s.vkToken), groupId: s.vkGroupId || null, groupName: s.vkGroupName || 'VK Сообщество', groupScreenName: s.vkGroupScreenName || '', groupUrl: PRESET_VK_COMMUNITY_URL || '', groupPhoto: s.vkGroupPhoto || '' } });
+  }
+
+  const s = requireAuth(req, res);
+  if (!s) return;
+
+  if (pathname === '/api/activity' && req.method === 'POST') {
+    if (!requireCsrf(req, res, s)) return;
+    try {
+      const b=await readJson(req);
+      const action=String(b.action||'activity').replace(/[^a-zA-Z0-9_.:-]/g,'-').slice(0,80);
+      const details=safeUiDetails(b.details||'');
+      console.log(`[UI] ${s.login} ${action}${details?` | ${details}`:''}`);
+      return sendJson(res,200,{ok:true});
+    } catch(err) { return handleApiError(res,err); }
+  }
+
+  if (pathname === '/api/media' && req.method === 'GET') {
+    return proxyVkMedia(req, res, url.searchParams.get('url'));
+  }
+
+  if (pathname === '/api/vk/status' && req.method === 'GET') {
+    try {
+      const params = { count: 1, extended: 1 };
+      if (s.vkGroupId) params.group_id = s.vkGroupId;
+      const raw = await vkCall(s.vkToken, 'messages.getConversations', params);
+      return sendJson(res, 200, { ok: true, connected: true, groupId: s.vkGroupId || null, groupName: s.vkGroupName || 'VK Сообщество', conversationsCount: Number(raw?.count || 0) });
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  if (pathname === '/api/vk/dialogs' && req.method === 'GET') {
+    try {
+      const count = Math.min(Math.max(Number(url.searchParams.get('count') || 50), 1), 200);
+      const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
+      const q = String(url.searchParams.get('q') || '').trim();
+      const filter = ['all','unread','unanswered','important','archive'].includes(String(url.searchParams.get('filter') || 'all')) ? String(url.searchParams.get('filter') || 'all') : 'all';
+      let raw, dialogs;
+      if (q) {
+        // v24.3: searchConversations discovers candidates; local ranking decides
+        // what is actually a match. This prevents VK's broad candidate count
+        // from being displayed as 50 unrelated results.
+        const exactPeerId = extractPeerIdFromDialogSearch(q);
+        if (exactPeerId) {
+          const params = { peer_ids: String(exactPeerId), extended: 1, fields: 'photo_100,screen_name' };
+          if (s.vkGroupId) params.group_id = s.vkGroupId;
+          try {
+            raw = await vkCall(s.vkToken, 'messages.getConversationsById', params);
+            const maps = vkIdentityMaps(raw || {});
+            dialogs = (raw?.items || []).map(x => normalizeVkDialog(x, maps)).filter(d => Number(d.peerId) === Number(exactPeerId));
+          } catch (directErr) {
+            console.warn('[Dialog exact lookup]', directErr?.message || directErr);
+            raw = { count: 0, items: [] };
+            dialogs = [];
+          }
+        } else {
+          const params = { q, count: Math.min(Math.max(count, 50), 100), extended: 1, fields: 'photo_100,screen_name' };
+          if (s.vkGroupId) params.group_id = s.vkGroupId;
+          raw = await vkCall(s.vkToken, 'messages.searchConversations', params);
+          const maps = vkIdentityMaps(raw || {});
+          dialogs = (raw?.items || []).map(x => normalizeVkConversation(x, maps));
+          dialogs = sortDialogsBySearchScore(dialogs, q);
+        }
+
+        const seenPeers = new Set(dialogs.map(d => Number(d.peerId)));
+        try {
+          const crmHits = [];
+          const digits = q.replace(/\D/g, '');
+          if (/^\d{5,}$/.test(digits)) {
+            try { crmHits.push(...(await getCustomersPage(s, { count: 100, vkIds: [Number(digits)] })).customers); } catch {}
+            try { crmHits.push(...(await getCustomersPage(s, { count: 100, phone: digits })).customers); } catch {}
+          }
+          if (!exactPeerId && (dialogs.length === 0 || /[@+\d]/.test(q))) {
+            const all = await getAllCustomersComplete(s);
+            for (const c of all) if (dialogSearchScore(q, customerDialogSearchValues(c)) > 0) crmHits.push(c);
+          }
+
+          const uniqueCrm = new Map(crmHits.map(c => [String(c.id || c.social?.vkId || ''), c]));
+          const rankedCrm = [...uniqueCrm.values()]
+            .map(c => ({c, score: dialogSearchScore(q, customerDialogSearchValues(c))}))
+            .filter(x => x.score > 0)
+            .sort((a,b) => b.score - a.score)
+            .slice(0, 100)
+            .map(x => x.c);
+
+          for (const c of rankedCrm) {
+            const peerId = Number(c.social?.vkId || 0);
+            if (!peerId || seenPeers.has(peerId)) continue;
+            seenPeers.add(peerId);
+            dialogs.push({
+              id:String(peerId), peerId, peerType:'user', name:c.fullName || `VK ${peerId}`, avatar:'', unreadCount:0,
+              lastMessage:'', lastMessageAt:0, lastMessageOut:false, lastMessageAuthorId:0,
+              crm:{clientId:c.id,fullName:c.fullName,phone:c.phone,email:c.email,vkId:c.social?.vkId,crmStatus:c.crmStatus,crmStatusColor:c.crmStatusColor,manager:c.manager,managerColor:c.managerColor,tags:c.tags,nextContactDate:c.nextContactDate}
+            });
+          }
+          dialogs = sortDialogsBySearchScore(dialogs, q).slice(0, count);
+        } catch (crmSearchErr) {
+          console.warn('[Dialog CRM search]', crmSearchErr?.message || crmSearchErr);
+          dialogs = sortDialogsBySearchScore(dialogs, q).slice(0, count);
+        }
+            } else {
+        const params = { count, offset, filter, extended: 1, fields: 'photo_100,screen_name' };
+        if (s.vkGroupId) params.group_id = s.vkGroupId;
+        raw = await vkCall(s.vkToken, 'messages.getConversations', params);
+        const maps = vkIdentityMaps(raw || {});
+        dialogs = (raw?.items || []).map(x => normalizeVkDialog(x, maps));
+      }
+
+      // Link VK users to BlueSales CRM cards by VK id. Cached for 45s so polling does not hammer BlueSales.
+      const vkIds = dialogs.filter(d => d.peerType === 'user' && d.peerId > 0).map(d => d.peerId).slice(0, 500);
+      if (vkIds.length) {
+        try {
+          const linked = await getCustomersByVkIds(s, vkIds);
+          const byVk = new Map(linked.filter(c => c.social?.vkId).map(c => [Number(c.social.vkId), c]));
+          for (const d of dialogs) {
+            const c = byVk.get(d.peerId);
+            if (c) d.crm = { clientId: c.id, crmStatus: c.crmStatus, crmStatusColor:c.crmStatusColor, manager: c.manager, managerColor:c.managerColor, tags: c.tags, nextContactDate: c.nextContactDate };
+          }
+        } catch (linkErr) {
+          console.warn('[VK->BlueSales link]', linkErr?.message || linkErr);
+        }
+      }
+      const rawCount = Number(raw?.count || 0);
+      const total = q ? dialogs.length : Number(raw?.count || dialogs.length);
+      return sendJson(res, 200, { ok: true, dialogs, count: total, rawCount: q ? rawCount : undefined, offset: q ? 0 : offset, hasMore: q ? false : offset + dialogs.length < total, search: q || null });
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  const vkMessagesMatch = pathname.match(/^\/api\/vk\/dialogs\/(-?\d+)\/messages$/);
+  if (vkMessagesMatch && req.method === 'GET') {
+    try {
+      const peerId = Number(vkMessagesMatch[1]);
+      const count = Math.min(Math.max(Number(url.searchParams.get('count') || 100), 1), 200);
+      const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
+      const params = { peer_id: peerId, count, offset, extended: 1, fields: 'photo_100,screen_name' };
+      if (s.vkGroupId) params.group_id = s.vkGroupId;
+      const raw = await vkCall(s.vkToken, 'messages.getHistory', params);
+      const maps = vkIdentityMaps(raw || {});
+      const messages = (raw?.items || []).map(m => normalizeVkMessage(m, maps)).reverse();
+      let crm = null;
+      if (peerId > 0 && peerId < 2000000000) {
+        try {
+          const c = await getCustomerByVkId(s, peerId);
+          if (c) crm = c;
+        } catch (linkErr) { console.warn('[VK chat CRM link]', linkErr?.message || linkErr); }
+      }
+      let peer = { peerId, peerType: peerId >= 2000000000 ? 'chat' : (peerId < 0 ? 'group' : 'user'), name: '', avatar: '' };
+      if (peer.peerType === 'user') {
+        const p = maps.profiles.get(peerId);
+        if (p) { peer.name = `${p.first_name || ''} ${p.last_name || ''}`.trim(); peer.avatar = String(p.photo_100 || ''); }
+      } else if (peer.peerType === 'group') {
+        const g = maps.groups.get(Math.abs(peerId));
+        if (g) { peer.name = String(g.name || ''); peer.avatar = String(g.photo_100 || ''); }
+      }
+      if (!peer.name && crm?.fullName) peer.name = crm.fullName;
+      if (!peer.name) peer.name = peer.peerType === 'chat' ? `Беседа ${peerId}` : `VK ${peerId}`;
+      return sendJson(res, 200, { ok: true, peerId, peer, messages, total: Number(raw?.count || messages.length), crm });
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  if (vkMessagesMatch && req.method === 'POST') {
+    if (!requireCsrf(req, res, s)) return;
+    try {
+      const peerId = Number(vkMessagesMatch[1]);
+      const b = await readJson(req);
+      const message = String(b.message || '').trim();
+      const attachment = String(b.attachment || '').trim();
+      const stickerId = Number(b.stickerId || 0);
+      if (!message && !attachment && !stickerId) return sendJson(res, 400, { ok: false, message: 'Введите сообщение или прикрепите файл' });
+      const params = { peer_id: peerId, random_id: crypto.randomInt(1, 2147483647) };
+      if (message) params.message = message;
+      if (attachment) params.attachment = attachment;
+      if (stickerId) params.sticker_id = stickerId;
+      if (s.vkGroupId) params.group_id = s.vkGroupId;
+      const messageId = await vkCall(s.vkToken, 'messages.send', params);
+      return sendJson(res, 200, { ok: true, messageId });
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  if (pathname === '/api/vk/upload' && req.method === 'POST') {
+    if (!requireCsrf(req, res, s)) return;
+    try {
+      const b = await readJson(req, 45 * 1024 * 1024);
+      const peerId = Number(b.peerId || 0);
+      const type = String(b.type || 'doc');
+      if (!peerId || !b.dataBase64) return sendJson(res, 400, {ok:false,message:'Нужны peerId и файл'});
+      const result = await uploadVkMedia(s, {peerId,type,filename:String(b.filename||'file'),mimeType:String(b.mimeType||''),dataBase64:String(b.dataBase64||'')});
+      return sendJson(res, 200, {ok:true,...result});
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  const vkCreateClientMatch = pathname.match(/^\/api\/vk\/dialogs\/(\d+)\/create-client$/);
+  if (vkCreateClientMatch && req.method === 'POST') {
+    if (!requireCsrf(req, res, s)) return;
+    try {
+      const vkId = Number(vkCreateClientMatch[1]);
+      const b = await readJson(req);
+      if (!Number.isFinite(vkId) || vkId <= 0) return sendJson(res, 400, { ok:false, message:'Некорректный VK ID' });
+      let profile = null;
+      try {
+        const rawProfile = await vkCall(s.vkToken, 'users.get', { user_ids:String(vkId), fields:'photo_100,city,screen_name' });
+        profile = Array.isArray(rawProfile) ? rawProfile[0] : null;
+      } catch {}
+      const result = await createCustomerFromDraft(s, {
+        ...b,
+        vkId,
+        vkName: String(profile?.screen_name || b?.vkName || ''),
+        fullName: String(b?.fullName || (profile ? `${profile.first_name || ''} ${profile.last_name || ''}`.trim() : `VK ${vkId}`)),
+        city: String(b?.city || profile?.city?.title || '')
+      });
+      return sendJson(res, 200, {ok:true,...result});
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  if (pathname === '/api/clients' && req.method === 'POST') {
+    if (!requireCsrf(req, res, s)) return;
+    try {
+      const b = await readJson(req);
+      const result = await createCustomerFromDraft(s, b);
+      return sendJson(res, 200, {ok:true,...result});
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  if (pathname === '/api/account-ui/import' && req.method === 'POST') {
+    if (!requireCsrf(req, res, s)) return;
+    try {
+      const b = await readJson(req, 6 * 1024 * 1024);
+      const html = String(b.html || '');
+      if (!html.trim()) return sendJson(res, 400, {ok:false,message:'HTML пустой'});
+      const parsed = BlueSalesWeb.parseImportedHtml(html,{currentUser:s.currentUser,login:s.login});
+      const seed=loadBlueSalesUiSeed();
+      const previous=s.uiProfile || readUiSync(s.login) || {};
+      const ms=parsed.messenger||{};
+      const profile={
+        ...previous,
+        ok:true,
+        source:'bluesales-html-import',
+        phrases:(parsed.phrases&&parsed.phrases.length)?parsed.phrases:(previous.phrases||[]),
+        statusColors:{...(previous.statusColors||{}),...(ms.statusColors||{})},
+        tagColors:{...(previous.tagColors||{}),...(ms.tagColors||{})},
+        tagTextColors:{...(previous.tagTextColors||{}),...(ms.tagTextColors||{})},
+        managerColors:{...(previous.managerColors||{})},
+        managers:(ms.managers&&ms.managers.length)?ms.managers:(previous.managers||seed.managers||[]),
+        statuses:(ms.statuses&&ms.statuses.length)?ms.statuses:(previous.statuses||seed.statuses||[]),
+        tags:(ms.tags&&ms.tags.length)?ms.tags:(previous.tags||seed.tags||[]),
+        loggedManager:ms.loggedManager||previous.loggedManager||null,
+        selectedManagerId:ms.selectedManagerId||previous.selectedManagerId||'',
+        capabilities:{...(previous.capabilities||{}),quickPhrases:Boolean((parsed.phrases||[]).length||(previous.phrases||[]).length)},
+        discovered:{...(previous.discovered||{}),imported:true},
+        savedAt:new Date().toISOString()
+      };
+      s.uiProfile=profile;
+      s.uiSyncState='imported';
+      s.uiSyncMessage='';
+      if(ms.loggedManager && String(ms.loggedManager.login||'').toLowerCase()===String(s.login||'').toLowerCase()){
+        s.currentUser=normalizeUser(ms.loggedManager);
+      }
+      writeUiSync(s.login,profile);
+      clearAccountCache(s.login);
+      return sendJson(res,200,{
+        ok:true,
+        source:profile.source,
+        phrases:{groups:(profile.phrases||[]).length,count:(profile.phrases||[]).reduce((n,g)=>n+(g.phrases||[]).length,0)},
+        dictionaries:{managers:(profile.managers||[]).length,statuses:(profile.statuses||[]).length,tags:(profile.tags||[]).length},
+        message:'HTML BlueSales сохранён только для текущего логина.'
+      });
+    } catch(err){ return handleApiError(res,err); }
+  }
+
+  if (pathname === '/api/account-ui/sync' && req.method === 'POST') {
+    if (!requireCsrf(req, res, s)) return;
+    try {
+      const usersRaw = await bsCall(s, 'users.get', null);
+      const users = arrayFromResponse(usersRaw, ['users','Users']).map(normalizeUser);
+      s.currentUser = currentUserFrom(users, s.login);
+      const profile = await syncBlueSalesUi(s, s.webPassword, users, {force:true});
+      clearAccountCache(s.login);
+      const phrases = phrasePayloadForSession(s);
+      const style = accountStyleProfile(s, users, []);
+      return sendJson(res, profile?.ok ? 200 : 409, {
+        ok:Boolean(profile?.ok),
+        state:s.uiSyncState||'unknown',
+        message:s.uiSyncMessage||profile?.message||'',
+        source:s.uiProfile?.source||phrases.source||null,
+        quickPhrases:{groups:(phrases.groups||[]).length,count:(phrases.groups||[]).reduce((n,g)=>n+(g.phrases||[]).length,0),source:phrases.source},
+        colors:{statuses:Object.keys(style.statusColors||{}).length,tags:Object.keys(style.tagColors||{}).length,managers:Object.keys(style.managerColors||{}).length},
+        capabilities:phrases.capabilities||{}
+      });
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  if (pathname === '/api/quick-phrases' && req.method === 'GET') {
+    // The local BlueSales export is already account-filtered and must be immediately usable.
+    // Do not block the drawer while the optional BlueSales web UI sync is still busy.
+    const p = phrasePayloadForSession(s);
+    return sendJson(res, 200, {ok:true, manager:s.currentUser || {login:s.login}, groups:p.groups, source:p.source, message:p.message||'', syncedAt:p.syncedAt, uiSync:{state:s.uiSyncState||'unknown',message:s.uiSyncMessage||''}, capabilities:p.capabilities, discovered:p.discovered||{}, editUrl:p.discovered?.phraseUrl||null});
+  }
+
+
+  if (pathname === '/api/admin/overview' && req.method === 'GET') {
+    if(!requireAdminSession(s,res))return;
+    try{
+      const users=await adminUsersForSession(s);
+      const store=phraseStore();
+      const phraseCount=(store.groups||[]).reduce((n,g)=>n+(g.phrases||[]).length,0);
+      return sendJson(res,200,{ok:true,isAdmin:true,currentUser:decorateUserAccess(s.currentUser||{login:s.login}),users,sections:ADMIN_SECTION_KEYS,phraseCount,groupCount:(store.groups||[]).length});
+    }catch(err){return handleApiError(res,err);}
+  }
+
+  if (pathname === '/api/admin/users' && req.method === 'GET') {
+    if(!requireAdminSession(s,res))return;
+    try{return sendJson(res,200,{ok:true,users:await adminUsersForSession(s),sections:ADMIN_SECTION_KEYS});}
+    catch(err){return handleApiError(res,err);}
+  }
+
+  const adminUserMatch=pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+  if(adminUserMatch && req.method==='PUT'){
+    if(!requireAdminSession(s,res))return;
+    if(!requireCsrf(req,res,s))return;
+    try{
+      const key=decodeURIComponent(adminUserMatch[1]).toLowerCase();
+      const b=await readJson(req);
+      const data=loadUserAccess();
+      const rec=(data.users||[]).find(u=>[u.id,u.login,u.email,u.name].some(x=>String(x||'').toLowerCase()===key));
+      if(!rec)return sendJson(res,404,{ok:false,message:'Пользователь не найден'});
+      if(b.color!==undefined){
+        const c=String(b.color||'').trim();
+        if(c&&!/^#[0-9a-f]{6}$/i.test(c))return sendJson(res,400,{ok:false,message:'Цвет должен быть в формате #RRGGBB'});
+        rec.color=c;
+        const colors=loadManagerColorOverrides();if(c){colors[rec.name]=c;}else delete colors[rec.name];
+        fs.writeFileSync(managerColorsPath(),JSON.stringify(colors,null,2),'utf8');
+      }
+      if(b.role!==undefined && ['manager','admin','creator_admin'].includes(String(b.role)))rec.role=String(b.role);
+      if(b.status!==undefined && ['active','blocked'].includes(String(b.status)))rec.status=String(b.status);
+      if(Array.isArray(b.sections))rec.sections=b.sections.map(String).filter(x=>ADMIN_SECTION_KEYS.includes(x));
+      saveUserAccess(data);clearAccountCache(s.login);
+      return sendJson(res,200,{ok:true,user:decorateUserAccess(rec),message:'Настройки мобильной версии сохранены. Права самого BlueSales меняются только в BlueSales.'});
+    }catch(err){return handleApiError(res,err);}
+  }
+
+  if (pathname === '/api/admin/phrases' && req.method === 'GET') {
+    if(!requireAdminSession(s,res))return;
+    const store=phraseStore();
+    return sendJson(res,200,{ok:true,groups:store.groups||[],users:await adminUsersForSession(s)});
+  }
+  if (pathname === '/api/admin/phrases' && req.method === 'POST') {
+    if(!requireAdminSession(s,res))return;
+    if(!requireCsrf(req,res,s))return;
+    try{
+      const b=await readJson(req,2*1024*1024), phrase=cleanPhraseInput(b);
+      if(!phrase.name)return sendJson(res,400,{ok:false,message:'Введите название фразы'});
+      const store=phraseStore(),g=ensurePhraseGroup(store,b.groupName);
+      phrase.id=phraseId();g.phrases.push(phrase);savePhraseStore(store);clearAccountCache(s.login);
+      return sendJson(res,200,{ok:true,phrase,group:g.name});
+    }catch(err){return handleApiError(res,err);}
+  }
+  const adminPhraseMatch=pathname.match(/^\/api\/admin\/phrases\/([^/]+)$/);
+  if(adminPhraseMatch && req.method==='PUT'){
+    if(!requireAdminSession(s,res))return;
+    if(!requireCsrf(req,res,s))return;
+    try{
+      const id=decodeURIComponent(adminPhraseMatch[1]),b=await readJson(req,2*1024*1024),store=phraseStore(),found=findPhrase(store,id);
+      if(!found)return sendJson(res,404,{ok:false,message:'Фраза не найдена'});
+      const phrase={...cleanPhraseInput(b),id};
+      if(!phrase.name)return sendJson(res,400,{ok:false,message:'Введите название фразы'});
+      // v24.5: normal editing NEVER changes the section or position.
+      // Moving is a separate explicit action through /move.
+      found.group.phrases[found.index]=phrase;
+      savePhraseStore(store);
+      clearAccountCache(s.login);
+      return sendJson(res,200,{ok:true,phrase,group:found.group.name,index:found.index,moved:false});
+    }catch(err){return handleApiError(res,err);}
+  }
+  const adminPhraseMoveMatch=pathname.match(/^\/api\/admin\/phrases\/([^/]+)\/move$/);
+  if(adminPhraseMoveMatch && req.method==='POST'){
+    if(!requireAdminSession(s,res))return;
+    if(!requireCsrf(req,res,s))return;
+    try{
+      const id=decodeURIComponent(adminPhraseMoveMatch[1]),b=await readJson(req,512*1024),store=phraseStore();
+      const moved=movePhraseInStore(store,id,b||{});
+      if(!moved)return sendJson(res,404,{ok:false,message:'Фраза не найдена'});
+      savePhraseStore(store);
+      clearAccountCache(s.login);
+      console.log(`[UI] ${s.login} phrase-move | ${JSON.stringify({id,from:moved.fromGroup,to:moved.group,index:moved.index})}`);
+      return sendJson(res,200,{ok:true,...moved});
+    }catch(err){return handleApiError(res,err);}
+  }
+
+  if(adminPhraseMatch && req.method==='DELETE'){
+    if(!requireAdminSession(s,res))return;
+    if(!requireCsrf(req,res,s))return;
+    try{
+      const id=decodeURIComponent(adminPhraseMatch[1]),store=phraseStore(),found=findPhrase(store,id);
+      if(!found)return sendJson(res,404,{ok:false,message:'Фраза не найдена'});
+      found.group.phrases.splice(found.index,1);store.groups=store.groups.filter(x=>(x.phrases||[]).length);savePhraseStore(store);clearAccountCache(s.login);
+      return sendJson(res,200,{ok:true});
+    }catch(err){return handleApiError(res,err);}
+  }
+
+  if (pathname === '/api/debug/ui-sync' && req.method === 'GET') {
+    const p = phrasePayloadForSession(s);
+    const style = accountStyleProfile(s, [], []);
+    const count = (p.groups || []).reduce((n,g)=>n+(g.phrases||[]).length,0);
+    return sendJson(res, 200, {
+      ok:true, version:VERSION,
+      account:s.currentUser || {login:s.login},
+      uiSync:{state:s.uiSyncState||'unknown',source:s.uiProfile?.source||null,message:s.uiSyncMessage||'',syncedAt:p.syncedAt||null},
+      quickPhrases:{source:p.source,count,groups:(p.groups||[]).length,allowed:Boolean(p.capabilities?.quickPhrases ?? count)},
+      colors:{source:style.source,statuses:Object.keys(style.statusColors||{}).length,tags:Object.keys(style.tagColors||{}).length,managers:Object.keys(style.managerColors||{}).length},
+      capabilities:p.capabilities||{},
+      discovered:p.discovered||{}
+    });
+  }
+
+  if (pathname === '/api/debug/account-ui' && req.method === 'GET') {
+    const p = phrasePayloadForSession(s);
+    const style = accountStyleProfile(s, [], []);
+    return sendJson(res, 200, {
+      ok: true,
+      version: VERSION,
+      account: s.currentUser || { login:s.login },
+      sync: { state:s.uiSyncState || 'unknown', message:s.uiSyncMessage || '', source:s.uiProfile?.source || null, savedAt:s.uiProfile?.savedAt || p.syncedAt || null },
+      quickPhrases: { source:p.source, groups:(p.groups || []).length, count:(p.groups || []).reduce((n,g)=>n+(g.phrases||[]).length,0), editUrl:p.discovered?.phraseUrl || null, message:p.message || '' },
+      capabilities: p.capabilities || {},
+      colors: { source:style.source, statuses:style.statusColors, tags:style.tagColors, tagTextColors:style.tagTextColors, managers:style.managerColors }, dictionaries:{managers:(s.uiProfile?.managers||loadBlueSalesUiSeed().managers||[]).length,statuses:(s.uiProfile?.statuses||loadBlueSalesUiSeed().statuses||[]).length,tags:(s.uiProfile?.tags||loadBlueSalesUiSeed().tags||[]).length}
+    });
+  }
+
+  if (pathname === '/api/debug/bluesales'  && req.method === 'GET') {
+    try {
+      const result = { ok: true, version: VERSION, queue: { depth: blueSalesQueueDepth, gapMs: BS_QUEUE_GAP_MS }, tests: {} };
+      try {
+        const usersRaw = await bsCall(s, 'users.get', null);
+        result.tests.users = { ok: true, count: arrayFromResponse(usersRaw, ['users', 'Users']).length };
+      } catch (err) {
+        result.ok = false;
+        result.tests.users = { ok: false, code: err.code || 'ERROR', message: err.message, details: err.details || undefined };
+      }
+      try {
+        const page = await getCustomersPage(s, { count: 1, offset: 0 });
+        result.tests.customers = { ok: true, count: page.count, notReturnedCount: page.notReturnedCount, received: page.customers.length };
+      } catch (err) {
+        result.ok = false;
+        result.tests.customers = { ok: false, code: err.code || 'ERROR', message: err.message, details: err.details || undefined };
+      }
+      return sendJson(res, result.ok ? 200 : 502, result);
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  if (pathname === '/api/meta' && req.method === 'GET') {
+    try {
+      // v24.5 PERF: metadata must never scan the entire customer database.
+      // Statuses/tags/colors already come from the BlueSales UI profile/seed,
+      // while users.get is one small API call. This keeps Orders/Services from
+      // waiting behind dozens of customers.get pages in the organization queue.
+      const cacheKey = `${s.login}:meta:v24.5`;
+      const value = await cachedLoad(cacheKey, 5 * 60 * 1000, async () => {
+        const seed = loadBlueSalesUiSeed();
+        const ui = s.uiProfile || readUiSync(s.login) || {};
+        let users = [];
+        try {
+          const usersRaw = await cachedLoad(`${s.login}:users:v24.5`, 5 * 60 * 1000, () => bsCall(s, 'users.get', null));
+          users = arrayFromResponse(usersRaw, ['users', 'Users']).map(normalizeUser);
+        } catch (err) {
+          // Do not block CRM drawers if BlueSales is temporarily busy.
+          console.warn('[meta users fallback]', err?.message || err);
+        }
+
+        const mergedUsers = users.map(decorateUserAccess);
+        const userKeys = new Set(mergedUsers.map(u => String(u.id || u.login || u.name)));
+        const fallbackManagers = [
+          ...(Array.isArray(ui.managers) ? ui.managers : []),
+          ...(Array.isArray(seed.managers) ? seed.managers : [])
+        ];
+        for (const u of fallbackManagers) {
+          const nu = normalizeUser(u);
+          const key = String(nu.id || nu.login || nu.name);
+          if (key && !userKeys.has(key)) { userKeys.add(key); mergedUsers.push(decorateUserAccess(nu)); }
+        }
+        if (s.login && !mergedUsers.some(u => sameText(u.login, s.login))) {
+          mergedUsers.unshift(decorateUserAccess(normalizeUser(s.currentUser || { login:s.login, name:s.currentUser?.name || s.login })));
+        }
+
+        const mergedTags = [];
+        const tagKeys = new Set();
+        for (const t of [
+          ...(Array.isArray(ui.tags) ? ui.tags : []),
+          ...(Array.isArray(seed.tags) ? seed.tags : [])
+        ]) {
+          const nt = { id:t?.id ?? null, name:String(t?.name || ''), color:String(t?.color || ''), textColor:String(t?.textColor || '') };
+          const key = String(nt.id || nt.name);
+          if (nt.name && !tagKeys.has(key)) { tagKeys.add(key); mergedTags.push(nt); }
+        }
+
+        const statusSet = new Set(statusOptions([]));
+        for (const st of [
+          ...(Array.isArray(ui.statuses) ? ui.statuses : []),
+          ...(Array.isArray(seed.statuses) ? seed.statuses : [])
+        ]) {
+          const name = String(st?.name ?? st ?? '').trim();
+          if (name) statusSet.add(name);
+        }
+
+        const style = accountStyleProfile(s, mergedUsers, []);
+        return {
+          users: mergedUsers,
+          statuses: [...statusSet],
+          tags: mergedTags,
+          statusColors: style.statusColors,
+          managerColors: style.managerColors,
+          tagColors: style.tagColors,
+          tagTextColors: style.tagTextColors,
+          styleSource: style.source,
+          currentUser: decorateUserAccess(s.currentUser || currentUserFrom(mergedUsers, s.login)),
+          isAdmin: isAdminSession(s),
+          capabilities: ui.capabilities || s.uiProfile?.capabilities || {},
+          uiSync: { state:s.uiSyncState || 'unknown', source:ui.source || null, message:s.uiSyncMessage || '' },
+          perf: { mode:'fast-meta', customerScan:false }
+        };
+      });
+      return sendJson(res, 200, { ok: true, ...value });
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  if (pathname === '/api/clients' && req.method === 'GET') {
+    try {
+      const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 100), 1), 500);
+      const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
+      const q = String(url.searchParams.get('q') || '').trim();
+      const status = String(url.searchParams.get('status') || '').trim();
+      const manager = String(url.searchParams.get('manager') || '').trim();
+      const tag = String(url.searchParams.get('tag') || '').trim();
+      let customers = [], hasMore = false, totalHint = 0;
+
+      if (manager && !q && !status && !tag) {
+        const page = await getCustomersPage(s, { count: limit, offset, managers:[manager] });
+        customers = page.customers; hasMore = page.notReturnedCount > 0; totalHint = page.count + page.notReturnedCount;
+      } else if (!q && !status && !manager && !tag) {
+        const page = await getCustomersPage(s, { count: limit, offset });
+        customers = page.customers; hasMore = page.notReturnedCount > 0 || customers.length === limit; totalHint = page.count + page.notReturnedCount;
+      } else {
+        let source = null;
+        const digits = q.replace(/\D/g,'');
+        if (q && /^\d{5,}$/.test(digits)) {
+          const hits=[];
+          try{hits.push(...(await getCustomersPage(s,{count:500,vkIds:[Number(digits)]})).customers)}catch{}
+          try{hits.push(...(await getCustomersPage(s,{count:500,phone:digits})).customers)}catch{}
+          const seen=new Set(),uniqHits=hits.filter(c=>c.id&&!seen.has(c.id)&&seen.add(c.id));
+          if(uniqHits.length)source=uniqHits;
+        }
+        if(!source)source=await getAllCustomersComplete(s);
+        const nq=q.toLocaleLowerCase('ru-RU');
+        const scan=source.filter(c=>{
+          const qOk=!q||[c.fullName,c.phone,c.email,c.city,c.crmStatus,c.manager,c.managerLogin,c.social?.vkId,...(c.tags||[]).map(t=>t?.name||t)]
+            .some(v=>String(v||'').toLocaleLowerCase('ru-RU').includes(nq));
+          return qOk&&customerMatchesStatus(c,status)&&customerMatchesManager(c,manager)&&customerHasTag(c,tag);
+        });
+        customers=scan.slice(offset,offset+limit);hasMore=offset+limit<scan.length;totalHint=scan.length;
+      }
+      return sendJson(res, 200, { ok: true, clients: customers, offset, limit, hasMore, totalHint });
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  const clientMatch = pathname.match(/^\/api\/clients\/([^/]+)$/);
+  if (clientMatch && req.method === 'GET') {
+    try {
+      const id = Number(decodeURIComponent(clientMatch[1]));
+      if (!Number.isFinite(id)) return sendJson(res, 400, { ok: false, message: 'Некорректный id клиента' });
+      const fresh = url.searchParams.get('fresh') === '1';
+      const client = fresh
+        ? (await getCustomersPage(s, { count: 10, ids: [id] })).customers.find(c => Number(c.id) === Number(id)) || null
+        : await getCustomerById(s, id);
+      if (!client) return sendJson(res, 404, { ok: false, message: 'Клиент не найден' });
+      return sendJson(res, 200, { ok: true, client });
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  if (clientMatch && req.method === 'PUT') {
+    if (!requireCsrf(req, res, s)) return;
+    try {
+      const id = Number(decodeURIComponent(clientMatch[1]));
+      if (!Number.isFinite(id)) return sendJson(res, 400, { ok: false, message: 'Некорректный id клиента' });
+      const b = await readJson(req);
+      const payload = { id };
+      if ('fullName' in b) payload.fullName = String(b.fullName || '');
+      if ('phone' in b) payload.phone = String(b.phone || '');
+      if ('email' in b) payload.email = String(b.email || '');
+      if ('city' in b) payload.city = { name: String(b.city || '') };
+      if ('crmStatus' in b) payload.crmStatus = { name: String(b.crmStatus || '') };
+      if ('nextContactDate' in b) payload.nextContactDate = String(b.nextContactDate || '');
+      if ('shortNotes' in b) payload.shortNotes = String(b.shortNotes || '');
+      if ('comments' in b) payload.comments = String(b.comments || '');
+      if ('managerLogin' in b && b.managerLogin) payload.manager = { login: String(b.managerLogin) };
+      await bsCall(s, 'customers.update', payload);
+      clearAccountCache(s.login);
+      const client = await getCustomerById(s, id);
+      return sendJson(res, 200, { ok: true, client: client || normalizeCustomer(payload) });
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  if (pathname === '/api/services' && req.method === 'GET') {
+    try {
+      const q=String(url.searchParams.get('q')||'').trim().toLocaleLowerCase('ru-RU');
+      const rows=loadServiceCatalog().filter(x=>x.active&&(!q||`${x.marking} ${x.name}`.toLocaleLowerCase('ru-RU').includes(q)));
+      return sendJson(res,200,{ok:true,services:rows.slice(0,100),source:'server-service-catalog'});
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  if (pathname === '/api/orders' && req.method === 'POST') {
+    if (!requireCsrf(req, res, s)) return;
+    try {
+      const b = await readJson(req);
+      const customerId = Number(b.customerId || b.customer?.id || 0);
+      const statusName = String(b.orderStatus || b.status || 'Новый').trim();
+      if (!customerId) return sendJson(res,400,{ok:false,message:'Для заказа нужен клиент BlueSales'});
+      if (!statusName) return sendJson(res,400,{ok:false,message:'Укажите статус заказа'});
+      // Official BlueSales API Demo requires customer.id + orderStatus.name.
+      const payload = { customer:{id:customerId}, orderStatus:{name:statusName} };
+      if (b.managerLogin) payload.manager={login:String(b.managerLogin)};
+      if (b.date) payload.date=String(b.date);
+      if (b.prepay!=='' && b.prepay!=null && Number.isFinite(Number(b.prepay))) payload.prepay=Number(b.prepay);
+      if (b.discount!=='' && b.discount!=null && Number.isFinite(Number(b.discount))) {
+        const d=Number(b.discount); payload.discount=d>1?Math.max(0,Math.min(100,d))/100:Math.max(0,Math.min(1,d));
+      }
+      if (b.internalComments) payload.internalComments=String(b.internalComments);
+      if (b.customerComments) payload.customerComments=String(b.customerComments);
+      if (Array.isArray(b.goodsPositions) && b.goodsPositions.length) {
+        payload.goodsPositions=b.goodsPositions.map(x=>{
+          const goodsId=Number(x.goods?.id);
+          const goods=Number.isFinite(goodsId)&&goodsId>0
+            ?{id:goodsId}
+            :(x.goods?.marking?{marking:String(x.goods.marking)}:{name:String(x.goods?.name||x.name||'')});
+          return {goods,size:String(x.size||''),price:Math.max(0,Number(x.price||0)),quantity:Math.max(1,Number(x.quantity||1))};
+        }).filter(x=>x.goods.id||x.goods.marking||x.goods.name);
+      }
+      const calculated=(payload.goodsPositions||[]).reduce((sum,x)=>sum+Number(x.price||0)*Number(x.quantity||1),0);
+      const afterDiscount=calculated*(1-Number(payload.discount||0));
+      if (b.sum!=='' && b.sum!=null && Number.isFinite(Number(b.sum))) payload.sum=Number(b.sum);
+      else if(payload.goodsPositions?.length)payload.sum=Math.round(afterDiscount*100)/100;
+      const raw = await bsCall(s,'orders.add',payload);
+      // Creating an order does not invalidate CRM dictionaries/customer scans.
+      // Only the order cache for this client must be refreshed.
+      clearOrdersCache(s.login, customerId);
+      const candidate=raw?.order||raw?.Order||raw;
+      return sendJson(res,200,{ok:true,order:normalizeOrder(candidate||payload),raw: candidate?.id?undefined:raw});
+    } catch(err){ return handleApiError(res,err); }
+  }
+
+  if (pathname === '/api/orders' && req.method === 'GET') {
+    try {
+      const customerId = Number(url.searchParams.get('customerId') || 0);
+      const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 100), 1), 500);
+      const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
+      const cacheKey = `${s.login}:orders:${customerId || 0}:${limit}:${offset}`;
+      const value = await cachedLoad(cacheKey, 15000, async () => {
+        const payload = {
+          dateFrom: null,
+          dateTill: null,
+          orderStatuses: [],
+          customerId: customerId || null,
+          ids: null,
+          internalNumbers: null,
+          pageSize: limit,
+          startRowNumber: offset
+        };
+        const raw = await bsCall(s, 'orders.get', payload);
+        const source = arrayFromResponse(raw, ['orders', 'Orders']);
+        const orders = source.map(normalizeOrder);
+        const meta = customerPageMeta(raw, orders);
+        return { orders, offset, limit, hasMore: meta.notReturnedCount > 0 || orders.length === limit, totalHint: meta.count + meta.notReturnedCount };
+      });
+      return sendJson(res, 200, { ok: true, ...value });
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  const orderStatusMatch = pathname.match(/^\/api\/orders\/([^/]+)\/status$/);
+  if (orderStatusMatch && req.method === 'PUT') {
+    if (!requireCsrf(req, res, s)) return;
+    try {
+      const id = Number(decodeURIComponent(orderStatusMatch[1]));
+      const b = await readJson(req);
+      if (!Number.isFinite(id) || !b.status) return sendJson(res, 400, { ok: false, message: 'Нужны id заказа и статус' });
+      const payload = { id, orderStatus: String(b.status) };
+      if (b.postTrackingNumber) payload.postTrackingNumber = String(b.postTrackingNumber);
+      if (b.postStatus) payload.postStatus = String(b.postStatus);
+      await bsCall(s, 'orders.setStatus', payload);
+      clearOrdersCache(s.login);
+      return sendJson(res, 200, { ok: true });
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  const reminderDeleteMatch=pathname.match(/^\/api\/reminders\/([^/]+)$/);
+  if(reminderDeleteMatch && req.method==='DELETE'){
+    if(!requireCsrf(req,res,s))return;
+    try{
+      const id=Number(decodeURIComponent(reminderDeleteMatch[1]));
+      if(!Number.isFinite(id))return sendJson(res,400,{ok:false,message:'Некорректный id клиента'});
+      // BlueSales installations differ in how they clear the next-contact date.
+      // Try null first, then the empty-string form used by customers.update UI flows.
+      try{await bsCall(s,'customers.update',{id,nextContactDate:null});}
+      catch(firstErr){await bsCall(s,'customers.update',{id,nextContactDate:''});}
+      clearAccountCache(s.login);
+      return sendJson(res,200,{ok:true,id});
+    }catch(err){return handleApiError(res,err);}
+  }
+
+  if (pathname === '/api/reminders' && req.method === 'GET') {
+    try {
+      const manager=String(url.searchParams.get('manager')||'').trim();
+      const status=String(url.searchParams.get('status')||'').trim();
+      const tag=String(url.searchParams.get('tag')||'').trim();
+      const cacheKey=`${s.login}:reminders:v24.5`;
+      let groups=cacheGet(cacheKey);
+      if(!groups){
+        const today=new Date();today.setHours(0,0,0,0);
+        const yesterday=new Date(today);yesterday.setDate(yesterday.getDate()-1);
+        const tomorrow=new Date(today);tomorrow.setDate(tomorrow.getDate()+1);
+        const dayAfter=new Date(today);dayAfter.setDate(dayAfter.getDate()+2);
+        const buckets={
+          today:await getCustomersByNextContactRange(s,ymdLocal(today),ymdLocal(today)),
+          tomorrow:await getCustomersByNextContactRange(s,ymdLocal(tomorrow),ymdLocal(tomorrow)),
+          future:await getCustomersByNextContactRange(s,ymdLocal(dayAfter),null),
+          overdue:await getCustomersByNextContactRange(s,null,ymdLocal(yesterday))
+        };
+        groups={today:[],tomorrow:[],future:[],overdue:[]};
+        for(const[key,customers]of Object.entries(buckets)){
+          groups[key]=customers.filter(c=>Boolean(c.nextContactDate)).map(c=>({
+            id:c.id,fullName:c.fullName,crmStatus:c.crmStatus,crmStatusColor:c.crmStatusColor,
+            manager:c.manager,managerLogin:c.managerLogin,managerColor:c.managerColor,nextContactDate:c.nextContactDate,
+            tags:c.tags,vkId:c.social?.vkId||''
+          }));
+          groups[key].sort((a,b)=>dateKey(a.nextContactDate).localeCompare(dateKey(b.nextContactDate))||a.fullName.localeCompare(b.fullName,'ru'));
+        }
+        cacheSet(cacheKey,groups,60000);
+      }
+      const filtered={};
+      for(const[key,rows]of Object.entries(groups)){
+        filtered[key]=rows.filter(c=>customerMatchesManager(c,manager)&&customerMatchesStatus(c,status)&&customerHasTag(c,tag));
+      }
+      return sendJson(res,200,{ok:true,source:'customers.get-nextContactDate-range',reminders:filtered,counts:Object.fromEntries(Object.entries(filtered).map(([k,v])=>[k,v.length])),filters:{manager,status,tag}});
+    } catch (err) { return handleApiError(res, err); }
+  }
+
+  return sendJson(res, 404, { ok: false, message: 'API route not found' });
+}
+
+function handleApiError(res, err) {
+  console.error('[API]', err && err.stack ? err.stack : err);
+  if (err instanceof VkApiError) {
+    const status = err.code === 'VK_AUTH' ? 401 : err.code === 'VK_RATE_LIMIT' ? 429 : err.code === 'VK_TIMEOUT' ? 504 : err.code === 'VK_PERMISSIONS' ? 403 : 502;
+    return sendJson(res, status, { ok: false, error: err.code, message: err.message, details: err.details || undefined });
+  }
+  if (err instanceof BlueSalesError) {
+    const status = err.code === 'AUTH' ? 401 : err.code === 'BUSY' ? 409 : err.code === 'API_BUSY' ? 503 : err.code === 'TIMEOUT' ? 504 : 502;
+    return sendJson(res, status, { ok: false, error: err.code, message: err.message, details: err.details || undefined });
+  }
+  const status = err && err.status ? err.status : 500;
+  return sendJson(res, status, { ok: false, error: 'SERVER', message: err?.message || 'Внутренняя ошибка сервера' });
+}
+
+const server = http.createServer(async (req, res) => {
+  const started=Date.now();
+  let pathname='/';
+  try{pathname=new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname}catch{}
+  const shouldLog=pathname==='/'||pathname.startsWith('/api/');
+  if(shouldLog)res.on('finish',()=>console.log(`[HTTP] ${req.method} ${pathname} -> ${res.statusCode} (${Date.now()-started}ms)`));
+  try {
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    if (url.pathname.startsWith('/api/')) return await apiRouter(req, res, url);
+    return serveStatic(req, res, url.pathname);
+  } catch (err) {
+    return handleApiError(res, err);
+  }
+});
+
+server.listen(PORT, HOST, () => {
+  console.log('');
+  console.log(`seb_gun CRM + VK DIRECT v${VERSION}`);
+  console.log('Без расширений. CRM: BlueSales API. Диалоги: VK API сообщества напрямую.');
+  console.log('');
+  console.log(`PC:    http://localhost:${PORT}/`);
+  const nets = os.networkInterfaces();
+  for (const [name, entries] of Object.entries(nets)) {
+    for (const n of entries || []) {
+      if (n.family === 'IPv4' && !n.internal) {
+        const virtualBySubnet = /^192\.168\.56\./.test(n.address) || /^169\.254\./.test(n.address);
+        const virtualByName = /virtual|vmware|vbox|host-only|hyper-v|wsl|vethernet|loopback|tailscale/i.test(name);
+        if (!virtualBySubnet && !virtualByName) console.log(`Phone: http://${n.address}:${PORT}/   [${name}]`);
+      }
+    }
+  }
+  console.log('');
+  console.log('Важно: для CRM API BlueSales нужен тариф PRO. Для диалогов нужен ключ сообщества VK с правом messages.');
+  console.log('BlueSales API вызывается через внутреннюю очередь: одновременные запросы сериализуются автоматически.');
+  const qp=loadQuickPhrases(); const qpc=qp.reduce((n,g)=>n+(g.phrases||[]).length,0); const qpa=qp.reduce((n,g)=>n+(g.phrases||[]).reduce((m,p)=>m+(p.attachments||[]).length,0),0);
+  console.log(`Быстрые фразы: ${qpc} фраз из BlueSales export, групп: ${qp.length}, вложений: ${qpa}. Доступ фильтруется по логину BlueSales.`);
+  console.log(`Ссылки для другого устройства: ${PUBLIC_BASE_URL||(`http://${preferredLanIpv4()||'LAN-IP'}:${PORT}`)} (PUBLIC_BASE_URL можно задать для HTTPS/VPS).`);
+  console.log('HTTP/API и основные UI-действия пишутся ниже в это окно без текста сообщений и паролей.');
+  console.log('Для доступа из интернета размещайте этот сервер за HTTPS (VPS/Reverse Proxy).');
+  console.log('Не закрывайте это окно во время работы локального сайта.');
+  console.log('');
+});
+
+process.on('SIGINT', () => server.close(() => process.exit(0)));
+process.on('SIGTERM', () => server.close(() => process.exit(0)));

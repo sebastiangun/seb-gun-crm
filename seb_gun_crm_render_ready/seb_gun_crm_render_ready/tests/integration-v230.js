@@ -1,0 +1,4 @@
+'use strict';
+const fs=require('fs'),path=require('path'),assert=require('assert'),root=path.join(__dirname,'..');
+const server=fs.readFileSync(path.join(root,'server.js'),'utf8'),app=fs.readFileSync(path.join(root,'public','app.js'),'utf8'),api=fs.readFileSync(path.join(root,'public','api.js'),'utf8'),services=JSON.parse(fs.readFileSync(path.join(root,'data','services.json'),'utf8'));
+assert(server.includes('getAllCustomersComplete'));assert(server.includes("pathname === '/api/services'"));assert(server.includes('payload.goodsPositions'));assert(app.includes('clientTagFilter'));assert(app.includes('reloadReminderFilters'));assert(app.includes('data-add-service'));assert(app.includes('data-position-price'));assert(api.includes('services:(p={})'));assert(api.includes('reminders:(p={})'));assert(services.services.some(x=>x.marking==='A-001'));console.log('OK: v23 filters + linked order/service/price workflow + workspace drawers');
