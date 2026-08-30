@@ -3,6 +3,7 @@ services:
     name: seb-gun-crm
     runtime: node
     plan: free
+    rootDir: seb_gun_crm_render_ready/seb_gun_crm_render_ready
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/health
