@@ -579,7 +579,64 @@ async function bindAdmin(){
   const cu=document.querySelector('[data-admin-cancel-user]');if(cu)cu.onclick=()=>{state.adminUserEdit=null;render()};
   const uf=document.getElementById('adminUserForm');if(uf){const cp=uf.elements.colorPicker,ct=uf.elements.color;if(cp&&ct)cp.oninput=()=>ct.value=cp.value;uf.onsubmit=async e=>{e.preventDefault();const fd=new FormData(e.currentTarget),key=state.adminUserEdit?.login||state.adminUserEdit?.id||state.adminUserEdit?.name,payload={role:fd.get('role'),status:fd.get('status'),color:fd.get('color'),sections:fd.getAll('sections')};setLoading(true);try{await BSAPI.updateAdminUser(key,payload);state.adminUserEdit=null;state.metaLoaded=false;await ensureAdmin(true);await ensureMeta();render();toast('Настройки пользователя сохранены','ok')}catch(x){toast(x.message,'error')}finally{setLoading(false)}}}
 }
-function moreView(){return`<div class="section-head"><div><h2>Ещё</h2><p>Настройки seb_gun CRM</p></div></div><div class="card-block"><div class="theme-choice"><button class="wide secondary ${state.theme==='light'?'theme-active':''}" data-set-theme="light">☀ Белая тема</button><button class="wide secondary ${state.theme==='dark'?'theme-active':''}" data-set-theme="dark">● Чёрная тема</button></div><button class="wide secondary" data-action="refresh">${I.refresh} Обновить данные</button><button class="wide danger" data-action="logout">Выйти</button></div><div class="card-block"><h3>seb_gun CRM • v24.5</h3><p class="small-note">Аккаунт BlueSales: ${esc(state.meta?.currentUser?.name||state.session?.account?.name||state.session?.login||'—')}</p><p class="small-note">Быстрые фразы работают из локальной базы, импортированной из BlueSales-таблицы. Редактирование — во вкладке «Админ → Быстрые фразы».</p><p class="small-note">Основной цвет интерфейса: #046307.</p></div>`}
+function moreView(){
+  const account=esc(state.meta?.currentUser?.name||state.session?.account?.name||state.session?.login||'—');
+  return`<div class="more-page">
+    <div class="section-head more-page-head">
+      <div><h2>Ещё</h2><p>Настройки seb_gun CRM</p></div>
+    </div>
+
+    <section class="more-settings-card" aria-label="Настройки интерфейса">
+      <div class="more-theme-grid">
+        <button class="more-theme-card ${state.theme==='light'?'theme-active':''}" data-set-theme="light" aria-pressed="${state.theme==='light'}">
+          <span class="more-theme-icon">☀</span>
+          <span class="more-theme-copy"><b>Белая тема</b><small>Светлый интерфейс</small></span>
+          <span class="more-theme-check">✓</span>
+        </button>
+        <button class="more-theme-card ${state.theme==='dark'?'theme-active':''}" data-set-theme="dark" aria-pressed="${state.theme==='dark'}">
+          <span class="more-theme-icon">☾</span>
+          <span class="more-theme-copy"><b>Чёрная тема</b><small>Комфортно вечером</small></span>
+          <span class="more-theme-check">✓</span>
+        </button>
+      </div>
+
+      <button class="more-refresh-btn" data-action="refresh">
+        <span class="more-action-icon">${I.refresh}</span>
+        <span><b>Обновить данные</b><small>Перезагрузить данные CRM</small></span>
+      </button>
+
+      <div class="more-settings-footer">
+        <button class="more-logout-btn" data-action="logout"><span>↪</span><b>Выйти</b></button>
+      </div>
+    </section>
+
+    <section class="more-about-card" aria-label="Информация о CRM">
+      <div class="more-about-icon">⚙</div>
+      <div class="more-about-content">
+        <div class="more-about-heading">
+          <div><h3>seb_gun CRM <span>• v24.5</span></h3><p>Рабочее пространство BlueSales + VK</p></div>
+          <span class="more-local-pill"><i></i> LOCAL</span>
+        </div>
+
+        <div class="more-info-row">
+          <span class="more-info-symbol">S</span>
+          <div><small>Аккаунт BlueSales</small><b>${account}</b></div>
+        </div>
+
+        <div class="more-info-row">
+          <span class="more-info-symbol">⚡</span>
+          <div><small>Быстрые фразы</small><p>Используется локальная база, импортированная из BlueSales-таблицы. Редактирование — «Админ → Быстрые фразы».</p></div>
+        </div>
+
+        <div class="more-color-row">
+          <span class="more-color-swatch"></span>
+          <span>Основной цвет интерфейса</span>
+          <code>#046307</code>
+        </div>
+      </div>
+    </section>
+  </div>`
+}
 async function switchTab(id){
   const next=String(id||'dialogs');
   if(!['dialogs','clients','reminders','admin','more'].includes(next))return;
