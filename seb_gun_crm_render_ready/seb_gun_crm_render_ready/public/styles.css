@@ -1036,3 +1036,88 @@ button,input,select,textarea,.notice,.login-card,.info-card,.warning-card{
   .more-about-heading h3{font-size:15px}
   .more-local-pill{padding:5px 7px;font-size:7px}
 }
+
+
+/* =========================================================
+   v24.5.2 — mobile keyboard + phone workspace stabilization
+   ========================================================= */
+@media(max-width:699px){
+  html,body{width:100%!important;max-width:100%!important;overflow-x:hidden!important}
+  body{min-height:var(--app-height,100dvh)!important}
+  .shell:not(.chat-shell){width:100%!important;max-width:100%!important;min-height:100svh!important;border-radius:0!important;box-shadow:none!important}
+  .shell:not(.chat-shell) .topbar{padding-left:max(10px,env(safe-area-inset-left))!important;padding-right:max(10px,env(safe-area-inset-right))!important}
+  .shell:not(.chat-shell) .content{padding:13px 10px calc(88px + env(safe-area-inset-bottom))!important}
+  .bottom-nav{left:0!important;transform:none!important;width:100%!important;max-width:none!important}
+
+  .chat-shell{
+    width:100%!important;max-width:100%!important;
+    height:var(--app-height,100dvh)!important;
+    min-height:var(--app-height,100dvh)!important;
+    max-height:var(--app-height,100dvh)!important;
+    overflow:hidden!important;border-radius:0!important;box-shadow:none!important;
+    grid-template-rows:auto minmax(0,1fr) auto!important;
+  }
+  .chat-top{
+    position:relative!important;
+    height:56px!important;min-height:56px!important;
+    gap:5px!important;
+    padding:6px max(7px,env(safe-area-inset-right)) 6px max(7px,env(safe-area-inset-left))!important;
+    overflow:hidden!important;
+  }
+  .chat-avatar{width:32px!important;height:32px!important}
+  .chat-title{min-width:0!important}
+  .chat-title strong{font-size:13px!important}
+  .chat-title small{font-size:9px!important}
+  .chat-top .chat-share,.chat-top .theme-toggle{display:none!important}
+  .chat-top .header-tool,.chat-top .icon-btn{width:34px!important;height:34px!important;min-width:34px!important;padding:0!important;font-size:12px!important;flex:0 0 auto!important}
+  .chat-top [data-open-crm]{width:auto!important;min-width:40px!important;padding:0 7px!important;font-size:10px!important}
+
+  .chat-messages{
+    min-height:0!important;max-width:100%!important;
+    overflow-y:auto!important;overflow-x:hidden!important;
+    overscroll-behavior:contain!important;-webkit-overflow-scrolling:touch;
+    padding:10px 8px 12px!important;
+  }
+  .chat-message-flow{max-width:100%!important;min-width:0!important}
+  .msg-bubble{max-width:88%!important;overflow-wrap:anywhere!important;word-break:break-word!important}
+  .msg-photo-grid,.msg-photo,.msg-preview,.msg-video{max-width:100%!important}
+
+  .composer-rich{
+    width:100%!important;max-width:100%!important;
+    grid-template-columns:36px 36px minmax(0,1fr) 42px!important;
+    gap:5px!important;align-items:end!important;
+    padding:7px max(7px,env(safe-area-inset-right)) calc(7px + env(safe-area-inset-bottom)) max(7px,env(safe-area-inset-left))!important;
+  }
+  .composer-rich .composer-expand{display:none!important}
+  .composer-rich textarea{
+    min-width:0!important;width:100%!important;
+    min-height:44px!important;max-height:120px!important;
+    padding:10px 10px!important;
+    font-size:16px!important;line-height:1.35!important;
+    resize:none!important;overflow-y:auto!important;touch-action:auto!important;
+  }
+  .composer-rich .composer-tool,.composer-rich .send-btn{width:100%!important;min-width:0!important;height:42px!important;min-height:42px!important;touch-action:manipulation}
+  .composer-rich.composer-expanded textarea{min-height:88px!important;max-height:34vh!important}
+
+  /* iOS Safari zooms focused controls below 16px and makes the whole CRM jump. */
+  input,select,textarea{font-size:16px!important}
+  button{touch-action:manipulation}
+
+  .drawer{
+    height:var(--app-height,100dvh)!important;
+    max-height:var(--app-height,100dvh)!important;
+    width:min(94vw,390px)!important;
+    overflow:hidden!important;
+  }
+  .drawer-scroll,.bs-phrase-list{overscroll-behavior:contain!important;-webkit-overflow-scrolling:touch}
+  .phrase-autocomplete{left:6px!important;right:6px!important;bottom:calc(64px + env(safe-area-inset-bottom))!important;max-height:36vh!important}
+  .attach-menu{left:7px!important;bottom:calc(64px + env(safe-area-inset-bottom))!important}
+}
+
+@media(max-width:380px){
+  .chat-top .header-tool,.chat-top .icon-btn{width:32px!important;height:32px!important;min-width:32px!important}
+  .chat-avatar{width:30px!important;height:30px!important}
+  .chat-title strong{font-size:12px!important}
+  .composer-rich{grid-template-columns:34px 34px minmax(0,1fr) 40px!important;gap:4px!important;padding-left:5px!important;padding-right:5px!important}
+}
+\n\n/* =========================================================\n   v24.5.3 — keyboard, back navigation, phone alignment\n   ========================================================= */\n@media(max-width:699px){\n  html,body,#app{width:100%!important;max-width:100vw!important;overflow-x:clip!important}\n  #app{min-height:var(--app-height,100dvh)!important}\n  .shell:not(.chat-shell){margin:0!important}\n  .shell:not(.chat-shell) .content{width:100%!important;max-width:100%!important;min-width:0!important;overflow-x:hidden!important}\n  .filters,.more-theme-grid,.admin-toolbar{min-width:0!important}\n  .client-row,.dialog-row,.reminder-row,.bs-compact-client{max-width:100%!important;min-width:0!important}\n  img,video,canvas{max-width:100%!important}\n\n  .chat-shell{inset:0!important;margin:0!important}\n  .chat-top{width:100%!important;max-width:100%!important;min-width:0!important}\n  .chat-top [data-chat-back]{display:grid!important;pointer-events:auto!important;position:relative!important;z-index:4!important}\n  .chat-title{overflow:hidden!important}\n\n  .composer-rich{position:relative!important;z-index:40!important;overflow:visible!important}\n  #messageInput{\n    display:block!important;position:relative!important;z-index:3!important;\n    pointer-events:auto!important;touch-action:auto!important;\n    -webkit-user-select:text!important;user-select:text!important;\n    -webkit-touch-callout:default!important;\n    opacity:1!important;visibility:visible!important;\n  }\n  .phrase-autocomplete{z-index:45!important}\n  .attach-menu{z-index:46!important}\n\n  html.chat-keyboard-open .chat-shell{height:var(--app-height,100dvh)!important;min-height:var(--app-height,100dvh)!important;max-height:var(--app-height,100dvh)!important}\n  html.chat-keyboard-open .chat-messages{overscroll-behavior-y:contain!important}\n}\n
