@@ -3,20 +3,27 @@ services:
     name: seb-gun-crm
     runtime: node
     plan: free
-    rootDir: seb_gun_crm_render_ready/seb_gun_crm_render_ready
-    buildCommand: npm install
-    startCommand: npm start
+
+    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install
+    startCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm start
+
     healthCheckPath: /api/health
+
     envVars:
       - key: NODE_VERSION
         value: "22"
+
       - key: COOKIE_SECURE
         value: "1"
+
       - key: ALLOW_LOCAL_PHRASE_FALLBACK
         value: "0"
+
       - key: VK_TOKEN
         sync: false
+
       - key: VK_COMMUNITY
         sync: false
+
       - key: VK_COMMUNITY_URL
         sync: false
