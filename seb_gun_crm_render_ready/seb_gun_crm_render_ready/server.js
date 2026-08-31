@@ -42,16 +42,17 @@ const ALLOW_LOCAL_PHRASE_FALLBACK = String(process.env.ALLOW_LOCAL_PHRASE_FALLBA
 const VK_API_BASE = process.env.VK_API_BASE || 'https://api.vk.com/method/';
 const VK_API_VERSION = process.env.VK_API_VERSION || '5.199';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
-const API_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS || 60000);
-const MAX_BUSY_RETRIES = Number(process.env.MAX_BUSY_RETRIES || 3);
-const BS_ORG_BUSY_RETRIES = Number(process.env.BS_ORG_BUSY_RETRIES || 8);
-const BS_QUEUE_GAP_MS = Number(process.env.BS_QUEUE_GAP_MS || 300);
+const API_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS || 30000);
+const MAX_BUSY_RETRIES = Number(process.env.MAX_BUSY_RETRIES || 1);
+const BS_ORG_BUSY_RETRIES = Number(process.env.BS_ORG_BUSY_RETRIES || 3);
+const BS_QUEUE_GAP_MS = Number(process.env.BS_QUEUE_GAP_MS || 180);
+const BS_QUEUE_MAX_WAIT_MS = Number(process.env.BS_QUEUE_MAX_WAIT_MS || 20000);
 const SEARCH_SCAN_LIMIT = Number(process.env.SEARCH_SCAN_LIMIT || 50000);
 const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); // fallback only; normal reminders use date-filtered API paging
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '24.5';
+const VERSION = '25.0';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -367,6 +368,9 @@ function bsCall(session, command, data = null) {
     blueSalesQueueDepth += 1;
     try {
       const waited = now() - queuedAt;
+      if (waited >= BS_QUEUE_MAX_WAIT_MS) {
+        throw new BlueSalesError('BlueSales занят другими запросами. Повторите действие через несколько секунд.', 'QUEUE_BUSY', { command, waitedMs: waited, queueDepth: blueSalesQueueDepth });
+      }
       if (waited >= 1200) console.log(`[BlueSales queue] ${command} waited ${waited}ms before start`);
       const gap = Math.max(0, BS_QUEUE_GAP_MS - (now() - blueSalesLastFinishedAt));
       if (gap) await sleep(gap);
@@ -550,7 +554,7 @@ function normalizeVkAttachments(list) {
       const external = owner && id ? `https://vk.com/video${owner}_${id}` : '';
       return { type, url: external, preview: String(x?.image?.slice?.(-1)?.[0]?.url || ''), title: String(x?.title || 'Видео') };
     }
-    if (type === 'audio_message') return { type, url: String(x?.link_mp3 || x?.link_ogg || ''), title: 'Голосовое сообщение', duration: Number(x?.duration || 0) };
+    if (type === 'audio_message') return { type, url: String(x?.link_mp3 || x?.link_ogg || ''), title: 'Голосовое сообщение', duration: Number(x?.duration || 0), transcript: String(x?.transcript || ''), transcriptState: String(x?.transcript_state || ''), waveform: Array.isArray(x?.waveform)?x.waveform:[] };
     if (type === 'link') return { type, url: String(x?.url || ''), preview: String(x?.photo ? bestPhotoUrl(x.photo) : ''), title: String(x?.title || x?.caption || x?.url || 'Ссылка') };
     return { type, url: '', title: type || 'Вложение' };
   }).filter(a => a.type);
@@ -1860,6 +1864,24 @@ async function apiRouter(req, res, url) {
     } catch (err) { return handleApiError(res, err); }
   }
 
+  const vkExportMatch = pathname.match(/^\/api\/vk\/dialogs\/(-?\d+)\/export-text$/);
+  if (vkExportMatch && req.method === 'GET') {
+    try {
+      const peerId=Number(vkExportMatch[1]),rows=[],seen=new Set();let offset=0,total=Infinity,guard=0;
+      while(offset<total && guard++<50){
+        const params={peer_id:peerId,count:200,offset,extended:1,fields:'photo_100,screen_name'};if(s.vkGroupId)params.group_id=s.vkGroupId;
+        const raw=await vkCall(s.vkToken,'messages.getHistory',params),maps=vkIdentityMaps(raw||{}),items=Array.isArray(raw?.items)?raw.items:[];
+        total=Number(raw?.count||items.length);
+        for(const item of items){const m=normalizeVkMessage(item,maps),key=String(m.id||m.conversationMessageId);if(!seen.has(key)){seen.add(key);rows.push(m)}}
+        offset+=items.length;if(!items.length)break;if(offset<total)await sleep(140);
+      }
+      rows.sort((a,b)=>Number(a.date||0)-Number(b.date||0)||Number(a.id||0)-Number(b.id||0));
+      const ownName=String(s.currentUser?.name||s.account?.name||s.login||'Вы');
+      const lineFor=m=>{const d=new Date(Number(m.date||0)*1000),stamp=d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}).replace(',',''),author=m.out?ownName:(m.author||'Собеседник');const parts=[];if(String(m.text||'').trim())parts.push(String(m.text).trim());for(const a of (m.attachments||[])){if(a.type==='audio_message')parts.push(a.transcript?`[Голосовое — расшифровка: ${a.transcript}]`:'[Голосовое сообщение]');else if(a.type==='photo')parts.push('[Фото]');else if(a.type==='video')parts.push(`[Видео${a.title?`: ${a.title}`:''}]`);else if(a.type==='doc')parts.push(`[Файл${a.title?`: ${a.title}`:''}]`);else if(a.type==='sticker')parts.push('[Стикер]');else parts.push(`[${a.title||a.type||'Вложение'}]`)}return`[${stamp}] ${author}: ${parts.join(' ')||'[Пустое сообщение]'}`};
+      return sendJson(res,200,{ok:true,peerId,count:rows.length,total,text:rows.map(lineFor).join('\n')});
+    } catch(err){return handleApiError(res,err)}
+  }
+
   const vkMessagesMatch = pathname.match(/^\/api\/vk\/dialogs\/(-?\d+)\/messages$/);
   if (vkMessagesMatch && req.method === 'GET') {
     try {
@@ -1872,7 +1894,8 @@ async function apiRouter(req, res, url) {
       const maps = vkIdentityMaps(raw || {});
       const messages = (raw?.items || []).map(m => normalizeVkMessage(m, maps)).reverse();
       let crm = null;
-      if (peerId > 0 && peerId < 2000000000) {
+      const includeCrm = String(url.searchParams.get('crm') || '1') !== '0';
+      if (includeCrm && peerId > 0 && peerId < 2000000000) {
         try {
           const c = await getCustomerByVkId(s, peerId);
           if (c) crm = c;
@@ -1900,11 +1923,15 @@ async function apiRouter(req, res, url) {
       const message = String(b.message || '').trim();
       const attachment = String(b.attachment || '').trim();
       const stickerId = Number(b.stickerId || 0);
-      if (!message && !attachment && !stickerId) return sendJson(res, 400, { ok: false, message: 'Введите сообщение или прикрепите файл' });
+      const replyTo = Number(b.replyTo || 0);
+      const forwardMessageIds = (Array.isArray(b.forwardMessageIds)?b.forwardMessageIds:String(b.forwardMessageIds||'').split(',')).map(Number).filter(v=>Number.isFinite(v)&&v>0).slice(0,100);
+      if (!message && !attachment && !stickerId && !forwardMessageIds.length) return sendJson(res, 400, { ok: false, message: 'Введите сообщение или прикрепите файл' });
       const params = { peer_id: peerId, random_id: crypto.randomInt(1, 2147483647) };
       if (message) params.message = message;
       if (attachment) params.attachment = attachment;
       if (stickerId) params.sticker_id = stickerId;
+      if (replyTo > 0) params.reply_to = replyTo;
+      if (forwardMessageIds.length) params.forward_messages = forwardMessageIds.join(',');
       if (s.vkGroupId) params.group_id = s.vkGroupId;
       const messageId = await vkCall(s.vkToken, 'messages.send', params);
       return sendJson(res, 200, { ok: true, messageId });
@@ -2162,7 +2189,7 @@ async function apiRouter(req, res, url) {
 
   if (pathname === '/api/debug/bluesales'  && req.method === 'GET') {
     try {
-      const result = { ok: true, version: VERSION, queue: { depth: blueSalesQueueDepth, gapMs: BS_QUEUE_GAP_MS }, tests: {} };
+      const result = { ok: true, version: VERSION, queue: { depth: blueSalesQueueDepth, gapMs: BS_QUEUE_GAP_MS, maxWaitMs: BS_QUEUE_MAX_WAIT_MS }, tests: {} };
       try {
         const usersRaw = await bsCall(s, 'users.get', null);
         result.tests.users = { ok: true, count: arrayFromResponse(usersRaw, ['users', 'Users']).length };
@@ -2187,13 +2214,13 @@ async function apiRouter(req, res, url) {
       // Statuses/tags/colors already come from the BlueSales UI profile/seed,
       // while users.get is one small API call. This keeps Orders/Services from
       // waiting behind dozens of customers.get pages in the organization queue.
-      const cacheKey = `${s.login}:meta:v24.5`;
+      const cacheKey = `${s.login}:meta:v25.0`;
       const value = await cachedLoad(cacheKey, 5 * 60 * 1000, async () => {
         const seed = loadBlueSalesUiSeed();
         const ui = s.uiProfile || readUiSync(s.login) || {};
         let users = [];
         try {
-          const usersRaw = await cachedLoad(`${s.login}:users:v24.5`, 5 * 60 * 1000, () => bsCall(s, 'users.get', null));
+          const usersRaw = await cachedLoad(`${s.login}:users:v25.0`, 5 * 60 * 1000, () => bsCall(s, 'users.get', null));
           users = arrayFromResponse(usersRaw, ['users', 'Users']).map(normalizeUser);
         } catch (err) {
           // Do not block CRM drawers if BlueSales is temporarily busy.
@@ -2258,7 +2285,7 @@ async function apiRouter(req, res, url) {
 
   if (pathname === '/api/clients' && req.method === 'GET') {
     try {
-      const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 100), 1), 500);
+      const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 20), 1), 100);
       const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
       const q = String(url.searchParams.get('q') || '').trim();
       const status = String(url.searchParams.get('status') || '').trim();
@@ -2334,8 +2361,9 @@ async function apiRouter(req, res, url) {
 
   if (pathname === '/api/services' && req.method === 'GET') {
     try {
-      const q=String(url.searchParams.get('q')||'').trim().toLocaleLowerCase('ru-RU');
-      const rows=loadServiceCatalog().filter(x=>x.active&&(!q||`${x.marking} ${x.name}`.toLocaleLowerCase('ru-RU').includes(q)));
+      const normalizeSearch=v=>String(v||'').normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g,'е').replace(/[^\p{L}\p{N}@+._-]+/gu,' ').replace(/\s+/g,' ').trim();
+      const q=normalizeSearch(url.searchParams.get('q')||''),tokens=q.split(' ').filter(Boolean);
+      const rows=loadServiceCatalog().filter(x=>{if(!x.active)return false;const hay=normalizeSearch(`${x.marking||''} ${x.name||''}`);return !tokens.length||tokens.every(t=>hay.includes(t))});
       return sendJson(res,200,{ok:true,services:rows.slice(0,100),source:'server-service-catalog'});
     } catch (err) { return handleApiError(res, err); }
   }
@@ -2383,10 +2411,12 @@ async function apiRouter(req, res, url) {
   if (pathname === '/api/orders' && req.method === 'GET') {
     try {
       const customerId = Number(url.searchParams.get('customerId') || 0);
-      const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 100), 1), 500);
+      const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 20), 1), 100);
       const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
+      const fresh = String(url.searchParams.get('fresh') || '') === '1';
       const cacheKey = `${s.login}:orders:${customerId || 0}:${limit}:${offset}`;
-      const value = await cachedLoad(cacheKey, 15000, async () => {
+      if(fresh)cache.delete(cacheKey);
+      const value = await cachedLoad(cacheKey, 60000, async () => {
         const payload = {
           dateFrom: null,
           dateTill: null,
@@ -2443,7 +2473,7 @@ async function apiRouter(req, res, url) {
       const manager=String(url.searchParams.get('manager')||'').trim();
       const status=String(url.searchParams.get('status')||'').trim();
       const tag=String(url.searchParams.get('tag')||'').trim();
-      const cacheKey=`${s.login}:reminders:v24.5`;
+      const cacheKey=`${s.login}:reminders:v25.0`;
       let groups=cacheGet(cacheKey);
       if(!groups){
         const today=new Date();today.setHours(0,0,0,0);
