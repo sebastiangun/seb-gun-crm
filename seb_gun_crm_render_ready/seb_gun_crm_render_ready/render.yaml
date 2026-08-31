@@ -5,7 +5,6 @@ services:
     plan: free
 
     buildCommand: node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/server.js && node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/lib/bluesales-web.js
-
     startCommand: node seb_gun_crm_render_ready/seb_gun_crm_render_ready/server.js
 
     healthCheckPath: /api/health
@@ -13,21 +12,17 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
-
       - key: COOKIE_SECURE
         value: "1"
-
       - key: ALLOW_LOCAL_PHRASE_FALLBACK
         value: "1"
-
       - key: PUBLIC_BASE_URL
         value: "https://seb-gun-crm.onrender.com"
-
+      - key: VK_DIRECT_AUTHOR
+        value: "Дарья А."
       - key: VK_TOKEN
         sync: false
-
       - key: VK_COMMUNITY
         sync: false
-
       - key: VK_COMMUNITY_URL
         sync: false

@@ -52,11 +52,12 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '25.0';
+const VERSION = '25.1';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+const VK_DIRECT_AUTHOR = String(process.env.VK_DIRECT_AUTHOR || 'Дарья А.').trim();
 
 const BS_SCREENSHOT_STATUS_COLORS = {
   'Не учитывать в лидах':'#848B8C',
@@ -236,7 +237,7 @@ class BlueSalesError extends Error {
   }
 }
 
-function blueSalesBodySnippet(text, max = 900) {
+function blueSalesBodySnippet(text, max = 360) {
   const raw = String(text || '').replace(/\u0000/g, '').trim();
   if (!raw) return '';
   const plain = raw
@@ -541,6 +542,46 @@ function stickerUrl(x) {
   return stickerId > 0 ? `https://vk.com/sticker/1-${stickerId}-512` : '';
 }
 
+function compactPersonName(name) {
+  const raw = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  // BlueSales manager labels such as "0.1 Анастасия Ф." are already compact.
+  if (/^\d+(?:\.\d+)?\s+/.test(raw)) return raw;
+  const parts = raw.split(' ').filter(Boolean);
+  if (parts.length < 2) return raw;
+  return `${parts[0]} ${Array.from(parts[1])[0] || ''}.`.trim();
+}
+
+function parseCrmMessagePayload(payload) {
+  if (!payload) return null;
+  let value = payload;
+  try { if (typeof value === 'string') value = JSON.parse(value); } catch { return null; }
+  if (!value || typeof value !== 'object') return null;
+  const mark = value.seb_gun_crm || value.sebGunCrm || value.sebGunCRM;
+  if (!mark || typeof mark !== 'object') return null;
+  const author = String(mark.author || mark.authorName || mark.name || '').trim();
+  if (!author) return null;
+  return { author, version: String(mark.version || mark.v || '') };
+}
+
+function audioMessageFromDoc(x) {
+  const audio = x?.preview?.audio_msg || x?.preview?.audioMessage || null;
+  if (!audio) return null;
+  return {
+    type: 'audio_message',
+    url: String(audio.link_mp3 || audio.link_ogg || x?.url || ''),
+    title: 'Голосовое сообщение',
+    duration: Number(audio.duration || 0),
+    transcript: String(audio.transcript || x?.transcript || ''),
+    transcriptState: String(audio.transcript_state || x?.transcript_state || ''),
+    transcriptError: Number(audio.transcript_error || x?.transcript_error || 0),
+    waveform: Array.isArray(audio.waveform) ? audio.waveform : [],
+    sourceType: 'doc',
+    docId: Number(x?.id || 0),
+    ownerId: Number(x?.owner_id || 0)
+  };
+}
+
 function normalizeVkAttachments(list) {
   if (!Array.isArray(list)) return [];
   return list.map(a => {
@@ -548,13 +589,29 @@ function normalizeVkAttachments(list) {
     const x = a?.[type] || {};
     if (type === 'photo') return { type, url: bestPhotoUrl(x), preview: bestPhotoUrl(x), title: 'Фото' };
     if (type === 'sticker') return { type, url: stickerUrl(x), preview: stickerUrl(x), title: 'Стикер', stickerId: Number(x?.sticker_id || 0) };
-    if (type === 'doc') return { type, url: String(x?.url || ''), preview: String(x?.preview?.photo?.sizes?.slice?.(-1)?.[0]?.src || ''), title: String(x?.title || 'Документ'), ext: String(x?.ext || '') };
+    if (type === 'doc') {
+      const voice = audioMessageFromDoc(x);
+      if (voice) return voice;
+      return { type, url: String(x?.url || ''), preview: String(x?.preview?.photo?.sizes?.slice?.(-1)?.[0]?.src || ''), title: String(x?.title || 'Документ'), ext: String(x?.ext || '') };
+    }
     if (type === 'video') {
       const owner = Number(x?.owner_id || 0), id = Number(x?.id || 0);
       const external = owner && id ? `https://vk.com/video${owner}_${id}` : '';
       return { type, url: external, preview: String(x?.image?.slice?.(-1)?.[0]?.url || ''), title: String(x?.title || 'Видео') };
     }
-    if (type === 'audio_message') return { type, url: String(x?.link_mp3 || x?.link_ogg || ''), title: 'Голосовое сообщение', duration: Number(x?.duration || 0), transcript: String(x?.transcript || ''), transcriptState: String(x?.transcript_state || ''), waveform: Array.isArray(x?.waveform)?x.waveform:[] };
+    if (type === 'audio_message') return {
+      type,
+      url: String(x?.link_mp3 || x?.link_ogg || ''),
+      title: 'Голосовое сообщение',
+      duration: Number(x?.duration || 0),
+      transcript: String(x?.transcript || ''),
+      transcriptState: String(x?.transcript_state || ''),
+      transcriptError: Number(x?.transcript_error || 0),
+      waveform: Array.isArray(x?.waveform) ? x.waveform : [],
+      sourceType: 'audio_message',
+      docId: Number(x?.id || 0),
+      ownerId: Number(x?.owner_id || 0)
+    };
     if (type === 'link') return { type, url: String(x?.url || ''), preview: String(x?.photo ? bestPhotoUrl(x.photo) : ''), title: String(x?.title || x?.caption || x?.url || 'Ссылка') };
     return { type, url: '', title: type || 'Вложение' };
   }).filter(a => a.type);
@@ -562,23 +619,94 @@ function normalizeVkAttachments(list) {
 
 function normalizeVkMessage(m, maps) {
   const from = Number(m?.from_id || 0);
+  const out = Number(m?.out || 0) === 1;
+  const adminAuthorId = Number(m?.admin_author_id || 0);
   let author = '';
   if (from > 0) {
     const p = maps.profiles.get(from);
     author = p ? `${p.first_name || ''} ${p.last_name || ''}`.trim() : `VK ${from}`;
   } else if (from < 0) author = maps.groups.get(Math.abs(from))?.name || `Сообщество ${Math.abs(from)}`;
+
+  const crmMark = parseCrmMessagePayload(m?.payload);
+  let displayAuthor = author;
+  let authorSource = out ? 'vk' : 'client';
+  if (out && crmMark?.author) {
+    displayAuthor = crmMark.author;
+    authorSource = 'crm';
+  } else if (out) {
+    const admin = maps.profiles.get(adminAuthorId);
+    const adminName = admin ? `${admin.first_name || ''} ${admin.last_name || ''}`.trim() : '';
+    displayAuthor = `VK ${compactPersonName(adminName || VK_DIRECT_AUTHOR)}`.trim();
+    authorSource = 'vk';
+  }
+
   return {
     id: String(m?.id ?? m?.conversation_message_id ?? ''),
     conversationMessageId: Number(m?.conversation_message_id || 0),
     peerId: Number(m?.peer_id || 0),
     fromId: from,
+    adminAuthorId,
     author,
+    displayAuthor,
+    authorSource,
+    crmAuthor: crmMark?.author || '',
     text: String(m?.text || ''),
     date: Number(m?.date || 0),
-    out: Number(m?.out || 0) === 1,
+    out,
+    payload: m?.payload || '',
     attachments: normalizeVkAttachments(m?.attachments),
     reply: m?.reply_message ? normalizeVkMessage(m.reply_message, maps) : null
   };
+}
+
+async function enrichVkMapsWithAdminAuthors(session, raw, maps = vkIdentityMaps(raw || {})) {
+  const ids = [];
+  const seen = new Set(maps.profiles.keys());
+  const walk = message => {
+    if (!message || typeof message !== 'object') return;
+    const id = Number(message.admin_author_id || 0);
+    if (id > 0 && !seen.has(id)) { seen.add(id); ids.push(id); }
+    if (message.reply_message) walk(message.reply_message);
+    for (const x of (message.fwd_messages || [])) walk(x);
+  };
+  for (const item of (raw?.items || [])) walk(item);
+  if (!ids.length) return maps;
+  try {
+    const users = await vkCall(session.vkToken, 'users.get', { user_ids: ids.slice(0, 500).join(','), fields: 'photo_100,screen_name' });
+    for (const p of (Array.isArray(users) ? users : [])) maps.profiles.set(Number(p.id), p);
+  } catch (err) {
+    console.warn('[VK admin authors]', err?.message || err);
+  }
+  return maps;
+}
+
+function messageVoiceAttachment(message) {
+  return (message?.attachments || []).find(a => a?.type === 'audio_message') || null;
+}
+
+async function refreshMissingVoiceTranscripts(session, peerId, messages) {
+  const ids = [...new Set((messages || []).filter(m => {
+    const a = messageVoiceAttachment(m);
+    return a && !String(a.transcript || '').trim() && Number(m.conversationMessageId || 0) > 0;
+  }).map(m => Number(m.conversationMessageId)).filter(Boolean))].slice(0, 100);
+  if (!ids.length) return messages;
+  try {
+    const params = { peer_id: peerId, conversation_message_ids: ids.join(','), extended: 1, fields: 'photo_100,screen_name' };
+    if (session.vkGroupId) params.group_id = session.vkGroupId;
+    const raw = await vkCall(session.vkToken, 'messages.getByConversationMessageId', params);
+    const maps = await enrichVkMapsWithAdminAuthors(session, raw, vkIdentityMaps(raw || {}));
+    const refreshed = new Map((raw?.items || []).map(item => {
+      const m = normalizeVkMessage(item, maps);
+      return [Number(m.conversationMessageId || 0), m];
+    }));
+    return (messages || []).map(m => {
+      const fresh = refreshed.get(Number(m.conversationMessageId || 0));
+      return fresh || m;
+    });
+  } catch (err) {
+    console.warn('[VK voice transcript refresh]', err?.message || err);
+    return messages;
+  }
 }
 
 
@@ -1495,30 +1623,56 @@ async function createCustomerFromDraft(session, draft) {
     const existing = await getCustomerByVkId(session, vkId);
     if (existing?.id) return { created:false, client:existing };
   }
-  const payload = {
-    fullName: String(draft?.fullName || '').trim() || (vkId ? `VK ${vkId}` : 'Новый клиент'),
-    firstContactDate: String(draft?.firstContactDate || ymdLocal())
-  };
-  if (vkId > 0) payload.vk = { id:String(vkId), name:String(draft?.vkName || '') };
-  if (draft?.city) payload.city = { name:String(draft.city) };
-  if (draft?.crmStatus) payload.crmStatus = { name:String(draft.crmStatus) };
-  if (draft?.nextContactDate) payload.nextContactDate = String(draft.nextContactDate);
-  if (draft?.phone) payload.phone = String(draft.phone);
-  if (draft?.email) payload.email = String(draft.email);
-  if (draft?.managerLogin) payload.manager = { login:String(draft.managerLogin) };
-  if (draft?.shortNotes) payload.shortNotes = String(draft.shortNotes);
-  if (draft?.comments) payload.comments = String(draft.comments);
 
-  let raw;
+  const fullName = String(draft?.fullName || '').trim() || (vkId ? `VK ${vkId}` : 'Новый клиент');
+  // Keep the create call intentionally small. BlueSales' customers.add endpoint can
+  // return its generic HTML error page when optional fields don't match an
+  // installation's model. Additional CRM fields are applied with customers.update
+  // after the client has a stable BlueSales ID.
+  const createPayload = { fullName };
+  if (vkId > 0) createPayload.vk = { id:String(vkId) };
+
+  let raw = null;
+  let createError = null;
   try {
-    raw = await bsCall(session, 'customers.add', payload);
+    raw = await bsCall(session, 'customers.add', createPayload);
   } catch (err) {
-    // Some BlueSales installations currently return an internal HTML error on customers.add.
-    // The public API also exposes customers.addMany; use a one-item batch as a compatibility fallback.
+    createError = err;
+    // BlueSales can commit the write and still answer with its HTML error page.
+    // Always check by VK id before retrying to avoid duplicate clients.
+    if (vkId > 0) {
+      try {
+        clearAccountCache(session.login);
+        const committed = await getCustomerByVkId(session, vkId);
+        if (committed?.id) return { created:true, client:committed, recoveredFromUpstreamError:true };
+      } catch {}
+    }
     if (!['BAD_RESPONSE','HTTP','API'].includes(String(err?.code || ''))) throw err;
-    console.warn('[BlueSales customers.add] пробую совместимый fallback customers.addMany');
-    raw = await bsCall(session, 'customers.addMany', [payload]);
+
+    console.warn('[BlueSales customers.add] non-JSON/API failure; trying customers.addMany compatibility fallback');
+    try {
+      raw = await bsCall(session, 'customers.addMany', [createPayload]);
+      createError = null;
+    } catch (batchErr) {
+      if (vkId > 0) {
+        try {
+          clearAccountCache(session.login);
+          const committed = await getCustomerByVkId(session, vkId);
+          if (committed?.id) return { created:true, client:committed, recoveredFromUpstreamError:true };
+        } catch {}
+      }
+      const details = {
+        add: createError?.details || createError?.message || null,
+        addMany: batchErr?.details || batchErr?.message || null
+      };
+      throw new BlueSalesError(
+        'BlueSales не смог создать карточку через customers.add и customers.addMany. Сервер BlueSales вернул внутреннюю ошибку; повторите через несколько секунд.',
+        batchErr?.code || createError?.code || 'API',
+        details
+      );
+    }
   }
+
   clearAccountCache(session.login);
   let client = null;
   if (vkId > 0) {
@@ -1526,7 +1680,43 @@ async function createCustomerFromDraft(session, draft) {
   }
   if (!client) {
     const candidate = Array.isArray(raw) ? raw[0] : raw?.customer || raw?.Customer || raw;
-    client = normalizeCustomer(candidate || payload);
+    const normalized = normalizeCustomer(candidate || createPayload);
+    if (normalized?.id) client = normalized;
+  }
+
+  // Apply the optional fields only after creation. A failure here must not make the
+  // UI think that the whole create operation failed when the customer already exists.
+  if (client?.id) {
+    const update = { id:Number(client.id) };
+    if (draft?.city) update.city = { name:String(draft.city) };
+    if (draft?.crmStatus) update.crmStatus = { name:String(draft.crmStatus) };
+    if (draft?.firstContactDate) update.firstContactDate = String(draft.firstContactDate);
+    if (draft?.nextContactDate) update.nextContactDate = String(draft.nextContactDate);
+    if (draft?.phone) update.mobilePhone = String(draft.phone);
+    if (draft?.email) update.email = String(draft.email);
+    if (draft?.managerLogin) update.manager = { login:String(draft.managerLogin) };
+    if (draft?.shortNotes) update.shortNotes = String(draft.shortNotes);
+    if (draft?.comments) update.comments = String(draft.comments);
+    if (Object.keys(update).length > 1) {
+      try {
+        await bsCall(session, 'customers.update', update);
+        clearAccountCache(session.login);
+        if (vkId > 0) client = (await getCustomerByVkId(session, vkId)) || client;
+        else client = (await getCustomerById(session, Number(client.id))) || client;
+      } catch (updateErr) {
+        console.warn('[BlueSales customers.update after add] client created, optional fields were not fully applied:', updateErr?.message || updateErr);
+      }
+    }
+  }
+
+  if (!client) {
+    // Last verification for installations whose add endpoint returns an unusual body.
+    if (vkId > 0) {
+      try { client = await getCustomerByVkId(session, vkId); } catch {}
+    }
+  }
+  if (!client?.id) {
+    throw new BlueSalesError('BlueSales принял запрос на создание, но не вернул ID клиента и карточка не находится по VK ID.', 'BAD_RESPONSE', raw);
   }
   return { created:true, client };
 }
@@ -1773,6 +1963,7 @@ async function apiRouter(req, res, url) {
       const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
       const q = String(url.searchParams.get('q') || '').trim();
       const filter = ['all','unread','unanswered','important','archive'].includes(String(url.searchParams.get('filter') || 'all')) ? String(url.searchParams.get('filter') || 'all') : 'all';
+      const includeCrm = String(url.searchParams.get('crm') || '1') !== '0';
       let raw, dialogs;
       if (q) {
         // v24.3: searchConversations discovers candidates; local ranking decides
@@ -1801,7 +1992,7 @@ async function apiRouter(req, res, url) {
         }
 
         const seenPeers = new Set(dialogs.map(d => Number(d.peerId)));
-        try {
+        if (includeCrm) try {
           const crmHits = [];
           const digits = q.replace(/\D/g, '');
           if (/^\d{5,}$/.test(digits)) {
@@ -1846,7 +2037,7 @@ async function apiRouter(req, res, url) {
 
       // Link VK users to BlueSales CRM cards by VK id. Cached for 45s so polling does not hammer BlueSales.
       const vkIds = dialogs.filter(d => d.peerType === 'user' && d.peerId > 0).map(d => d.peerId).slice(0, 500);
-      if (vkIds.length) {
+      if (includeCrm && vkIds.length) {
         try {
           const linked = await getCustomersByVkIds(s, vkIds);
           const byVk = new Map(linked.filter(c => c.social?.vkId).map(c => [Number(c.social.vkId), c]));
@@ -1860,7 +2051,7 @@ async function apiRouter(req, res, url) {
       }
       const rawCount = Number(raw?.count || 0);
       const total = q ? dialogs.length : Number(raw?.count || dialogs.length);
-      return sendJson(res, 200, { ok: true, dialogs, count: total, rawCount: q ? rawCount : undefined, offset: q ? 0 : offset, hasMore: q ? false : offset + dialogs.length < total, search: q || null });
+      return sendJson(res, 200, { ok: true, dialogs, count: total, rawCount: q ? rawCount : undefined, offset: q ? 0 : offset, hasMore: q ? false : offset + dialogs.length < total, search: q || null, crmLinked: includeCrm });
     } catch (err) { return handleApiError(res, err); }
   }
 
@@ -1870,14 +2061,15 @@ async function apiRouter(req, res, url) {
       const peerId=Number(vkExportMatch[1]),rows=[],seen=new Set();let offset=0,total=Infinity,guard=0;
       while(offset<total && guard++<50){
         const params={peer_id:peerId,count:200,offset,extended:1,fields:'photo_100,screen_name'};if(s.vkGroupId)params.group_id=s.vkGroupId;
-        const raw=await vkCall(s.vkToken,'messages.getHistory',params),maps=vkIdentityMaps(raw||{}),items=Array.isArray(raw?.items)?raw.items:[];
+        const raw=await vkCall(s.vkToken,'messages.getHistory',params),items=Array.isArray(raw?.items)?raw.items:[];
+        const maps=await enrichVkMapsWithAdminAuthors(s,raw,vkIdentityMaps(raw||{}));
         total=Number(raw?.count||items.length);
-        for(const item of items){const m=normalizeVkMessage(item,maps),key=String(m.id||m.conversationMessageId);if(!seen.has(key)){seen.add(key);rows.push(m)}}
+        const pageMessages=await refreshMissingVoiceTranscripts(s,peerId,items.map(item=>normalizeVkMessage(item,maps)));
+        for(const m of pageMessages){const key=String(m.id||m.conversationMessageId);if(!seen.has(key)){seen.add(key);rows.push(m)}}
         offset+=items.length;if(!items.length)break;if(offset<total)await sleep(140);
       }
       rows.sort((a,b)=>Number(a.date||0)-Number(b.date||0)||Number(a.id||0)-Number(b.id||0));
-      const ownName=String(s.currentUser?.name||s.account?.name||s.login||'Вы');
-      const lineFor=m=>{const d=new Date(Number(m.date||0)*1000),stamp=d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}).replace(',',''),author=m.out?ownName:(m.author||'Собеседник');const parts=[];if(String(m.text||'').trim())parts.push(String(m.text).trim());for(const a of (m.attachments||[])){if(a.type==='audio_message')parts.push(a.transcript?`[Голосовое — расшифровка: ${a.transcript}]`:'[Голосовое сообщение]');else if(a.type==='photo')parts.push('[Фото]');else if(a.type==='video')parts.push(`[Видео${a.title?`: ${a.title}`:''}]`);else if(a.type==='doc')parts.push(`[Файл${a.title?`: ${a.title}`:''}]`);else if(a.type==='sticker')parts.push('[Стикер]');else parts.push(`[${a.title||a.type||'Вложение'}]`)}return`[${stamp}] ${author}: ${parts.join(' ')||'[Пустое сообщение]'}`};
+      const lineFor=m=>{const d=new Date(Number(m.date||0)*1000),stamp=d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}).replace(',',''),author=String(m.displayAuthor||m.author||(m.out?`VK ${VK_DIRECT_AUTHOR}`:'Собеседник'));const parts=[];if(String(m.text||'').trim())parts.push(String(m.text).trim());for(const a of (m.attachments||[])){if(a.type==='audio_message')parts.push(a.transcript?`[Голосовое сообщение: ${a.transcript}]`:'[Голосовое сообщение]');else if(a.type==='photo')parts.push('[Фото]');else if(a.type==='video')parts.push(`[Видео${a.title?`: ${a.title}`:''}]`);else if(a.type==='doc')parts.push(`[Файл${a.title?`: ${a.title}`:''}]`);else if(a.type==='sticker')parts.push('[Стикер]');else parts.push(`[${a.title||a.type||'Вложение'}]`)}return`[${stamp}] ${author}: ${parts.join(' ')||'[Пустое сообщение]'}`};
       return sendJson(res,200,{ok:true,peerId,count:rows.length,total,text:rows.map(lineFor).join('\n')});
     } catch(err){return handleApiError(res,err)}
   }
@@ -1891,7 +2083,7 @@ async function apiRouter(req, res, url) {
       const params = { peer_id: peerId, count, offset, extended: 1, fields: 'photo_100,screen_name' };
       if (s.vkGroupId) params.group_id = s.vkGroupId;
       const raw = await vkCall(s.vkToken, 'messages.getHistory', params);
-      const maps = vkIdentityMaps(raw || {});
+      const maps = await enrichVkMapsWithAdminAuthors(s, raw, vkIdentityMaps(raw || {}));
       const messages = (raw?.items || []).map(m => normalizeVkMessage(m, maps)).reverse();
       let crm = null;
       const includeCrm = String(url.searchParams.get('crm') || '1') !== '0';
@@ -1915,6 +2107,41 @@ async function apiRouter(req, res, url) {
     } catch (err) { return handleApiError(res, err); }
   }
 
+  const vkTranscriptMatch = pathname.match(/^\/api\/vk\/dialogs\/(-?\d+)\/messages\/(\d+)\/transcript$/);
+  if (vkTranscriptMatch && req.method === 'GET') {
+    try {
+      const peerId = Number(vkTranscriptMatch[1]);
+      const cmid = Number(vkTranscriptMatch[2]);
+      if (!peerId || !cmid) return sendJson(res,400,{ok:false,message:'Не удалось определить голосовое сообщение'});
+      let message = null;
+      let voice = null;
+      // VK creates transcripts asynchronously. Re-read the same message a few times,
+      // but keep the request short so the UI never hangs behind a permanent spinner.
+      for (let attempt=0; attempt<3; attempt++) {
+        const params = { peer_id:peerId, conversation_message_ids:String(cmid), extended:1, fields:'photo_100,screen_name' };
+        if (s.vkGroupId) params.group_id = s.vkGroupId;
+        const raw = await vkCall(s.vkToken,'messages.getByConversationMessageId',params);
+        const maps = await enrichVkMapsWithAdminAuthors(s,raw,vkIdentityMaps(raw||{}));
+        const item = Array.isArray(raw?.items) ? raw.items[0] : null;
+        message = item ? normalizeVkMessage(item,maps) : null;
+        voice = messageVoiceAttachment(message);
+        if (String(voice?.transcript || '').trim()) break;
+        if (attempt < 2 && String(voice?.transcriptState || '') === 'in_progress') await sleep(900 + attempt*400);
+        else if (attempt < 2) await sleep(350);
+      }
+      return sendJson(res,200,{
+        ok:true,
+        peerId,
+        conversationMessageId:cmid,
+        available:Boolean(String(voice?.transcript||'').trim()),
+        transcript:String(voice?.transcript||''),
+        transcriptState:String(voice?.transcriptState||''),
+        transcriptError:Number(voice?.transcriptError||0),
+        message
+      });
+    } catch(err){ return handleApiError(res,err); }
+  }
+
   if (vkMessagesMatch && req.method === 'POST') {
     if (!requireCsrf(req, res, s)) return;
     try {
@@ -1932,6 +2159,10 @@ async function apiRouter(req, res, url) {
       if (stickerId) params.sticker_id = stickerId;
       if (replyTo > 0) params.reply_to = replyTo;
       if (forwardMessageIds.length) params.forward_messages = forwardMessageIds.join(',');
+      // Persist which CRM account sent the message inside VK itself. This survives
+      // Render restarts and lets exports distinguish CRM messages from messages sent
+      // directly in VK. Only the display name is stored; no login/password is exposed.
+      params.payload = JSON.stringify({seb_gun_crm:{author:String(s.currentUser?.name||s.login||'CRM'),version:VERSION}});
       if (s.vkGroupId) params.group_id = s.vkGroupId;
       const messageId = await vkCall(s.vkToken, 'messages.send', params);
       return sendJson(res, 200, { ok: true, messageId });
@@ -2344,7 +2575,7 @@ async function apiRouter(req, res, url) {
       const b = await readJson(req);
       const payload = { id };
       if ('fullName' in b) payload.fullName = String(b.fullName || '');
-      if ('phone' in b) payload.phone = String(b.phone || '');
+      if ('phone' in b) payload.mobilePhone = String(b.phone || '');
       if ('email' in b) payload.email = String(b.email || '');
       if ('city' in b) payload.city = { name: String(b.city || '') };
       if ('crmStatus' in b) payload.crmStatus = { name: String(b.crmStatus || '') };
@@ -2515,7 +2746,11 @@ function handleApiError(res, err) {
     return sendJson(res, status, { ok: false, error: err.code, message: err.message, details: err.details || undefined });
   }
   if (err instanceof BlueSalesError) {
-    const status = err.code === 'AUTH' ? 401 : err.code === 'BUSY' ? 409 : err.code === 'API_BUSY' ? 503 : err.code === 'TIMEOUT' ? 504 : 502;
+    if (err.details) {
+      try { console.error('[BlueSales API details]', JSON.stringify(err.details).slice(0, 1800)); }
+      catch { console.error('[BlueSales API details]', String(err.details).slice(0, 1800)); }
+    }
+    const status = err.code === 'AUTH' ? 401 : err.code === 'BUSY' ? 409 : (err.code === 'API_BUSY' || err.code === 'QUEUE_BUSY') ? 503 : err.code === 'TIMEOUT' ? 504 : 502;
     return sendJson(res, status, { ok: false, error: err.code, message: err.message, details: err.details || undefined });
   }
   const status = err && err.status ? err.status : 500;

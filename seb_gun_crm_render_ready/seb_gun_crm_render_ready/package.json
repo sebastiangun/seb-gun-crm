@@ -1,15 +1,16 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "25.0.0",
+  "version": "25.1.0",
   "private": true,
-  "description": "seb_gun CRM + direct VK: fast BlueSales metadata, cached order reads, non-blocking order/service editor, plus v25 messaging, navigation, export and performance fixes",
+  "description": "seb_gun CRM v25.1: VK-like message actions, CRM/VK author attribution, voice transcript refresh/copy, resilient BlueSales client creation, and non-blocking chat performance",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "check": "node --check server.js && node --check lib/bluesales-web.js && node --check public/api.js && node --check public/app.js && node --check public/sw.js",
     "test:core": "node tests/ui-parser-v209.js && node tests/integration-v209.js && node tests/integration-v210.js && node tests/integration-v220.js && node tests/integration-v230.js && node tests/integration-v240.js && node tests/integration-v241.js && node tests/integration-v242.js && node tests/integration-v243.js && node tests/integration-v244.js",
     "test": "node tests/ui-parser-v209.js && node tests/integration-v209.js && node tests/integration-v210.js && node tests/integration-v220.js && node tests/integration-v230.js && node tests/integration-v240.js && node tests/integration-v241.js && node tests/integration-v242.js && node tests/integration-v243.js && node tests/integration-v244.js && node tests/integration-v245.js",
-    "test:v25": "node tests/integration-v250.js"
+    "test:v25": "node tests/integration-v250.js",
+    "test:v251": "node tests/integration-v251.js"
   },
   "engines": {
     "node": ">=18"
