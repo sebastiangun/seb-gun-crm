@@ -18,7 +18,7 @@ services:
         value: "1"
 
       - key: ALLOW_LOCAL_PHRASE_FALLBACK
-        value: "0"
+        value: "1"
 
       - key: PUBLIC_BASE_URL
         value: "https://seb-gun-crm.onrender.com"
