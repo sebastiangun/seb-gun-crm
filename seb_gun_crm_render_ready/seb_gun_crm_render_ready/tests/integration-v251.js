@@ -6,7 +6,7 @@ const app=fs.readFileSync(path.join(ROOT,'public','app.js'),'utf8');
 const api=fs.readFileSync(path.join(ROOT,'public','api.js'),'utf8');
 const css=fs.readFileSync(path.join(ROOT,'public','styles.css'),'utf8');
 const render=fs.readFileSync(path.join(ROOT,'render.yaml'),'utf8');
-assert(server.includes("const VERSION = '25.1'"));
+assert(/const VERSION = '25\.[12]'/.test(server));
 assert(server.includes('admin_author_id'),'VK admin author attribution missing');
 assert(server.includes('seb_gun_crm:{author:'),'CRM author payload marker missing');
 assert(server.includes('audioMessageFromDoc'),'doc.preview.audio_msg voice normalization missing');

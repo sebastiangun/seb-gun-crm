@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
 
-    buildCommand: node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/server.js && node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/lib/bluesales-web.js
+    buildCommand: node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/server.js && node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/lib/bluesales-web.js && node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/public/api.js && node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/public/app.js && node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/public/sw.js
     startCommand: node seb_gun_crm_render_ready/seb_gun_crm_render_ready/server.js
 
     healthCheckPath: /api/health
@@ -20,6 +20,12 @@ services:
         value: "https://seb-gun-crm.onrender.com"
       - key: VK_DIRECT_AUTHOR
         value: "Дарья А."
+      - key: STT_MODEL
+        value: "whisper-large-v3-turbo"
+      - key: STT_LANGUAGE
+        value: "ru"
+      - key: GROQ_API_KEY
+        sync: false
       - key: VK_TOKEN
         sync: false
       - key: VK_COMMUNITY

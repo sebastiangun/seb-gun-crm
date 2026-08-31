@@ -52,12 +52,20 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '25.1';
+const VERSION = '25.2';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
 const VK_DIRECT_AUTHOR = String(process.env.VK_DIRECT_AUTHOR || 'Дарья А.').trim();
+// Optional external speech-to-text. Groq exposes an OpenAI-compatible transcription
+// endpoint and Whisper models. VK's own transcript is always preferred first.
+const STT_API_KEY = String(process.env.GROQ_API_KEY || process.env.STT_API_KEY || '').trim();
+const STT_BASE_URL = String(process.env.STT_BASE_URL || 'https://api.groq.com/openai/v1').trim().replace(/\/+$/, '');
+const STT_MODEL = String(process.env.STT_MODEL || 'whisper-large-v3-turbo').trim();
+const STT_LANGUAGE = String(process.env.STT_LANGUAGE || 'ru').trim();
+const STT_TIMEOUT_MS = Math.min(Math.max(Number(process.env.STT_TIMEOUT_MS || 30000), 5000), 60000);
+const STT_MAX_BYTES = Math.min(Math.max(Number(process.env.STT_MAX_BYTES || 24 * 1024 * 1024), 1024 * 1024), 25 * 1024 * 1024);
 
 const BS_SCREENSHOT_STATUS_COLORS = {
   'Не учитывать в лидах':'#848B8C',
@@ -92,6 +100,7 @@ const BS_SCREENSHOT_MANAGER_COLORS = {
 const sessions = new Map();
 const cache = new Map();
 const inflight = new Map();
+const voiceTranscriptCache = new Map();
 let blueSalesQueueTail = Promise.resolve();
 let blueSalesQueueDepth = 0;
 let blueSalesLastFinishedAt = 0;
@@ -1168,6 +1177,62 @@ function isAllowedMediaHost(hostname) {
   return suffixes.some(s => h.endsWith(s)) || ['userapi.com','vkuserphoto.ru','vkuseraudio.net','vkuserlive.net','vkcdn.ru','vk-cdn.net'].includes(h);
 }
 
+function transcriptCacheKey(peerId, conversationMessageId) {
+  return `${Number(peerId)||0}:${Number(conversationMessageId)||0}`;
+}
+function putVoiceTranscriptCache(peerId, conversationMessageId, text, source='external') {
+  const clean=String(text||'').trim();
+  if(!clean)return;
+  voiceTranscriptCache.set(transcriptCacheKey(peerId,conversationMessageId),{text:clean,source:String(source||'external'),expiresAt:Date.now()+24*60*60*1000});
+}
+function getVoiceTranscriptCache(peerId, conversationMessageId) {
+  const key=transcriptCacheKey(peerId,conversationMessageId),row=voiceTranscriptCache.get(key);
+  if(!row)return null;
+  if(Number(row.expiresAt||0)<Date.now()){voiceTranscriptCache.delete(key);return null}
+  return row;
+}
+function applyVoiceTranscriptCache(peerId,messages=[]) {
+  for(const m of messages||[]){
+    const cmid=Number(m?.conversationMessageId||0),voice=messageVoiceAttachment(m),cached=cmid?getVoiceTranscriptCache(peerId,cmid):null;
+    if(voice&&cached&&!String(voice.transcript||'').trim()){
+      voice.transcript=cached.text;voice.transcriptState='done';voice.transcriptSource=cached.source;
+    }
+  }
+  return messages;
+}
+async function downloadVoiceForStt(rawUrl) {
+  let target;
+  try{target=new URL(String(rawUrl||''))}catch{throw Object.assign(new Error('Некорректная ссылка голосового сообщения'),{status:400})}
+  if(target.protocol!=='https:'||!isAllowedMediaHost(target.hostname))throw Object.assign(new Error('Хост голосового сообщения не разрешён'),{status:400});
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.min(STT_TIMEOUT_MS,20000));
+  try{
+    const r=await fetch(target,{redirect:'follow',headers:{'Accept':'audio/ogg,audio/mpeg,audio/*,*/*;q=0.8','User-Agent':`seb_gun-CRM/${VERSION}`,'Referer':'https://vk.com/'},signal:controller.signal});
+    if(!r.ok)throw new Error(`VK audio HTTP ${r.status}`);
+    const declared=Number(r.headers.get('content-length')||0);if(declared>STT_MAX_BYTES)throw new Error('Голосовое слишком большое для расшифровки');
+    const ab=await r.arrayBuffer();if(ab.byteLength>STT_MAX_BYTES)throw new Error('Голосовое слишком большое для расшифровки');
+    const type=String(r.headers.get('content-type')||'audio/ogg').split(';')[0]||'audio/ogg';
+    const ext=type.includes('mpeg')?'mp3':type.includes('webm')?'webm':type.includes('wav')?'wav':type.includes('mp4')?'m4a':'ogg';
+    return {buffer:Buffer.from(ab),type,filename:`voice.${ext}`};
+  }catch(err){if(err?.name==='AbortError')throw new Error('Не удалось скачать голосовое: таймаут VK');throw err}finally{clearTimeout(timer)}
+}
+async function transcribeVoiceExternal(audioUrl) {
+  if(!STT_API_KEY)return {configured:false,text:'',source:''};
+  const audio=await downloadVoiceForStt(audioUrl);
+  const form=new FormData();
+  form.append('file',new Blob([audio.buffer],{type:audio.type}),audio.filename);
+  form.append('model',STT_MODEL);form.append('response_format','json');form.append('temperature','0');
+  if(STT_LANGUAGE)form.append('language',STT_LANGUAGE);
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),STT_TIMEOUT_MS);
+  let r;
+  try{r=await fetch(`${STT_BASE_URL}/audio/transcriptions`,{method:'POST',headers:{Authorization:`Bearer ${STT_API_KEY}`},body:form,signal:controller.signal})}
+  catch(err){if(err?.name==='AbortError')throw new Error('Сервис расшифровки отвечает слишком долго');throw err}
+  finally{clearTimeout(timer)}
+  const body=await r.text();let data=null;try{data=JSON.parse(body)}catch{}
+  if(!r.ok){const msg=String(data?.error?.message||data?.message||body||`HTTP ${r.status}`).replace(/\s+/g,' ').slice(0,360);throw new Error(`Speech-to-text: ${msg}`)}
+  const text=String(data?.text||'').trim();if(!text)throw new Error('Speech-to-text вернул пустую расшифровку');
+  return {configured:true,text,source:STT_BASE_URL.includes('groq.com')?'groq-whisper':'external-stt'};
+}
+
 async function proxyVkMedia(req, res, rawUrl) {
   let target;
   try { target = new URL(String(rawUrl || '')); }
@@ -1869,7 +1934,7 @@ async function apiRouter(req, res, url) {
   const pathname = url.pathname;
 
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null });
+    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:Boolean(STT_API_KEY), sttModel:STT_API_KEY?STT_MODEL:null });
   }
 
   if (pathname === '/api/auth/login' && req.method === 'POST') {
@@ -2064,7 +2129,7 @@ async function apiRouter(req, res, url) {
         const raw=await vkCall(s.vkToken,'messages.getHistory',params),items=Array.isArray(raw?.items)?raw.items:[];
         const maps=await enrichVkMapsWithAdminAuthors(s,raw,vkIdentityMaps(raw||{}));
         total=Number(raw?.count||items.length);
-        const pageMessages=await refreshMissingVoiceTranscripts(s,peerId,items.map(item=>normalizeVkMessage(item,maps)));
+        const pageMessages=applyVoiceTranscriptCache(peerId,await refreshMissingVoiceTranscripts(s,peerId,items.map(item=>normalizeVkMessage(item,maps))));
         for(const m of pageMessages){const key=String(m.id||m.conversationMessageId);if(!seen.has(key)){seen.add(key);rows.push(m)}}
         offset+=items.length;if(!items.length)break;if(offset<total)await sleep(140);
       }
@@ -2084,7 +2149,7 @@ async function apiRouter(req, res, url) {
       if (s.vkGroupId) params.group_id = s.vkGroupId;
       const raw = await vkCall(s.vkToken, 'messages.getHistory', params);
       const maps = await enrichVkMapsWithAdminAuthors(s, raw, vkIdentityMaps(raw || {}));
-      const messages = (raw?.items || []).map(m => normalizeVkMessage(m, maps)).reverse();
+      const messages = applyVoiceTranscriptCache(peerId,(raw?.items || []).map(m => normalizeVkMessage(m, maps)).reverse());
       let crm = null;
       const includeCrm = String(url.searchParams.get('crm') || '1') !== '0';
       if (includeCrm && peerId > 0 && peerId < 2000000000) {
@@ -2129,14 +2194,27 @@ async function apiRouter(req, res, url) {
         if (attempt < 2 && String(voice?.transcriptState || '') === 'in_progress') await sleep(900 + attempt*400);
         else if (attempt < 2) await sleep(350);
       }
+      let transcript=String(voice?.transcript||'').trim(),source=transcript?'vk':'',externalError='';
+      const cached=getVoiceTranscriptCache(peerId,cmid);
+      if(!transcript&&cached){transcript=cached.text;source=cached.source}
+      if(!transcript&&voice?.url&&STT_API_KEY){
+        try{
+          const ext=await transcribeVoiceExternal(voice.url);
+          transcript=String(ext.text||'').trim();source=ext.source||'external-stt';
+          if(transcript){putVoiceTranscriptCache(peerId,cmid,transcript,source);voice.transcript=transcript;voice.transcriptState='done';voice.transcriptSource=source}
+        }catch(sttErr){externalError=String(sttErr?.message||sttErr).slice(0,500);console.warn('[voice STT]',externalError)}
+      }
       return sendJson(res,200,{
         ok:true,
         peerId,
         conversationMessageId:cmid,
-        available:Boolean(String(voice?.transcript||'').trim()),
-        transcript:String(voice?.transcript||''),
-        transcriptState:String(voice?.transcriptState||''),
+        available:Boolean(transcript),
+        transcript,
+        transcriptSource:source,
+        transcriptState:transcript?'done':String(voice?.transcriptState||''),
         transcriptError:Number(voice?.transcriptError||0),
+        externalConfigured:Boolean(STT_API_KEY),
+        externalError:externalError||undefined,
         message
       });
     } catch(err){ return handleApiError(res,err); }
