@@ -1340,3 +1340,37 @@ button,input,select,textarea,.notice,.login-card,.info-card,.warning-card{
   .bs-phrase-row{min-height:42px}
 }
 .voice-transcript small{color:var(--muted)}
+
+
+/* v25.3 — resume scripts, responsive drawers and non-blocking mobile gestures */
+.phrase-resume-panel{
+  margin:8px 10px 10px;padding:10px;border:1px solid var(--line);border-radius:12px;
+  background:color-mix(in srgb,var(--surface-2) 88%,var(--brand) 12%);
+}
+.phrase-resume-main{
+  width:100%;border:0;border-radius:10px;padding:9px 10px;text-align:left;cursor:pointer;
+  background:rgba(4,99,7,.10);color:var(--ink);font-size:11px;font-weight:850;
+}
+.phrase-resume-main:hover{background:rgba(4,99,7,.16)}
+.phrase-recent-row{display:flex;gap:6px;overflow-x:auto;padding-top:8px;scrollbar-width:thin}
+.phrase-recent-row button{
+  flex:0 0 auto;max-width:190px;border:1px solid var(--line);border-radius:999px;padding:6px 9px;
+  background:var(--surface);color:var(--ink);font-size:9px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.phrase-search-wrap{position:relative}
+.phrase-search-wrap input{padding-right:38px!important}
+.phrase-search-clear{
+  position:absolute;right:9px;top:50%;transform:translateY(-50%);width:26px;height:26px;border:0;border-radius:8px;
+  background:transparent;color:var(--muted);font-size:17px;line-height:1;cursor:pointer;
+}
+.phrase-search-clear:hover{background:var(--surface-3);color:var(--ink)}
+.phrase-search-clear.hidden{display:none!important}
+[data-theme="dark"] .phrase-resume-panel{background:#14231d}
+[data-theme="dark"] .phrase-resume-main{background:#1c3929;color:#eff8f2}
+@media(max-width:699px){
+  .chat-shell{overscroll-behavior-x:contain;touch-action:pan-y}
+  .drawer{overscroll-behavior:contain;-webkit-overflow-scrolling:touch;will-change:transform}
+  .phrase-resume-panel{margin:6px 8px 8px}
+  .phrase-resume-main{min-height:42px}
+  .phrase-recent-row button{min-height:34px;max-width:160px}
+}

@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "25.2.0",
+  "version": "25.3.0",
   "private": true,
-  "description": "seb_gun CRM v25.2: Groq/Whisper voice transcription fallback, persistent quick-phrase drawer, mobile edge swipes, faster cached CRM cards, and robust history navigation",
+  "description": "seb_gun CRM v25.3: faster Groq/Whisper voice transcription, voice-aware full dialog export, persistent script position/recent scripts, mobile drawer gestures, unified browser history, and BlueSales stale-cache performance safeguards",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -11,7 +11,8 @@
     "test": "node tests/ui-parser-v209.js && node tests/integration-v209.js && node tests/integration-v210.js && node tests/integration-v220.js && node tests/integration-v230.js && node tests/integration-v240.js && node tests/integration-v241.js && node tests/integration-v242.js && node tests/integration-v243.js && node tests/integration-v244.js && node tests/integration-v245.js",
     "test:v25": "node tests/integration-v250.js",
     "test:v251": "node tests/integration-v251.js",
-    "test:v252": "node tests/integration-v252.js"
+    "test:v252": "node tests/integration-v252.js",
+    "test:v253": "node tests/integration-v253.js"
   },
   "engines": {
     "node": ">=18"

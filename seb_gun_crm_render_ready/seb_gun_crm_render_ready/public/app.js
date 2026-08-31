@@ -1,19 +1,36 @@
 (() => {
 const app=document.getElementById('app'),toastNode=document.getElementById('toast');
-const state={session:null,tab:'dialogs',dialogs:[],dialogsOffset:0,dialogsHasMore:false,dialogFilter:'all',dialogSearch:'',dialogManager:'',dialogStatus:'',selectedDialog:null,messages:[],chatCrm:null,chatTotal:0,clients:[],clientsLoaded:false,metaLoaded:false,metaPromise:null,remindersLoaded:false,offset:0,hasMore:false,q:'',status:'',manager:'',meta:{users:[],statuses:[],tags:[],statusColors:{},managerColors:{},tagColors:{},tagTextColors:{},capabilities:{},currentUser:null,uiSync:null},reminders:{today:[],tomorrow:[],future:[],overdue:[]},reminderTab:'today',reminderSearch:'',reminderManager:'',reminderStatus:'',reminderTag:'',clientTag:'',leftDrawer:false,rightDrawer:false,rightTab:'client',phraseGroups:[],phraseLoaded:false,phraseQuery:'',phraseSource:'',phraseSync:null,phraseManager:null,phraseDiscovered:{},phraseMessage:'',phraseEditUrl:'',phraseCapabilities:{},clientDraft:null,drawerOrders:[],drawerOrdersLoaded:false,drawerOrdersLoading:false,drawerOrdersPromise:null,drawerOrdersError:'',drawerEdit:false,newOrderDraft:null,serviceCatalog:[],serviceLoaded:false,servicePromise:null,serviceQuery:'',messageDraft:'',messageAttachments:[],replyTarget:null,forwardTarget:null,messageMenuId:'',messageExportLoading:false,phraseSuggestOpen:false,phraseSuggestIndex:0,adminLoaded:false,adminOverview:null,adminUsers:[],adminPhraseGroups:[],adminSection:'phrases',adminQuery:'',adminPhraseEdit:null,adminUserEdit:null,loading:false,pollBusy:false,theme:(localStorage.getItem('seb_gun_theme')||'light'),clientEditSnapshot:null,composerExpanded:false,chatScroll:{},chatBottomLockPeer:'',chatBottomLockUntil:0,dialogsLoading:false,dialogsTotal:0,adminPhraseMove:null,phraseLastId:'',phraseScrollTop:0,phraseRestorePending:false};
+const state={session:null,tab:'dialogs',dialogs:[],dialogsOffset:0,dialogsHasMore:false,dialogFilter:'all',dialogSearch:'',dialogManager:'',dialogStatus:'',selectedDialog:null,messages:[],chatCrm:null,chatTotal:0,clients:[],clientsLoaded:false,metaLoaded:false,metaPromise:null,remindersLoaded:false,offset:0,hasMore:false,q:'',status:'',manager:'',meta:{users:[],statuses:[],tags:[],statusColors:{},managerColors:{},tagColors:{},tagTextColors:{},capabilities:{},currentUser:null,uiSync:null},reminders:{today:[],tomorrow:[],future:[],overdue:[]},reminderTab:'today',reminderSearch:'',reminderManager:'',reminderStatus:'',reminderTag:'',clientTag:'',leftDrawer:false,rightDrawer:false,rightTab:'client',phraseGroups:[],phraseLoaded:false,phraseQuery:'',phraseSource:'',phraseSync:null,phraseManager:null,phraseDiscovered:{},phraseMessage:'',phraseEditUrl:'',phraseCapabilities:{},clientDraft:null,drawerOrders:[],drawerOrdersLoaded:false,drawerOrdersLoading:false,drawerOrdersPromise:null,drawerOrdersError:'',drawerEdit:false,newOrderDraft:null,serviceCatalog:[],serviceLoaded:false,servicePromise:null,serviceQuery:'',messageDraft:'',messageAttachments:[],replyTarget:null,forwardTarget:null,messageMenuId:'',messageExportLoading:false,phraseSuggestOpen:false,phraseSuggestIndex:0,adminLoaded:false,adminOverview:null,adminUsers:[],adminPhraseGroups:[],adminSection:'phrases',adminQuery:'',adminPhraseEdit:null,adminUserEdit:null,loading:false,pollBusy:false,theme:(localStorage.getItem('seb_gun_theme')||'light'),clientEditSnapshot:null,composerExpanded:false,chatScroll:{},chatBottomLockPeer:'',chatBottomLockUntil:0,dialogsLoading:false,dialogsTotal:0,adminPhraseMove:null,phraseLastId:'',phraseScrollTop:0,phraseRestorePending:false,phraseRecentIds:[],phraseResumePending:false};
 const I={chat:'💬',people:'👥',bell:'🔔',menu:'☰',admin:'⚙',search:'⌕',back:'‹',refresh:'↻',send:'➤',bolt:'⚡',crm:'◫',clip:'＋',mic:'🎤',close:'×'};
 const esc=(v='')=>String(v).replace(/[&<>'"]/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[x]));
 function toast(m,k=''){toastNode.textContent=m;toastNode.className=`toast show ${k}`;clearTimeout(toastNode._t);toastNode._t=setTimeout(()=>toastNode.className='toast',3600)}
-let loadingDepth=0,loadingTimer=0,loadingSlowTimer=0;
+let loadingDepth=0,loadingTimer=0,loadingSlowTimer=0,loadingWatchdog=0,loadingCycle=0;
+function resetLoadingUi(reason=''){
+  loadingDepth=0;state.loading=false;
+  clearTimeout(loadingTimer);clearTimeout(loadingSlowTimer);clearTimeout(loadingWatchdog);
+  document.body.classList.remove('busy');
+  if(reason)console.warn('[loading watchdog]',reason);
+}
 function setLoading(v){
   if(v){
+    if(loadingDepth===0)loadingCycle+=1;
     loadingDepth+=1;state.loading=true;
+    const cycle=loadingCycle;
     clearTimeout(loadingTimer);
-    loadingTimer=setTimeout(()=>{if(loadingDepth>0)document.body.classList.add('busy')},420);clearTimeout(loadingSlowTimer);loadingSlowTimer=setTimeout(()=>{if(loadingDepth>0)toast('BlueSales отвечает медленно. Интерфейс можно продолжать использовать.','')},7000);
+    loadingTimer=setTimeout(()=>{if(loadingDepth>0&&cycle===loadingCycle)document.body.classList.add('busy')},420);
+    clearTimeout(loadingSlowTimer);
+    loadingSlowTimer=setTimeout(()=>{if(loadingDepth>0&&cycle===loadingCycle)toast('BlueSales отвечает медленно. Экран не заблокирован — можно продолжать работу.','')},6500);
+    clearTimeout(loadingWatchdog);
+    loadingWatchdog=setTimeout(()=>{
+      if(loadingDepth>0&&cycle===loadingCycle){
+        resetLoadingUi('операция дольше 32 секунд');
+        toast('Долгая загрузка остановлена. Повторите только нужное действие.','error');
+      }
+    },32000);
     return;
   }
   loadingDepth=Math.max(0,loadingDepth-1);
-  if(!loadingDepth){state.loading=false;clearTimeout(loadingTimer);clearTimeout(loadingSlowTimer);document.body.classList.remove('busy')}
+  if(!loadingDepth)resetLoadingUi();
 }
 function track(action,details={}){try{BSAPI.activity(action,details).catch(()=>{})}catch{}}
 function logo(){return '<div class="logo-mark">S</div>'}function initials(n=''){return String(n||'?').split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase()}
@@ -23,11 +40,54 @@ function fmtDateTime(ts){if(!ts)return'';const d=new Date(Number(ts)*1000);retur
 function normSearch(v=''){return String(v??'').normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g,'е').replace(/[^\p{L}\p{N}@+._-]+/gu,' ').replace(/\s+/g,' ').trim()}
 function searchTokens(v=''){return normSearch(v).split(' ').filter(Boolean)}
 function textMatchesQuery(text='',query=''){const hay=normSearch(text),tokens=searchTokens(query);return !tokens.length||tokens.every(t=>hay.includes(t))}
-const PHRASE_DRAWER_STORAGE='seb_gun_phrase_drawer_v2';
-function loadPhraseDrawerState(){try{const x=JSON.parse(localStorage.getItem(PHRASE_DRAWER_STORAGE)||'{}');state.phraseQuery=String(x.query||'');state.phraseLastId=String(x.lastId||'');state.phraseScrollTop=Math.max(0,Number(x.scrollTop||0))}catch{}}
-function savePhraseDrawerState(){try{localStorage.setItem(PHRASE_DRAWER_STORAGE,JSON.stringify({query:state.phraseQuery||'',lastId:state.phraseLastId||'',scrollTop:Math.max(0,Number(state.phraseScrollTop||0)),updatedAt:Date.now()}))}catch{}}
+const PHRASE_DRAWER_STORAGE='seb_gun_phrase_drawer_v3';
+function loadPhraseDrawerState(){
+  try{
+    const x=JSON.parse(localStorage.getItem(PHRASE_DRAWER_STORAGE)||localStorage.getItem('seb_gun_phrase_drawer_v2')||'{}');
+    state.phraseQuery=String(x.query||'');
+    state.phraseLastId=String(x.lastId||'');
+    state.phraseScrollTop=Math.max(0,Number(x.scrollTop||0));
+    state.phraseRecentIds=Array.isArray(x.recentIds)?x.recentIds.map(String).filter(Boolean).slice(0,6):[];
+  }catch{}
+}
+function savePhraseDrawerState(){
+  try{
+    localStorage.setItem(PHRASE_DRAWER_STORAGE,JSON.stringify({
+      query:state.phraseQuery||'',
+      lastId:state.phraseLastId||'',
+      recentIds:(state.phraseRecentIds||[]).slice(0,6),
+      scrollTop:Math.max(0,Number(state.phraseScrollTop||0)),
+      updatedAt:Date.now()
+    }));
+  }catch{}
+}
+function rememberPhraseUse(id=''){
+  const key=String(id||'');if(!key)return;
+  state.phraseLastId=key;
+  state.phraseRecentIds=[key,...(state.phraseRecentIds||[]).filter(x=>String(x)!==key)].slice(0,6);
+}
 function capturePhraseDrawerState(){const d=document.querySelector('.drawer-left');if(d)state.phraseScrollTop=Math.max(0,d.scrollTop||0);savePhraseDrawerState()}
-function restorePhraseDrawerPosition(){if(!state.leftDrawer&&!workspaceDesktop())return;requestAnimationFrame(()=>requestAnimationFrame(()=>{const d=document.querySelector('.drawer-left');if(!d)return;const selected=state.phraseLastId?[...d.querySelectorAll('[data-phrase-id]')].find(x=>String(x.dataset.phraseId)===String(state.phraseLastId)):null;if(selected){const r=selected.getBoundingClientRect(),dr=d.getBoundingClientRect();if(r.bottom<dr.top+95||r.top>dr.bottom-60)selected.scrollIntoView({block:'center'});else d.scrollTop=Math.max(0,state.phraseScrollTop||d.scrollTop)}else d.scrollTop=Math.max(0,state.phraseScrollTop||0)}))}
+function scrollPhraseIntoView(id=state.phraseLastId,{center=false}={}){
+  const d=document.querySelector('.drawer-left');if(!d||!id)return false;
+  const selected=[...d.querySelectorAll('[data-phrase-id]')].find(x=>String(x.dataset.phraseId)===String(id));
+  if(!selected)return false;
+  const details=selected.closest('details');if(details)details.open=true;
+  if(center)selected.scrollIntoView({block:'center',behavior:'smooth'});
+  else{
+    const r=selected.getBoundingClientRect(),dr=d.getBoundingClientRect();
+    if(r.bottom<dr.top+118||r.top>dr.bottom-70)selected.scrollIntoView({block:'center'});
+    else d.scrollTop=Math.max(0,state.phraseScrollTop||d.scrollTop);
+  }
+  selected.classList.add('phrase-current');
+  return true;
+}
+function restorePhraseDrawerPosition(){
+  if(!state.leftDrawer&&!workspaceDesktop())return;
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    const d=document.querySelector('.drawer-left');if(!d)return;
+    if(!scrollPhraseIntoView(state.phraseLastId))d.scrollTop=Math.max(0,state.phraseScrollTop||0);
+  }));
+}
 function dateInput(v){const s=String(v||'').trim();if(!s)return'';let m=s.match(/^(\d{4})-(\d{2})-(\d{2})/);if(m)return`${m[1]}-${m[2]}-${m[3]}`;m=s.match(/^(\d{2})[.\/-](\d{2})[.\/-](\d{4})/);if(m)return`${m[3]}-${m[2]}-${m[1]}`;const d=new Date(s);if(!Number.isNaN(d.getTime()))return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;return''}
 function todayPlus(days){const d=new Date();d.setDate(d.getDate()+days);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
 function workspaceDesktop(){return typeof window!=='undefined'&&window.innerWidth>=1100}
@@ -134,7 +194,30 @@ function resetChatTransientState(){
   releaseChatBottomLock();
   state.selectedDialog=null;state.messages=[];state.chatCrm=null;state.messageDraft='';state.messageAttachments=[];state.replyTarget=null;state.forwardTarget=null;state.phraseSuggestOpen=false;state.leftDrawer=false;state.rightDrawer=false;
 }
+function currentChatRoute(){return state.selectedDialog?`dialog/${state.selectedDialog.peerId}`:''}
+function openChatDrawer(side,{pushHistory=true}={}){
+  if(!state.selectedDialog)return;
+  const overlay=side==='phrases'?'phrases':'crm';
+  if(overlay==='phrases'){state.rightDrawer=false;state.leftDrawer=true}
+  else{state.leftDrawer=false;state.rightDrawer=true}
+  if(!workspaceDesktop()&&pushHistory){
+    const base={...(history.state||{}),sebGun:true,route:currentChatRoute(),overlay};
+    if(history.state?.overlay)history.replaceState(base,'',location.href);
+    else history.pushState(base,'',location.href);
+  }
+  renderChatKeepScroll();
+  if(overlay==='phrases')restorePhraseDrawerPosition();
+}
+function closeChatDrawer(side='',{preferHistory=true}={}){
+  if(side==='phrases'||state.leftDrawer)capturePhraseDrawerState();
+  if(!workspaceDesktop()&&preferHistory&&history.state?.overlay){
+    history.back();return;
+  }
+  state.leftDrawer=false;state.rightDrawer=false;
+  if(state.selectedDialog)renderChatKeepScroll();
+}
 function chatBack(){
+  if(!workspaceDesktop()&&(state.leftDrawer||state.rightDrawer)){closeChatDrawer('',{preferHistory:true});return}
   const from=String(history.state?.from||'');
   const safe=/^(?:dialogs|clients|reminders|admin|more)$/.test(from)||/^(?:dialog|client)\//.test(from);
   if(safe&&history.length>1){history.back();return}
@@ -281,6 +364,14 @@ async function hydrateDialogCrmSlice({count=50,offset=0,filter=state.dialogFilte
     console.warn('Background CRM dialog link:',e?.message||e);
   }
 }
+let dialogCrmHydrateTimer=0;
+function scheduleDialogCrmHydration(opts={}){
+  clearTimeout(dialogCrmHydrateTimer);
+  dialogCrmHydrateTimer=setTimeout(()=>{
+    if(state.loading||state.selectedDialog||state.tab!=='dialogs'||state.dialogSearch||state.dialogManager||state.dialogStatus)return;
+    hydrateDialogCrmSlice(opts).catch(()=>{});
+  },2400);
+}
 async function loadDialogs(reset=false){
   if(reset){state.dialogsOffset=0;state.dialogs=[];state.dialogsTotal=0}
   const needsCrm=Boolean(String(state.dialogSearch||'').trim()||state.dialogManager||state.dialogStatus);
@@ -296,7 +387,7 @@ async function loadDialogs(reset=false){
       if(!d.hasMore||!page.length)break;
     }
     state.dialogs=all;state.dialogsOffset=offset;state.dialogsTotal=Math.max(total,all.length);state.dialogsHasMore=all.length<total;track('dialogs-filter-complete',{filter:state.dialogFilter,loaded:all.length,total:state.dialogsTotal,pages:guard});
-    if(!needsCrm&&all.length)void hydrateDialogCrmSlice({count:Math.min(all.length,200),offset:0,filter:state.dialogFilter});
+    if(!needsCrm&&all.length)scheduleDialogCrmHydration({count:Math.min(all.length,200),offset:0,filter:state.dialogFilter});
     return;
   }
   const startOffset=state.dialogsOffset;
@@ -305,7 +396,7 @@ async function loadDialogs(reset=false){
   state.dialogsOffset+=Number((d.dialogs||[]).length);
   state.dialogsTotal=Number(d.count||state.dialogs.length);
   state.dialogsHasMore=!!d.hasMore;
-  if(!needsCrm&&(d.dialogs||[]).length)void hydrateDialogCrmSlice({count:(d.dialogs||[]).length,offset:startOffset,filter:state.dialogFilter});
+  if(!needsCrm&&(d.dialogs||[]).length)scheduleDialogCrmHydration({count:(d.dialogs||[]).length,offset:startOffset,filter:state.dialogFilter});
 }
 async function ensureMeta(force=false){
   if(state.metaLoaded&&!force)return state.meta;
@@ -362,7 +453,7 @@ function header(){const who=state.meta?.currentUser?.name||state.session?.accoun
 function isAdmin(){return Boolean(state.session?.isAdmin||state.meta?.isAdmin)}
 function bottomNav(){const items=[['dialogs',I.chat,'Диалоги'],['clients',I.people,'Клиенты'],['reminders',I.bell,'Напоминания']];if(isAdmin())items.push(['admin',I.admin,'Админ']);items.push(['more',I.menu,'Ещё']);return`<nav class="bottom-nav" style="--nav-count:${items.length}">${items.map(([id,ic,l])=>`<button class="nav-item ${state.tab===id?'active':''}" data-tab="${id}"><b>${ic}</b><span>${l}</span></button>`).join('')}</nav>`}
 function render(){if(!state.session?.authenticated)return loginView();if(state.selectedDialog)return renderChat(false);let body=state.tab==='dialogs'?dialogsView():state.tab==='clients'?clientsView():state.tab==='reminders'?remindersView():state.tab==='admin'?adminView():moreView();app.innerHTML=`<main class="shell">${header()}<section class="content">${body}</section>${bottomNav()}</main>`;bindCommon()}
-function loginView(){app.innerHTML=`<main class="login-page"><section class="login-card"><div class="login-brand">${logo()}<div><h1>seb_gun CRM</h1><p>BlueSales + VK • v25.1</p></div></div><div class="notice"><b>VK уже настроен:</b> vk.ru/yogaxdasha</div><form id="loginForm" class="form-stack"><label>Логин BlueSales<input name="login" type="email" required></label><label>Пароль BlueSales<input name="password" type="password" required></label><button class="primary">Войти</button></form></section></main>`;document.getElementById('loginForm').onsubmit=async e=>{e.preventDefault();setLoading(true);const f=new FormData(e.currentTarget);try{state.session=await BSAPI.login(f.get('login'),f.get('password'));applyDialogStateFromUrl();const reqRoute=requestedRoute(),deep=/^(?:dialog|client)\//.test(reqRoute);if(!reqRoute)setRoute('#/dialogs',{replace:true});ensureRouteHistoryState();state.dialogsLoading=!deep;setLoading(false);render();track('login-success',{route:reqRoute||'dialogs'});ensureMeta().then(()=>{if(!state.selectedDialog)render()}).catch(()=>{});if(!deep){try{await loadDialogs(true)}finally{state.dialogsLoading=false}render()}await applyHashRoute();toast(deep?'Ссылка открыта':'Диалоги загружены','ok')}catch(x){toast(x.message,'error')}finally{setLoading(false)}}}
+function loginView(){app.innerHTML=`<main class="login-page"><section class="login-card"><div class="login-brand">${logo()}<div><h1>seb_gun CRM</h1><p>BlueSales + VK • v25.3</p></div></div><div class="notice"><b>VK уже настроен:</b> vk.ru/yogaxdasha</div><form id="loginForm" class="form-stack"><label>Логин BlueSales<input name="login" type="email" required></label><label>Пароль BlueSales<input name="password" type="password" required></label><button class="primary">Войти</button></form></section></main>`;document.getElementById('loginForm').onsubmit=async e=>{e.preventDefault();setLoading(true);const f=new FormData(e.currentTarget);try{state.session=await BSAPI.login(f.get('login'),f.get('password'));applyDialogStateFromUrl();const reqRoute=requestedRoute(),deep=/^(?:dialog|client)\//.test(reqRoute);if(!reqRoute)setRoute('#/dialogs',{replace:true});ensureRouteHistoryState();state.dialogsLoading=!deep;setLoading(false);render();track('login-success',{route:reqRoute||'dialogs'});ensureMeta().then(()=>{if(!state.selectedDialog)render()}).catch(()=>{});if(!deep){try{await loadDialogs(true)}finally{state.dialogsLoading=false}render()}await applyHashRoute();toast(deep?'Ссылка открыта':'Диалоги загружены','ok')}catch(x){toast(x.message,'error')}finally{setLoading(false)}}}
 function uniq(a){return[...new Set((a||[]).map(x=>String(x||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ru'))}
 function shareButton(hash,title='Скопировать ссылку'){return`<button type="button" class="bs-share-link" data-copy-route="${esc(hash)}" title="${esc(title)}">🔗</button>`}
 function filteredDialogs(){return state.dialogs.filter(d=>(!state.dialogManager||d.crm?.manager===state.dialogManager)&&(!state.dialogStatus||d.crm?.crmStatus===state.dialogStatus))}
@@ -381,6 +472,7 @@ async function hydrateChatClient(force=false){
   return state.chatCrm;
 }
 async function openDialog(peerId,fallbackClient=null,{updateRoute=true}={}){
+  clearTimeout(dialogCrmHydrateTimer);
   peerId=Number(peerId);if(!Number.isFinite(peerId))return toast('Некорректный VK ID','error');
   let d=state.dialogs.find(x=>Number(x.peerId)===peerId);
   setLoading(true);
@@ -472,17 +564,55 @@ function phraseGroupsBodyHtml(){
 function bindPendingButtons(root=document){root.querySelectorAll('[data-remove-pending]').forEach(b=>b.onclick=()=>{state.messageAttachments.splice(Number(b.dataset.removePending),1);refreshComposerOnly(false)});const clear=root.querySelector('[data-clear-pending]');if(clear)clear.onclick=()=>{state.messageAttachments=[];refreshComposerOnly(false)}}
 function autoSizeComposer(){const inp=document.getElementById('messageInput'),form=document.getElementById('messageForm');if(!inp||!form)return;form.classList.toggle('composer-expanded',!!state.composerExpanded);const btn=form.querySelector('[data-expand-composer]');if(btn){btn.textContent=state.composerExpanded?'↙':'⤢';btn.title=state.composerExpanded?'Свернуть поле':'Развернуть поле'}inp.style.height='auto';const min=state.composerExpanded?150:52,max=state.composerExpanded?Math.min(360,Math.round(innerHeight*.42)):160;inp.style.height=`${Math.min(max,Math.max(min,inp.scrollHeight))}px`}
 function refreshComposerOnly(focus=true){const inp=document.getElementById('messageInput');if(inp)inp.value=state.messageDraft;const form=document.getElementById('messageForm');if(form){document.querySelector('.pending-attachments')?.remove();const html=pendingAttachmentsHtml();if(html)form.insertAdjacentHTML('beforebegin',html);bindPendingButtons(document)}const auto=document.getElementById('phraseAutocompleteMount');if(auto)auto.innerHTML=phraseAutocompleteHtml();if(!workspaceDesktop()){document.querySelector('.drawer-left')?.classList.remove('open');document.querySelector('.drawer-scrim')?.classList.remove('show')}autoSizeComposer();if(focus&&inp){inp.focus();inp.setSelectionRange(inp.value.length,inp.value.length)}}
-function bindPhraseButtons(root=document){root.querySelectorAll('[data-phrase-id]').forEach(b=>b.onclick=()=>{capturePhraseDrawerState();state.phraseLastId=String(b.dataset.phraseId||'');savePhraseDrawerState();const p=allPhrases().find(x=>String(x.id)===String(b.dataset.phraseId));applyPhrase(p);state.leftDrawer=false;refreshComposerOnly(true)})}
-function refreshPhraseListOnly(){const list=document.querySelector('.bs-phrase-list');if(!list)return;list.innerHTML=phraseGroupsBodyHtml();bindPhraseButtons(list);restorePhraseDrawerPosition()}
+function phraseResumeHtml(){
+  const all=allPhrases(),last=all.find(x=>String(x.id)===String(state.phraseLastId));
+  const recent=(state.phraseRecentIds||[]).map(id=>all.find(x=>String(x.id)===String(id))).filter(Boolean).slice(0,4);
+  if(!last&&!recent.length)return'';
+  return`<div class="phrase-resume-panel">
+    ${last?`<button type="button" class="phrase-resume-main" data-resume-phrase="${esc(last.id)}"><small>Продолжить с последнего места</small><b>${esc(last.name)}</b><span>${esc(last.groupName||'')}</span></button>`:''}
+    ${recent.length>1?`<div class="phrase-recent-row">${recent.slice(1).map(p=>`<button type="button" data-resume-phrase="${esc(p.id)}" title="${esc(p.groupName||'')}">${esc(p.name)}</button>`).join('')}</div>`:''}
+  </div>`;
+}
+function bindPhraseButtons(root=document){
+  root.querySelectorAll('[data-phrase-id]').forEach(b=>b.onclick=()=>{
+    const d=document.querySelector('.drawer-left');
+    if(d)state.phraseScrollTop=Math.max(0,d.scrollTop||0);
+    rememberPhraseUse(b.dataset.phraseId);
+    savePhraseDrawerState();
+    const p=allPhrases().find(x=>String(x.id)===String(b.dataset.phraseId));
+    applyPhrase(p);
+    closeChatDrawer('phrases',{preferHistory:true});
+    refreshComposerOnly(true);
+  });
+  root.querySelectorAll('[data-resume-phrase]').forEach(b=>b.onclick=e=>{
+    e.preventDefault();e.stopPropagation();
+    const id=String(b.dataset.resumePhrase||'');
+    rememberPhraseUse(id);savePhraseDrawerState();
+    if(!scrollPhraseIntoView(id,{center:true})){
+      state.phraseQuery='';
+      savePhraseDrawerState();
+      refreshPhraseListOnly();
+      requestAnimationFrame(()=>scrollPhraseIntoView(id,{center:true}));
+    }
+  });
+}
+function refreshPhraseListOnly(){
+  const list=document.querySelector('.bs-phrase-list');if(!list)return;
+  list.innerHTML=phraseGroupsBodyHtml();
+  const resume=document.querySelector('.phrase-resume-mount');if(resume)resume.innerHTML=phraseResumeHtml();
+  bindPhraseButtons(document.querySelector('.drawer-left')||list);
+  restorePhraseDrawerPosition();
+}
 function leftDrawerHtml(){
   const mgr=state.phraseManager?.name||state.session?.account?.name||state.session?.login||'';
   const fallback=state.phraseSource==='bluesales-snapshot-fallback';
   return`<aside class="drawer drawer-left bs-classic-drawer ${(state.leftDrawer||workspaceDesktop())?'open':''}">
     <div class="bs-drawer-title"><div><b>БЫСТРЫЕ ФРАЗЫ</b><small>${esc(mgr)}</small></div><button data-close-drawers>${I.close}</button></div>
     <div class="bs-source-line ${fallback?'snapshot':''}">${esc(phraseSourceLabel())}</div>
-    <div class="bs-phrase-search"><span>${I.search}</span><input id="phraseSearch" value="${esc(state.phraseQuery)}" placeholder="Найти фразу" dir="ltr"></div>
+    <div class="phrase-resume-mount">${phraseResumeHtml()}</div>
+    <div class="bs-phrase-search"><span>${I.search}</span><input id="phraseSearch" value="${esc(state.phraseQuery)}" placeholder="Найти по названию или тексту" dir="ltr"><button type="button" class="phrase-search-clear ${state.phraseQuery?'':'hidden'}" data-clear-phrase-search aria-label="Очистить поиск">×</button></div>
     <div class="bs-phrase-list">${phraseGroupsBodyHtml()}</div>
-    <div class="phrase-db-note">Скрипты хранятся в локальной базе CRM и редактируются во вкладке «Админ → Быстрые фразы».</div>
+    <div class="phrase-db-note">Позиция, последний скрипт и поиск запоминаются на этом устройстве.</div>
   </aside>`;
 }
 
@@ -631,7 +761,26 @@ async function saveNewOrder(e){
     loadDrawerOrders(true).catch(()=>{});
   }catch(e){toast(e.message,'error')}finally{setLoading(false)}
 }
-async function copyWholeDialog(){if(!state.selectedDialog||state.messageExportLoading)return;state.messageExportLoading=true;const b=document.querySelector('[data-copy-dialog]');if(b){b.disabled=true;b.textContent='…'}try{const r=await BSAPI.dialogText(state.selectedDialog.peerId);await copyText(r.text||'','Весь диалог скопирован');toast(`Скопировано сообщений: ${r.count||0}`,'ok')}catch(e){const fallback=state.messages.map(messagePlainText).join('\n');if(fallback){await copyText(fallback,'Скопированы загруженные сообщения');toast(`Полный экспорт недоступен: ${e.message}`,'error')}else toast(`Копирование диалога: ${e.message}`,'error')}finally{state.messageExportLoading=false;if(b){b.disabled=false;b.textContent='⧉'}}}
+async function copyWholeDialog(){
+  if(!state.selectedDialog||state.messageExportLoading)return;
+  state.messageExportLoading=true;
+  const b=document.querySelector('[data-copy-dialog]');
+  if(b){b.disabled=true;b.textContent='…'}
+  try{
+    const r=await BSAPI.dialogText(state.selectedDialog.peerId);
+    await copyText(r.text||'','Весь диалог скопирован');
+    const voice=Number(r.voiceTranscribed||0),missing=Number(r.voiceMissing||0);
+    const suffix=voice?` • расшифровано голосовых: ${voice}`:missing?` • без расшифровки: ${missing}`:'';
+    toast(`Скопировано сообщений: ${r.count||0}${suffix}`,'ok');
+  }catch(e){
+    const fallback=state.messages.map(messagePlainText).join('\n');
+    if(fallback){await copyText(fallback,'Скопированы загруженные сообщения');toast(`Полный экспорт недоступен: ${e.message}`,'error')}
+    else toast(`Копирование диалога: ${e.message}`,'error')
+  }finally{
+    state.messageExportLoading=false;
+    if(b){b.disabled=false;b.textContent='⧉'}
+  }
+}
 async function forwardMessageTo(peerId){const m=state.forwardTarget,id=Number(m?.id||0),target=Number(peerId||0);if(!id||!target)return toast('Не удалось определить сообщение или получателя','error');setLoading(true);try{await BSAPI.sendVkMessage(target,{forwardMessageIds:[id]});state.forwardTarget=null;state.messageMenuId='';toast('Сообщение переслано','ok');renderChatKeepScroll()}catch(e){toast(`Пересылка: ${e.message}`,'error')}finally{setLoading(false)}}
 async function refreshVoiceTranscript(messageId){
   const m=findMessage(messageId),cmid=Number(m?.conversationMessageId||0),peerId=Number(state.selectedDialog?.peerId||0);
@@ -656,12 +805,44 @@ async function refreshVoiceTranscript(messageId){
 }
 function bindChatSwipeGestures(){
   const shell=document.querySelector('.chat-shell');if(!shell||window.innerWidth>=700)return;
-  let sx=0,sy=0,mode='';
-  const interactive=t=>Boolean(t?.closest?.('input,textarea,select,button,a,audio,video,.msg-action-menu,.forward-modal'));
-  shell.addEventListener('touchstart',e=>{if(e.touches.length!==1||interactive(e.target))return;const t=e.touches[0],w=window.innerWidth;sx=t.clientX;sy=t.clientY;mode='';if(state.leftDrawer)mode='close-left';else if(state.rightDrawer)mode='close-right';else if(sx>=18&&sx<=86)mode='open-left';else if(sx>=w-86&&sx<=w-18)mode='open-right'},{passive:true});
-  shell.addEventListener('touchend',e=>{if(!mode||!sx)return;const t=e.changedTouches?.[0];if(!t)return;const dx=t.clientX-sx,dy=t.clientY-sy;if(Math.abs(dx)<58||Math.abs(dx)<Math.abs(dy)*1.35){mode='';return}if(mode==='open-left'&&dx>0){state.rightDrawer=false;state.leftDrawer=true;renderChatKeepScroll();ensurePhrases().then(()=>{renderChatKeepScroll();restorePhraseDrawerPosition()}).catch(()=>{})}else if(mode==='open-right'&&dx<0){state.leftDrawer=false;state.rightDrawer=true;renderChatKeepScroll();const peer=state.selectedDialog?.peerId;Promise.allSettled([ensureMeta(),hydrateChatClient(false)]).then(()=>{if(state.selectedDialog?.peerId===peer){if(state.chatCrm&&!state.drawerOrdersLoaded)loadDrawerOrders();renderChatKeepScroll()}})}else if(mode==='close-left'&&dx<0){capturePhraseDrawerState();state.leftDrawer=false;renderChatKeepScroll()}else if(mode==='close-right'&&dx>0){state.rightDrawer=false;renderChatKeepScroll()}mode='';sx=sy=0},{passive:true});
+  let sx=0,sy=0,mode='',pointerId=null;
+  const interactive=t=>Boolean(t?.closest?.('input,textarea,select,button,a,audio,video,.msg-action-menu,.forward-modal,.service-results,.drawer'));
+  const begin=(x,y,target,id=null)=>{
+    if(interactive(target))return;
+    const w=window.innerWidth; sx=x;sy=y;pointerId=id;mode='';
+    if(state.leftDrawer)mode='close-left';
+    else if(state.rightDrawer)mode='close-right';
+    // Keep 22px for Android/iOS system Back gesture, then use the next strip.
+    else if(sx>=22&&sx<=104)mode='open-left';
+    else if(sx>=w-104&&sx<=w-22)mode='open-right';
+  };
+  const finish=(x,y,id=null)=>{
+    if(!mode||!sx||(pointerId!=null&&id!=null&&pointerId!==id))return;
+    const dx=x-sx,dy=y-sy,absX=Math.abs(dx),absY=Math.abs(dy);
+    const current=mode;mode='';sx=sy=0;pointerId=null;
+    if(absX<48||absX<absY*1.25)return;
+    if(current==='open-left'&&dx>0){
+      openChatDrawer('phrases');
+      ensurePhrases().then(()=>{if(state.selectedDialog){renderChatKeepScroll();restorePhraseDrawerPosition()}}).catch(()=>{});
+    }else if(current==='open-right'&&dx<0){
+      openChatDrawer('crm');
+      const peer=state.selectedDialog?.peerId;
+      Promise.allSettled([ensureMeta(),hydrateChatClient(false)]).then(()=>{
+        if(state.selectedDialog?.peerId===peer){if(state.chatCrm&&!state.drawerOrdersLoaded)loadDrawerOrders();renderChatKeepScroll()}
+      });
+    }else if(current==='close-left'&&dx<0)closeChatDrawer('phrases',{preferHistory:true});
+    else if(current==='close-right'&&dx>0)closeChatDrawer('crm',{preferHistory:true});
+  };
+  if('PointerEvent'in window){
+    shell.addEventListener('pointerdown',e=>{if(e.pointerType!=='touch'&&e.pointerType!=='pen')return;begin(e.clientX,e.clientY,e.target,e.pointerId)},{passive:true});
+    shell.addEventListener('pointerup',e=>finish(e.clientX,e.clientY,e.pointerId),{passive:true});
+    shell.addEventListener('pointercancel',()=>{mode='';sx=sy=0;pointerId=null},{passive:true});
+  }else{
+    shell.addEventListener('touchstart',e=>{if(e.touches.length!==1)return;const t=e.touches[0];begin(t.clientX,t.clientY,e.target,null)},{passive:true});
+    shell.addEventListener('touchend',e=>{const t=e.changedTouches?.[0];if(t)finish(t.clientX,t.clientY,null)},{passive:true});
+  }
 }
-async function bindChat(){bindChatSwipeGestures();document.querySelectorAll('[data-theme-toggle]').forEach(b=>b.onclick=toggleTheme);const chatBackButton=document.querySelector('[data-chat-back]');if(chatBackButton)chatBackButton.onclick=e=>{e.preventDefault();e.stopPropagation();chatBack()};const copyDialogButton=document.querySelector('[data-copy-dialog]');if(copyDialogButton)copyDialogButton.onclick=copyWholeDialog;document.querySelectorAll('[data-msg-menu]').forEach(b=>b.onclick=e=>{e.stopPropagation();const id=String(b.dataset.msgMenu||'');state.messageMenuId=String(state.messageMenuId||'')===id?'':id;renderChatKeepScroll()});document.querySelectorAll('[data-msg-copy]').forEach(b=>b.onclick=e=>{e.stopPropagation();const m=findMessage(b.dataset.msgCopy);state.messageMenuId='';if(m)copyText(messagePlainText(m),'Сообщение скопировано')});document.querySelectorAll('[data-msg-copy-transcript]').forEach(b=>b.onclick=e=>{e.stopPropagation();const m=findMessage(b.dataset.msgCopyTranscript),t=messageVoice(m)?.transcript||'';state.messageMenuId='';if(t)copyText(t,'Расшифровка скопирована');else toast('Расшифровка ещё не готова','error')});document.querySelectorAll('[data-msg-transcribe]').forEach(b=>b.onclick=e=>{e.stopPropagation();refreshVoiceTranscript(b.dataset.msgTranscribe)});document.querySelectorAll('[data-msg-reply]').forEach(b=>b.onclick=e=>{e.stopPropagation();state.replyTarget=findMessage(b.dataset.msgReply);state.forwardTarget=null;state.messageMenuId='';renderChatKeepScroll();requestAnimationFrame(()=>document.getElementById('messageInput')?.focus())});document.querySelectorAll('[data-msg-forward]').forEach(b=>b.onclick=e=>{e.stopPropagation();state.forwardTarget=findMessage(b.dataset.msgForward);state.messageMenuId='';renderChatKeepScroll()});const messageArea=document.getElementById('messages');if(messageArea)messageArea.onclick=e=>{if(state.messageMenuId&&!e.target.closest('.msg-action-wrap')){state.messageMenuId='';renderChatKeepScroll()}};const cancelReply=document.querySelector('[data-cancel-reply]');if(cancelReply)cancelReply.onclick=()=>{state.replyTarget=null;renderChatKeepScroll()};const cancelForward=document.querySelector('[data-cancel-forward]');if(cancelForward)cancelForward.onclick=()=>{state.forwardTarget=null;renderChatKeepScroll()};document.querySelectorAll('[data-forward-peer]').forEach(b=>b.onclick=()=>forwardMessageTo(b.dataset.forwardPeer));const fpf=document.getElementById('forwardPeerForm');if(fpf)fpf.onsubmit=e=>{e.preventDefault();forwardMessageTo(new FormData(fpf).get('peerId'))};document.querySelectorAll('[data-open-phrases]').forEach(b=>b.onclick=async()=>{state.rightDrawer=false;state.leftDrawer=true;renderChatKeepScroll();restorePhraseDrawerPosition();try{await ensurePhrases();renderChatKeepScroll();restorePhraseDrawerPosition()}catch(e){toast(e.message,'error')}});document.querySelector('[data-open-crm]').onclick=()=>{state.leftDrawer=false;state.rightDrawer=true;renderChatKeepScroll();const peer=state.selectedDialog?.peerId;Promise.allSettled([ensureMeta(),hydrateChatClient(false)]).then(()=>{if(state.selectedDialog?.peerId!==peer)return;if(state.chatCrm&&!state.drawerOrdersLoaded)loadDrawerOrders();renderChatKeepScroll()});};document.querySelectorAll('[data-close-drawers]').forEach(b=>b.onclick=()=>{if(state.leftDrawer)capturePhraseDrawerState();state.leftDrawer=false;state.rightDrawer=false;renderChatKeepScroll()});document.querySelectorAll('[data-copy-route]').forEach(b=>b.onclick=e=>{e.stopPropagation();const url=routeUrl(b.dataset.copyRoute);track('copy-link',{route:b.dataset.copyRoute,url});copyText(url)});document.querySelectorAll('[data-copy-api]').forEach(b=>b.onclick=e=>{e.stopPropagation();copyText(`${location.origin}${b.dataset.copyApi}`,'API-ссылка скопирована')});document.querySelectorAll('[data-sync-ui]').forEach(b=>b.onclick=syncAccountUi);const ib=document.querySelector('[data-import-bs-html]'),ifi=document.getElementById('bsHtmlImportInput');if(ib&&ifi){ib.onclick=()=>ifi.click();ifi.onchange=e=>importBlueSalesHtml(e.target.files?.[0])};const ps=document.getElementById('phraseSearch');if(ps)ps.addEventListener('input',()=>{state.phraseQuery=ps.value;state.phraseScrollTop=0;savePhraseDrawerState();refreshPhraseListOnly()});bindPhraseButtons(document);const phraseDrawer=document.querySelector('.drawer-left');if(phraseDrawer){let pst;phraseDrawer.addEventListener('scroll',()=>{clearTimeout(pst);pst=setTimeout(capturePhraseDrawerState,120)},{passive:true})}document.querySelectorAll('[data-remove-pending]').forEach(b=>b.onclick=()=>{state.messageAttachments.splice(Number(b.dataset.removePending),1);renderChat(false)});const pcl=document.querySelector('[data-clear-pending]');if(pcl)pcl.onclick=()=>{state.messageAttachments=[];renderChat(false)};document.querySelectorAll('[data-right-tab]').forEach(b=>b.onclick=()=>{state.rightTab=b.dataset.rightTab;if(state.rightTab==='order'&&!state.drawerOrdersLoaded)loadDrawerOrders();renderChat(false)});const retryOrders=document.querySelector('[data-retry-orders]');if(retryOrders)retryOrders.onclick=()=>loadDrawerOrders(true);const no=document.querySelector('[data-new-order]');if(no)no.onclick=()=>{state.newOrderDraft={orderStatus:'Новый',date:todayPlus(0),managerLogin:state.meta.currentUser?.login||state.session?.login||'',discount:0,prepay:0,internalComments:'',positions:[]};state.serviceQuery='';renderChat(false);Promise.allSettled([ensureServices(),ensureMeta()]).then(()=>{if(state.newOrderDraft&&state.selectedDialog)renderChatKeepScroll()})};document.querySelectorAll('[data-cancel-new-order]').forEach(cno=>cno.onclick=()=>{state.newOrderDraft=null;state.serviceQuery='';renderChat(false)});const nof=document.getElementById('newOrderForm');if(nof)nof.onsubmit=saveNewOrder;const ss=document.getElementById('serviceSearch');if(ss){ss.setAttribute('dir','ltr');ss.oninput=()=>{state.serviceQuery=ss.value;refreshServiceResultsOnly()}};bindServicePickerButtons(document);document.querySelectorAll('[data-remove-service]').forEach(b=>b.onclick=()=>{if(!state.newOrderDraft)return;state.newOrderDraft.positions.splice(Number(b.dataset.removeService),1);renderChat(false)});document.querySelectorAll('[data-position-price]').forEach(i=>i.oninput=()=>{if(!state.newOrderDraft)return;state.newOrderDraft.positions[Number(i.dataset.positionPrice)].price=Number(i.value||0);const total=document.querySelector('[data-order-total]'),remain=document.querySelector('[data-order-remain]'),prepay=Number(document.querySelector('#newOrderForm [name="prepay"]')?.value||0);if(total)total.textContent=money(newOrderTotal())+' ₽';if(remain)remain.textContent=money(Math.max(0,newOrderTotal()-prepay))+' ₽'});document.querySelectorAll('[data-position-qty]').forEach(i=>i.oninput=()=>{if(!state.newOrderDraft)return;state.newOrderDraft.positions[Number(i.dataset.positionQty)].quantity=Math.max(1,Number(i.value||1));const total=document.querySelector('[data-order-total]'),remain=document.querySelector('[data-order-remain]'),prepay=Number(document.querySelector('#newOrderForm [name="prepay"]')?.value||0);if(total)total.textContent=money(newOrderTotal())+' ₽';if(remain)remain.textContent=money(Math.max(0,newOrderTotal()-prepay))+' ₽'});const disc=document.querySelector('[data-order-discount]');if(disc)disc.oninput=()=>{if(!state.newOrderDraft)return;state.newOrderDraft.discount=Number(disc.value||0);const total=document.querySelector('[data-order-total]'),remain=document.querySelector('[data-order-remain]'),prepay=Number(document.querySelector('#newOrderForm [name="prepay"]')?.value||0);if(total)total.textContent=money(newOrderTotal())+' ₽';if(remain)remain.textContent=money(Math.max(0,newOrderTotal()-prepay))+' ₽'};const pp=document.querySelector('#newOrderForm [name="prepay"]');if(pp)pp.oninput=()=>{if(!state.newOrderDraft)return;state.newOrderDraft.prepay=Number(pp.value||0);const remain=document.querySelector('[data-order-remain]');if(remain)remain.textContent=money(Math.max(0,newOrderTotal()-state.newOrderDraft.prepay))+' ₽'};const nd=document.querySelector('[data-new-draft]');if(nd)nd.onclick=async()=>{await ensureMeta().catch(()=>{});state.clientDraft=draftDefaults();renderChat(false)};const cd=document.querySelector('[data-cancel-draft]');if(cd)cd.onclick=()=>{state.clientDraft=null;renderChat(false)};const df=document.getElementById('draftClientForm');if(df)df.onsubmit=saveDraft;document.querySelectorAll('[data-toggle-drawer-edit]').forEach(b=>b.onclick=async()=>{const next=!state.drawerEdit;track('client-edit-toggle',{clientId:state.chatCrm?.id||null,editing:next});if(next){state.clientEditSnapshot=JSON.parse(JSON.stringify(state.chatCrm||{}));setLoading(true);try{await hydrateChatClient(true);state.chatCrm=mergeClientForEdit(state.clientEditSnapshot||{},state.chatCrm||{})}finally{setLoading(false)}}else state.clientEditSnapshot=null;state.drawerEdit=next;renderChatKeepScroll()});const ce=document.querySelector('[data-cancel-edit]');if(ce)ce.onclick=()=>{if(state.clientEditSnapshot)state.chatCrm=state.clientEditSnapshot;state.clientEditSnapshot=null;state.drawerEdit=false;renderChatKeepScroll()};const ef=document.getElementById('drawerClientEdit');if(ef)ef.onsubmit=saveDrawerClient;const rf=document.getElementById('drawerReminderForm');if(rf)rf.onsubmit=saveReminderDate;document.querySelectorAll('[data-date]').forEach(b=>b.onclick=()=>{const i=document.querySelector('#drawerReminderForm input[name="nextContactDate"]');if(i)i.value=todayPlus(Number(b.dataset.date))});const expand=document.querySelector('[data-expand-composer]');if(expand)expand.onclick=()=>{state.composerExpanded=!state.composerExpanded;track('composer-resize',{expanded:state.composerExpanded});autoSizeComposer();document.getElementById('messageInput')?.focus()};document.querySelector('[data-attach]').onclick=()=>document.getElementById('attachMenu').classList.toggle('hidden');document.querySelectorAll('[data-file-kind]').forEach(b=>b.onclick=()=>{const map={photo:'filePhoto',video:'fileVideo',audio_message:'fileAudio',doc:'fileDoc'};document.getElementById(map[b.dataset.fileKind]).click();document.getElementById('attachMenu').classList.add('hidden')});[['filePhoto','photo'],['fileVideo','video'],['fileAudio','audio_message'],['fileDoc','doc']].forEach(([id,k])=>{document.getElementById(id).onchange=e=>uploadFile(e.target.files?.[0],k)});document.getElementById('messageForm').onsubmit=sendMessage;const autoMount=document.getElementById('phraseAutocompleteMount');if(autoMount)autoMount.onclick=e=>{const b=e.target.closest('[data-auto-phrase]');if(!b)return;const p=allPhrases().find(x=>String(x.id)===String(b.dataset.autoPhrase));applyPhrase(p);refreshComposerOnly(true)};const inp=document.getElementById('messageInput');inp.setAttribute('dir','ltr');inp.setAttribute('inputmode','text');inp.setAttribute('autocomplete','off');inp.onfocus=()=>{releaseChatBottomLock();document.documentElement.classList.add('chat-keyboard-open');syncMobileViewport();setTimeout(()=>{syncMobileViewport();const m=document.getElementById('messages');if(m)m.scrollTop=m.scrollHeight},80)};inp.onblur=()=>{document.documentElement.classList.remove('chat-keyboard-open');setTimeout(()=>{syncMobileViewport();if(state._layoutRenderPending){state._layoutRenderPending=false;state._renderedLayoutMode=currentResponsiveMode();renderChatKeepScroll();return}if(state._chatRenderDeferred){state._chatRenderDeferred=false;renderChatKeepScroll()}},120)};inp.oninput=async()=>{state.messageDraft=inp.value;autoSizeComposer();state.phraseSuggestOpen=inp.value.trim().length>=1;state.phraseSuggestIndex=0;if(state.phraseSuggestOpen&&!state.phraseLoaded){try{await ensurePhrases()}catch{}}refreshPhraseAutocomplete()};inp.onkeydown=e=>{const list=phraseMatches(state.messageDraft);if(state.phraseSuggestOpen&&list.length&&(e.key==='ArrowDown'||e.key==='ArrowUp'||e.key==='Tab')){e.preventDefault();state.phraseSuggestIndex=e.key==='ArrowUp'?Math.max(0,state.phraseSuggestIndex-1):Math.min(list.length-1,state.phraseSuggestIndex+1);refreshPhraseAutocomplete();return}if(state.phraseSuggestOpen&&list.length&&e.key==='Enter'&&!e.shiftKey){e.preventDefault();applyPhrase(list[state.phraseSuggestIndex]||list[0]);refreshComposerOnly(true);return}if(e.key==='Escape'&&state.phraseSuggestOpen){state.phraseSuggestOpen=false;refreshPhraseAutocomplete();return}if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();e.currentTarget.form.requestSubmit()}};}
+async function bindChat(){bindChatSwipeGestures();document.querySelectorAll('[data-theme-toggle]').forEach(b=>b.onclick=toggleTheme);const chatBackButton=document.querySelector('[data-chat-back]');if(chatBackButton)chatBackButton.onclick=e=>{e.preventDefault();e.stopPropagation();chatBack()};const copyDialogButton=document.querySelector('[data-copy-dialog]');if(copyDialogButton)copyDialogButton.onclick=copyWholeDialog;document.querySelectorAll('[data-msg-menu]').forEach(b=>b.onclick=e=>{e.stopPropagation();const id=String(b.dataset.msgMenu||'');state.messageMenuId=String(state.messageMenuId||'')===id?'':id;renderChatKeepScroll()});document.querySelectorAll('[data-msg-copy]').forEach(b=>b.onclick=e=>{e.stopPropagation();const m=findMessage(b.dataset.msgCopy);state.messageMenuId='';if(m)copyText(messagePlainText(m),'Сообщение скопировано')});document.querySelectorAll('[data-msg-copy-transcript]').forEach(b=>b.onclick=e=>{e.stopPropagation();const m=findMessage(b.dataset.msgCopyTranscript),t=messageVoice(m)?.transcript||'';state.messageMenuId='';if(t)copyText(t,'Расшифровка скопирована');else toast('Расшифровка ещё не готова','error')});document.querySelectorAll('[data-msg-transcribe]').forEach(b=>b.onclick=e=>{e.stopPropagation();refreshVoiceTranscript(b.dataset.msgTranscribe)});document.querySelectorAll('[data-msg-reply]').forEach(b=>b.onclick=e=>{e.stopPropagation();state.replyTarget=findMessage(b.dataset.msgReply);state.forwardTarget=null;state.messageMenuId='';renderChatKeepScroll();requestAnimationFrame(()=>document.getElementById('messageInput')?.focus())});document.querySelectorAll('[data-msg-forward]').forEach(b=>b.onclick=e=>{e.stopPropagation();state.forwardTarget=findMessage(b.dataset.msgForward);state.messageMenuId='';renderChatKeepScroll()});const messageArea=document.getElementById('messages');if(messageArea)messageArea.onclick=e=>{if(state.messageMenuId&&!e.target.closest('.msg-action-wrap')){state.messageMenuId='';renderChatKeepScroll()}};const cancelReply=document.querySelector('[data-cancel-reply]');if(cancelReply)cancelReply.onclick=()=>{state.replyTarget=null;renderChatKeepScroll()};const cancelForward=document.querySelector('[data-cancel-forward]');if(cancelForward)cancelForward.onclick=()=>{state.forwardTarget=null;renderChatKeepScroll()};document.querySelectorAll('[data-forward-peer]').forEach(b=>b.onclick=()=>forwardMessageTo(b.dataset.forwardPeer));const fpf=document.getElementById('forwardPeerForm');if(fpf)fpf.onsubmit=e=>{e.preventDefault();forwardMessageTo(new FormData(fpf).get('peerId'))};document.querySelectorAll('[data-open-phrases]').forEach(b=>b.onclick=async()=>{openChatDrawer('phrases');try{await ensurePhrases();if(state.selectedDialog){renderChatKeepScroll();restorePhraseDrawerPosition()}}catch(e){toast(e.message,'error')}});document.querySelector('[data-open-crm]').onclick=()=>{openChatDrawer('crm');const peer=state.selectedDialog?.peerId;Promise.allSettled([ensureMeta(),hydrateChatClient(false)]).then(()=>{if(state.selectedDialog?.peerId!==peer)return;if(state.chatCrm&&!state.drawerOrdersLoaded)loadDrawerOrders();renderChatKeepScroll()});};document.querySelectorAll('[data-close-drawers]').forEach(b=>b.onclick=()=>closeChatDrawer('',{preferHistory:true}));document.querySelectorAll('[data-copy-route]').forEach(b=>b.onclick=e=>{e.stopPropagation();const url=routeUrl(b.dataset.copyRoute);track('copy-link',{route:b.dataset.copyRoute,url});copyText(url)});document.querySelectorAll('[data-copy-api]').forEach(b=>b.onclick=e=>{e.stopPropagation();copyText(`${location.origin}${b.dataset.copyApi}`,'API-ссылка скопирована')});document.querySelectorAll('[data-sync-ui]').forEach(b=>b.onclick=syncAccountUi);const ib=document.querySelector('[data-import-bs-html]'),ifi=document.getElementById('bsHtmlImportInput');if(ib&&ifi){ib.onclick=()=>ifi.click();ifi.onchange=e=>importBlueSalesHtml(e.target.files?.[0])};const ps=document.getElementById('phraseSearch');if(ps)ps.addEventListener('input',()=>{state.phraseQuery=ps.value;state.phraseScrollTop=0;savePhraseDrawerState();refreshPhraseListOnly()});const pcs=document.querySelector('[data-clear-phrase-search]');if(pcs)pcs.onclick=()=>{state.phraseQuery='';state.phraseScrollTop=0;savePhraseDrawerState();const input=document.getElementById('phraseSearch');if(input)input.value='';refreshPhraseListOnly();input?.focus()};bindPhraseButtons(document);const phraseDrawer=document.querySelector('.drawer-left');if(phraseDrawer){let pst;phraseDrawer.addEventListener('scroll',()=>{clearTimeout(pst);pst=setTimeout(capturePhraseDrawerState,120)},{passive:true})}document.querySelectorAll('[data-remove-pending]').forEach(b=>b.onclick=()=>{state.messageAttachments.splice(Number(b.dataset.removePending),1);renderChat(false)});const pcl=document.querySelector('[data-clear-pending]');if(pcl)pcl.onclick=()=>{state.messageAttachments=[];renderChat(false)};document.querySelectorAll('[data-right-tab]').forEach(b=>b.onclick=()=>{state.rightTab=b.dataset.rightTab;if(state.rightTab==='order'&&!state.drawerOrdersLoaded)loadDrawerOrders();renderChat(false)});const retryOrders=document.querySelector('[data-retry-orders]');if(retryOrders)retryOrders.onclick=()=>loadDrawerOrders(true);const no=document.querySelector('[data-new-order]');if(no)no.onclick=()=>{state.newOrderDraft={orderStatus:'Новый',date:todayPlus(0),managerLogin:state.meta.currentUser?.login||state.session?.login||'',discount:0,prepay:0,internalComments:'',positions:[]};state.serviceQuery='';renderChat(false);Promise.allSettled([ensureServices(),ensureMeta()]).then(()=>{if(state.newOrderDraft&&state.selectedDialog)renderChatKeepScroll()})};document.querySelectorAll('[data-cancel-new-order]').forEach(cno=>cno.onclick=()=>{state.newOrderDraft=null;state.serviceQuery='';renderChat(false)});const nof=document.getElementById('newOrderForm');if(nof)nof.onsubmit=saveNewOrder;const ss=document.getElementById('serviceSearch');if(ss){ss.setAttribute('dir','ltr');ss.oninput=()=>{state.serviceQuery=ss.value;refreshServiceResultsOnly()}};bindServicePickerButtons(document);document.querySelectorAll('[data-remove-service]').forEach(b=>b.onclick=()=>{if(!state.newOrderDraft)return;state.newOrderDraft.positions.splice(Number(b.dataset.removeService),1);renderChat(false)});document.querySelectorAll('[data-position-price]').forEach(i=>i.oninput=()=>{if(!state.newOrderDraft)return;state.newOrderDraft.positions[Number(i.dataset.positionPrice)].price=Number(i.value||0);const total=document.querySelector('[data-order-total]'),remain=document.querySelector('[data-order-remain]'),prepay=Number(document.querySelector('#newOrderForm [name="prepay"]')?.value||0);if(total)total.textContent=money(newOrderTotal())+' ₽';if(remain)remain.textContent=money(Math.max(0,newOrderTotal()-prepay))+' ₽'});document.querySelectorAll('[data-position-qty]').forEach(i=>i.oninput=()=>{if(!state.newOrderDraft)return;state.newOrderDraft.positions[Number(i.dataset.positionQty)].quantity=Math.max(1,Number(i.value||1));const total=document.querySelector('[data-order-total]'),remain=document.querySelector('[data-order-remain]'),prepay=Number(document.querySelector('#newOrderForm [name="prepay"]')?.value||0);if(total)total.textContent=money(newOrderTotal())+' ₽';if(remain)remain.textContent=money(Math.max(0,newOrderTotal()-prepay))+' ₽'});const disc=document.querySelector('[data-order-discount]');if(disc)disc.oninput=()=>{if(!state.newOrderDraft)return;state.newOrderDraft.discount=Number(disc.value||0);const total=document.querySelector('[data-order-total]'),remain=document.querySelector('[data-order-remain]'),prepay=Number(document.querySelector('#newOrderForm [name="prepay"]')?.value||0);if(total)total.textContent=money(newOrderTotal())+' ₽';if(remain)remain.textContent=money(Math.max(0,newOrderTotal()-prepay))+' ₽'};const pp=document.querySelector('#newOrderForm [name="prepay"]');if(pp)pp.oninput=()=>{if(!state.newOrderDraft)return;state.newOrderDraft.prepay=Number(pp.value||0);const remain=document.querySelector('[data-order-remain]');if(remain)remain.textContent=money(Math.max(0,newOrderTotal()-state.newOrderDraft.prepay))+' ₽'};const nd=document.querySelector('[data-new-draft]');if(nd)nd.onclick=async()=>{await ensureMeta().catch(()=>{});state.clientDraft=draftDefaults();renderChat(false)};const cd=document.querySelector('[data-cancel-draft]');if(cd)cd.onclick=()=>{state.clientDraft=null;renderChat(false)};const df=document.getElementById('draftClientForm');if(df)df.onsubmit=saveDraft;document.querySelectorAll('[data-toggle-drawer-edit]').forEach(b=>b.onclick=async()=>{const next=!state.drawerEdit;track('client-edit-toggle',{clientId:state.chatCrm?.id||null,editing:next});if(next){state.clientEditSnapshot=JSON.parse(JSON.stringify(state.chatCrm||{}));setLoading(true);try{await hydrateChatClient(true);state.chatCrm=mergeClientForEdit(state.clientEditSnapshot||{},state.chatCrm||{})}finally{setLoading(false)}}else state.clientEditSnapshot=null;state.drawerEdit=next;renderChatKeepScroll()});const ce=document.querySelector('[data-cancel-edit]');if(ce)ce.onclick=()=>{if(state.clientEditSnapshot)state.chatCrm=state.clientEditSnapshot;state.clientEditSnapshot=null;state.drawerEdit=false;renderChatKeepScroll()};const ef=document.getElementById('drawerClientEdit');if(ef)ef.onsubmit=saveDrawerClient;const rf=document.getElementById('drawerReminderForm');if(rf)rf.onsubmit=saveReminderDate;document.querySelectorAll('[data-date]').forEach(b=>b.onclick=()=>{const i=document.querySelector('#drawerReminderForm input[name="nextContactDate"]');if(i)i.value=todayPlus(Number(b.dataset.date))});const expand=document.querySelector('[data-expand-composer]');if(expand)expand.onclick=()=>{state.composerExpanded=!state.composerExpanded;track('composer-resize',{expanded:state.composerExpanded});autoSizeComposer();document.getElementById('messageInput')?.focus()};document.querySelector('[data-attach]').onclick=()=>document.getElementById('attachMenu').classList.toggle('hidden');document.querySelectorAll('[data-file-kind]').forEach(b=>b.onclick=()=>{const map={photo:'filePhoto',video:'fileVideo',audio_message:'fileAudio',doc:'fileDoc'};document.getElementById(map[b.dataset.fileKind]).click();document.getElementById('attachMenu').classList.add('hidden')});[['filePhoto','photo'],['fileVideo','video'],['fileAudio','audio_message'],['fileDoc','doc']].forEach(([id,k])=>{document.getElementById(id).onchange=e=>uploadFile(e.target.files?.[0],k)});document.getElementById('messageForm').onsubmit=sendMessage;const autoMount=document.getElementById('phraseAutocompleteMount');if(autoMount)autoMount.onclick=e=>{const b=e.target.closest('[data-auto-phrase]');if(!b)return;const p=allPhrases().find(x=>String(x.id)===String(b.dataset.autoPhrase));applyPhrase(p);refreshComposerOnly(true)};const inp=document.getElementById('messageInput');inp.setAttribute('dir','ltr');inp.setAttribute('inputmode','text');inp.setAttribute('autocomplete','off');inp.onfocus=()=>{releaseChatBottomLock();document.documentElement.classList.add('chat-keyboard-open');syncMobileViewport();setTimeout(()=>{syncMobileViewport();const m=document.getElementById('messages');if(m)m.scrollTop=m.scrollHeight},80)};inp.onblur=()=>{document.documentElement.classList.remove('chat-keyboard-open');setTimeout(()=>{syncMobileViewport();if(state._layoutRenderPending){state._layoutRenderPending=false;state._renderedLayoutMode=currentResponsiveMode();renderChatKeepScroll();return}if(state._chatRenderDeferred){state._chatRenderDeferred=false;renderChatKeepScroll()}},120)};inp.oninput=async()=>{state.messageDraft=inp.value;autoSizeComposer();state.phraseSuggestOpen=inp.value.trim().length>=1;state.phraseSuggestIndex=0;if(state.phraseSuggestOpen&&!state.phraseLoaded){try{await ensurePhrases()}catch{}}refreshPhraseAutocomplete()};inp.onkeydown=e=>{const list=phraseMatches(state.messageDraft);if(state.phraseSuggestOpen&&list.length&&(e.key==='ArrowDown'||e.key==='ArrowUp'||e.key==='Tab')){e.preventDefault();state.phraseSuggestIndex=e.key==='ArrowUp'?Math.max(0,state.phraseSuggestIndex-1):Math.min(list.length-1,state.phraseSuggestIndex+1);refreshPhraseAutocomplete();return}if(state.phraseSuggestOpen&&list.length&&e.key==='Enter'&&!e.shiftKey){e.preventDefault();applyPhrase(list[state.phraseSuggestIndex]||list[0]);refreshComposerOnly(true);return}if(e.key==='Escape'&&state.phraseSuggestOpen){state.phraseSuggestOpen=false;refreshPhraseAutocomplete();return}if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();e.currentTarget.form.requestSubmit()}};}
 async function loadDrawerOrders(force=false){
   if(!state.chatCrm?.id)return state.drawerOrders;
   if(state.drawerOrdersPromise)return state.drawerOrdersPromise;
@@ -821,7 +1002,19 @@ function handleWindowResize(){
 }
 function handleHistoryRoute(){
   clearTimeout(routeApplyTimer);
-  routeApplyTimer=setTimeout(()=>applyHashRoute(),0);
+  routeApplyTimer=setTimeout(()=>{
+    const raw=requestedRoute();
+    const chatRoute=currentChatRoute();
+    if(state.selectedDialog&&raw===chatRoute){
+      const overlay=String(history.state?.overlay||'');
+      state.leftDrawer=overlay==='phrases';
+      state.rightDrawer=overlay==='crm';
+      renderChatKeepScroll();
+      if(state.leftDrawer)restorePhraseDrawerPosition();
+      return;
+    }
+    applyHashRoute();
+  },0);
 }
 window.addEventListener('resize',handleWindowResize,{passive:true});
 window.addEventListener('popstate',handleHistoryRoute);

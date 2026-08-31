@@ -1,5 +1,5 @@
 {
-  "savedAt": "2026-08-31T13:36:34.180Z",
+  "savedAt": "2026-08-31T14:00:27.059Z",
   "source": "bluesales-html-import",
   "phrases": [
     {
@@ -70,8 +70,8 @@
     "users": false
   },
   "discovered": {
-    "messengerUrl": "http://127.0.0.1:33699/app/Messenger/",
-    "phraseUrl": "http://127.0.0.1:33699/app/References/PhrasesList.aspx",
+    "messengerUrl": "http://127.0.0.1:37181/app/Messenger/",
+    "phraseUrl": "http://127.0.0.1:37181/app/References/PhrasesList.aspx",
     "statusUrl": null,
     "userUrl": null,
     "imported": true

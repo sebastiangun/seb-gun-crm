@@ -42,17 +42,17 @@ const ALLOW_LOCAL_PHRASE_FALLBACK = String(process.env.ALLOW_LOCAL_PHRASE_FALLBA
 const VK_API_BASE = process.env.VK_API_BASE || 'https://api.vk.com/method/';
 const VK_API_VERSION = process.env.VK_API_VERSION || '5.199';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
-const API_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS || 30000);
+const API_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS || 18000);
 const MAX_BUSY_RETRIES = Number(process.env.MAX_BUSY_RETRIES || 1);
-const BS_ORG_BUSY_RETRIES = Number(process.env.BS_ORG_BUSY_RETRIES || 3);
+const BS_ORG_BUSY_RETRIES = Number(process.env.BS_ORG_BUSY_RETRIES || 1);
 const BS_QUEUE_GAP_MS = Number(process.env.BS_QUEUE_GAP_MS || 180);
-const BS_QUEUE_MAX_WAIT_MS = Number(process.env.BS_QUEUE_MAX_WAIT_MS || 20000);
+const BS_QUEUE_MAX_WAIT_MS = Number(process.env.BS_QUEUE_MAX_WAIT_MS || 10000);
 const SEARCH_SCAN_LIMIT = Number(process.env.SEARCH_SCAN_LIMIT || 50000);
 const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); // fallback only; normal reminders use date-filtered API paging
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '25.2';
+const VERSION = '25.3';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -1215,22 +1215,97 @@ async function downloadVoiceForStt(rawUrl) {
     return {buffer:Buffer.from(ab),type,filename:`voice.${ext}`};
   }catch(err){if(err?.name==='AbortError')throw new Error('Не удалось скачать голосовое: таймаут VK');throw err}finally{clearTimeout(timer)}
 }
-async function transcribeVoiceExternal(audioUrl) {
-  if(!STT_API_KEY)return {configured:false,text:'',source:''};
-  const audio=await downloadVoiceForStt(audioUrl);
-  const form=new FormData();
-  form.append('file',new Blob([audio.buffer],{type:audio.type}),audio.filename);
-  form.append('model',STT_MODEL);form.append('response_format','json');form.append('temperature','0');
-  if(STT_LANGUAGE)form.append('language',STT_LANGUAGE);
+async function callExternalStt(form) {
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),STT_TIMEOUT_MS);
   let r;
-  try{r=await fetch(`${STT_BASE_URL}/audio/transcriptions`,{method:'POST',headers:{Authorization:`Bearer ${STT_API_KEY}`},body:form,signal:controller.signal})}
-  catch(err){if(err?.name==='AbortError')throw new Error('Сервис расшифровки отвечает слишком долго');throw err}
-  finally{clearTimeout(timer)}
+  try{
+    r=await fetch(`${STT_BASE_URL}/audio/transcriptions`,{
+      method:'POST',
+      headers:{Authorization:`Bearer ${STT_API_KEY}`},
+      body:form,
+      signal:controller.signal
+    });
+  }catch(err){
+    if(err?.name==='AbortError')throw new Error('Сервис расшифровки отвечает слишком долго');
+    throw err;
+  }finally{clearTimeout(timer)}
   const body=await r.text();let data=null;try{data=JSON.parse(body)}catch{}
-  if(!r.ok){const msg=String(data?.error?.message||data?.message||body||`HTTP ${r.status}`).replace(/\s+/g,' ').slice(0,360);throw new Error(`Speech-to-text: ${msg}`)}
-  const text=String(data?.text||'').trim();if(!text)throw new Error('Speech-to-text вернул пустую расшифровку');
-  return {configured:true,text,source:STT_BASE_URL.includes('groq.com')?'groq-whisper':'external-stt'};
+  if(!r.ok){
+    const msg=String(data?.error?.message||data?.message||body||`HTTP ${r.status}`).replace(/\s+/g,' ').slice(0,360);
+    const e=new Error(`Speech-to-text: ${msg}`);e.status=r.status;throw e;
+  }
+  const text=String(data?.text||'').trim();
+  if(!text)throw new Error('Speech-to-text вернул пустую расшифровку');
+  return text;
+}
+function sttCommonForm() {
+  const form=new FormData();
+  form.append('model',STT_MODEL);
+  form.append('response_format','json');
+  form.append('temperature','0');
+  if(STT_LANGUAGE)form.append('language',STT_LANGUAGE);
+  return form;
+}
+async function transcribeVoiceExternal(audioUrl) {
+  if(!STT_API_KEY)return {configured:false,text:'',source:''};
+  let directError='';
+  // Groq supports the `url` field. Trying the VK CDN URL first avoids downloading
+  // and re-uploading the voice message through the small Render instance.
+  try{
+    const direct=sttCommonForm();
+    direct.append('url',String(audioUrl||''));
+    const text=await callExternalStt(direct);
+    return {configured:true,text,source:STT_BASE_URL.includes('groq.com')?'groq-whisper-url':'external-stt-url'};
+  }catch(err){
+    directError=String(err?.message||err).slice(0,240);
+    console.warn('[voice STT direct URL]',directError);
+  }
+  // Some VK CDN links require VK-like request headers and cannot be fetched by
+  // the STT provider directly. In that case proxy only this audio through Render.
+  const audio=await downloadVoiceForStt(audioUrl);
+  const upload=sttCommonForm();
+  upload.append('file',new Blob([audio.buffer],{type:audio.type}),audio.filename);
+  try{
+    const text=await callExternalStt(upload);
+    return {configured:true,text,source:STT_BASE_URL.includes('groq.com')?'groq-whisper-upload':'external-stt-upload',directError};
+  }catch(err){
+    if(directError)err.message=`${err.message} (прямая ссылка также не сработала: ${directError})`;
+    throw err;
+  }
+}
+
+async function transcribeMissingVoiceMessages(peerId,messages,{max=40,concurrency=2}={}) {
+  if(!STT_API_KEY)return {messages,transcribed:0,missing:0,skipped:0};
+  const candidates=[];
+  for(const m of messages||[]){
+    const voice=messageVoiceAttachment(m),cmid=Number(m?.conversationMessageId||0);
+    if(!voice||String(voice.transcript||'').trim())continue;
+    const cached=cmid?getVoiceTranscriptCache(peerId,cmid):null;
+    if(cached){
+      voice.transcript=cached.text;voice.transcriptState='done';voice.transcriptSource=cached.source;continue;
+    }
+    if(voice.url)candidates.push({m,voice,cmid});
+  }
+  let next=0,transcribed=0;
+  const selected=candidates.slice(0,Math.max(0,Number(max)||0));
+  const worker=async()=>{
+    while(true){
+      const idx=next++;if(idx>=selected.length)return;
+      const row=selected[idx];
+      try{
+        const ext=await transcribeVoiceExternal(row.voice.url);
+        const text=String(ext.text||'').trim();
+        if(text){
+          row.voice.transcript=text;row.voice.transcriptState='done';row.voice.transcriptSource=ext.source||'external-stt';
+          if(row.cmid)putVoiceTranscriptCache(peerId,row.cmid,text,row.voice.transcriptSource);
+          transcribed++;
+        }
+      }catch(err){console.warn('[voice export STT]',row.cmid||'?',String(err?.message||err).slice(0,240))}
+    }
+  };
+  await Promise.all(Array.from({length:Math.max(1,Math.min(Number(concurrency)||1,4))},worker));
+  const missing=(messages||[]).filter(m=>{const v=messageVoiceAttachment(m);return v&&!String(v.transcript||'').trim()}).length;
+  return {messages,transcribed,missing,skipped:Math.max(0,candidates.length-selected.length)};
 }
 
 async function proxyVkMedia(req, res, rawUrl) {
@@ -2133,9 +2208,16 @@ async function apiRouter(req, res, url) {
         for(const m of pageMessages){const key=String(m.id||m.conversationMessageId);if(!seen.has(key)){seen.add(key);rows.push(m)}}
         offset+=items.length;if(!items.length)break;if(offset<total)await sleep(140);
       }
+      let exportStt={messages:rows,transcribed:0,missing:0,skipped:0};
+      if(STT_API_KEY){
+        // Full-dialog copy should include voice transcripts whenever possible.
+        // Run only after all VK pages are collected, with low concurrency so this
+        // does not overload the free Render instance or Groq free-tier limits.
+        exportStt=await transcribeMissingVoiceMessages(peerId,rows,{max:40,concurrency:2});
+      }
       rows.sort((a,b)=>Number(a.date||0)-Number(b.date||0)||Number(a.id||0)-Number(b.id||0));
       const lineFor=m=>{const d=new Date(Number(m.date||0)*1000),stamp=d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}).replace(',',''),author=String(m.displayAuthor||m.author||(m.out?`VK ${VK_DIRECT_AUTHOR}`:'Собеседник'));const parts=[];if(String(m.text||'').trim())parts.push(String(m.text).trim());for(const a of (m.attachments||[])){if(a.type==='audio_message')parts.push(a.transcript?`[Голосовое сообщение: ${a.transcript}]`:'[Голосовое сообщение]');else if(a.type==='photo')parts.push('[Фото]');else if(a.type==='video')parts.push(`[Видео${a.title?`: ${a.title}`:''}]`);else if(a.type==='doc')parts.push(`[Файл${a.title?`: ${a.title}`:''}]`);else if(a.type==='sticker')parts.push('[Стикер]');else parts.push(`[${a.title||a.type||'Вложение'}]`)}return`[${stamp}] ${author}: ${parts.join(' ')||'[Пустое сообщение]'}`};
-      return sendJson(res,200,{ok:true,peerId,count:rows.length,total,text:rows.map(lineFor).join('\n')});
+      return sendJson(res,200,{ok:true,peerId,count:rows.length,total,text:rows.map(lineFor).join('\n'),voiceTranscribed:Number(exportStt.transcribed||0),voiceMissing:Number(exportStt.missing||0),voiceSkipped:Number(exportStt.skipped||0),sttConfigured:Boolean(STT_API_KEY)});
     } catch(err){return handleApiError(res,err)}
   }
 

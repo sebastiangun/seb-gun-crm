@@ -16,6 +16,12 @@ services:
         value: "1"
       - key: ALLOW_LOCAL_PHRASE_FALLBACK
         value: "1"
+      - key: API_TIMEOUT_MS
+        value: "18000"
+      - key: BS_QUEUE_MAX_WAIT_MS
+        value: "10000"
+      - key: BS_ORG_BUSY_RETRIES
+        value: "1"
       - key: PUBLIC_BASE_URL
         value: "https://seb-gun-crm.onrender.com"
       - key: VK_DIRECT_AUTHOR
