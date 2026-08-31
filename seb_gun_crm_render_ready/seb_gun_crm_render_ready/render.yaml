@@ -4,8 +4,8 @@ services:
     runtime: node
     plan: free
 
-    buildCommand: node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/server.js && node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/lib/bluesales-web.js && node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/public/api.js && node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/public/app.js && node --check seb_gun_crm_render_ready/seb_gun_crm_render_ready/public/sw.js
-    startCommand: node seb_gun_crm_render_ready/seb_gun_crm_render_ready/server.js
+    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install --omit=dev && npm run check
+    startCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm start
 
     healthCheckPath: /api/health
 
@@ -26,12 +26,16 @@ services:
         value: "https://seb-gun-crm.onrender.com"
       - key: VK_DIRECT_AUTHOR
         value: "Дарья А."
-      - key: STT_MODEL
-        value: "whisper-large-v3-turbo"
-      - key: STT_LANGUAGE
-        value: "ru"
-      - key: GROQ_API_KEY
-        sync: false
+      - key: LOCAL_STT_ENABLED
+        value: "1"
+      - key: LOCAL_STT_MODEL
+        value: "Xenova/whisper-tiny"
+      - key: LOCAL_STT_DTYPE
+        value: "q8"
+      - key: LOCAL_STT_LANGUAGE
+        value: "russian"
+      - key: LOCAL_STT_TIMEOUT_MS
+        value: "120000"
       - key: VK_TOKEN
         sync: false
       - key: VK_COMMUNITY

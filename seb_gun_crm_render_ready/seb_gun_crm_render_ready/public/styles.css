@@ -1374,3 +1374,17 @@ button,input,select,textarea,.notice,.login-card,.info-card,.warning-card{
   .phrase-resume-main{min-height:42px}
   .phrase-recent-row button{min-height:34px;max-width:160px}
 }
+
+
+/* v25.4 — local Whisper + discoverable mobile drawers */
+.mobile-edge-handle{display:none}
+@media(max-width:699px){
+  .mobile-edge-handle{display:flex;position:fixed;top:42%;z-index:42;align-items:center;justify-content:center;border:1px solid var(--line);background:color-mix(in srgb,var(--surface) 92%,transparent);color:var(--brand);box-shadow:0 5px 18px rgba(0,0,0,.12);font-weight:900;opacity:.7;backdrop-filter:blur(8px);touch-action:manipulation}
+  .mobile-edge-handle.edge-left{left:0;width:24px;height:58px;border-left:0;border-radius:0 12px 12px 0;font-size:15px}
+  .mobile-edge-handle.edge-right{right:0;width:30px;height:58px;border-right:0;border-radius:12px 0 0 12px;font-size:8px;writing-mode:vertical-rl;letter-spacing:.4px}
+  .drawer-left.open~.mobile-edge-handle,.drawer-right.open~.mobile-edge-handle{opacity:.25}
+  .chat-keyboard-open .mobile-edge-handle{display:none}
+}
+.voice-transcript-empty small{display:block;line-height:1.35}
+.voice-transcript-empty button:disabled{opacity:.6;cursor:wait}
+.phrase-current{scroll-margin-block:150px 90px}

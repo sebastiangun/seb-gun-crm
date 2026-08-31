@@ -7,6 +7,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { URL } = require('url');
+const { Worker } = require('worker_threads');
 const BlueSalesWeb = require('./lib/bluesales-web');
 
 const ROOT = __dirname;
@@ -52,20 +53,22 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '25.3';
+const VERSION = '25.4';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
 const VK_DIRECT_AUTHOR = String(process.env.VK_DIRECT_AUTHOR || 'Дарья А.').trim();
-// Optional external speech-to-text. Groq exposes an OpenAI-compatible transcription
-// endpoint and Whisper models. VK's own transcript is always preferred first.
-const STT_API_KEY = String(process.env.GROQ_API_KEY || process.env.STT_API_KEY || '').trim();
-const STT_BASE_URL = String(process.env.STT_BASE_URL || 'https://api.groq.com/openai/v1').trim().replace(/\/+$/, '');
-const STT_MODEL = String(process.env.STT_MODEL || 'whisper-large-v3-turbo').trim();
-const STT_LANGUAGE = String(process.env.STT_LANGUAGE || 'ru').trim();
-const STT_TIMEOUT_MS = Math.min(Math.max(Number(process.env.STT_TIMEOUT_MS || 30000), 5000), 60000);
-const STT_MAX_BYTES = Math.min(Math.max(Number(process.env.STT_MAX_BYTES || 24 * 1024 * 1024), 1024 * 1024), 25 * 1024 * 1024);
+
+// v25.4: local open-source speech-to-text. No Groq/OpenAI key and no VK transcript API.
+// The worker uses @huggingface/transformers + Xenova/whisper-tiny and runs outside
+// the main Node event loop, so a long transcription does not freeze CRM HTTP requests.
+const LOCAL_STT_ENABLED = String(process.env.LOCAL_STT_ENABLED ?? '1') !== '0';
+const LOCAL_STT_MODEL = String(process.env.LOCAL_STT_MODEL || 'Xenova/whisper-tiny').trim();
+const LOCAL_STT_DTYPE = String(process.env.LOCAL_STT_DTYPE || 'q8').trim();
+const LOCAL_STT_LANGUAGE = String(process.env.LOCAL_STT_LANGUAGE || 'russian').trim();
+const LOCAL_STT_TIMEOUT_MS = Math.min(Math.max(Number(process.env.LOCAL_STT_TIMEOUT_MS || 120000), 15000), 180000);
+const LOCAL_STT_MAX_BYTES = Math.min(Math.max(Number(process.env.LOCAL_STT_MAX_BYTES || 16 * 1024 * 1024), 1024 * 1024), 24 * 1024 * 1024);
 
 const BS_SCREENSHOT_STATUS_COLORS = {
   'Не учитывать в лидах':'#848B8C',
@@ -693,32 +696,6 @@ function messageVoiceAttachment(message) {
   return (message?.attachments || []).find(a => a?.type === 'audio_message') || null;
 }
 
-async function refreshMissingVoiceTranscripts(session, peerId, messages) {
-  const ids = [...new Set((messages || []).filter(m => {
-    const a = messageVoiceAttachment(m);
-    return a && !String(a.transcript || '').trim() && Number(m.conversationMessageId || 0) > 0;
-  }).map(m => Number(m.conversationMessageId)).filter(Boolean))].slice(0, 100);
-  if (!ids.length) return messages;
-  try {
-    const params = { peer_id: peerId, conversation_message_ids: ids.join(','), extended: 1, fields: 'photo_100,screen_name' };
-    if (session.vkGroupId) params.group_id = session.vkGroupId;
-    const raw = await vkCall(session.vkToken, 'messages.getByConversationMessageId', params);
-    const maps = await enrichVkMapsWithAdminAuthors(session, raw, vkIdentityMaps(raw || {}));
-    const refreshed = new Map((raw?.items || []).map(item => {
-      const m = normalizeVkMessage(item, maps);
-      return [Number(m.conversationMessageId || 0), m];
-    }));
-    return (messages || []).map(m => {
-      const fresh = refreshed.get(Number(m.conversationMessageId || 0));
-      return fresh || m;
-    });
-  } catch (err) {
-    console.warn('[VK voice transcript refresh]', err?.message || err);
-    return messages;
-  }
-}
-
-
 function normalizeDialogSearchText(value) {
   return String(value ?? '')
     .normalize('NFKC')
@@ -1180,10 +1157,10 @@ function isAllowedMediaHost(hostname) {
 function transcriptCacheKey(peerId, conversationMessageId) {
   return `${Number(peerId)||0}:${Number(conversationMessageId)||0}`;
 }
-function putVoiceTranscriptCache(peerId, conversationMessageId, text, source='external') {
+function putVoiceTranscriptCache(peerId, conversationMessageId, text, source='local-whisper') {
   const clean=String(text||'').trim();
   if(!clean)return;
-  voiceTranscriptCache.set(transcriptCacheKey(peerId,conversationMessageId),{text:clean,source:String(source||'external'),expiresAt:Date.now()+24*60*60*1000});
+  voiceTranscriptCache.set(transcriptCacheKey(peerId,conversationMessageId),{text:clean,source:String(source||'local-whisper'),expiresAt:Date.now()+24*60*60*1000});
 }
 function getVoiceTranscriptCache(peerId, conversationMessageId) {
   const key=transcriptCacheKey(peerId,conversationMessageId),row=voiceTranscriptCache.get(key);
@@ -1200,82 +1177,70 @@ function applyVoiceTranscriptCache(peerId,messages=[]) {
   }
   return messages;
 }
-async function downloadVoiceForStt(rawUrl) {
+async function downloadVoiceForLocalStt(rawUrl) {
   let target;
   try{target=new URL(String(rawUrl||''))}catch{throw Object.assign(new Error('Некорректная ссылка голосового сообщения'),{status:400})}
   if(target.protocol!=='https:'||!isAllowedMediaHost(target.hostname))throw Object.assign(new Error('Хост голосового сообщения не разрешён'),{status:400});
-  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),Math.min(STT_TIMEOUT_MS,20000));
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20000);
   try{
     const r=await fetch(target,{redirect:'follow',headers:{'Accept':'audio/ogg,audio/mpeg,audio/*,*/*;q=0.8','User-Agent':`seb_gun-CRM/${VERSION}`,'Referer':'https://vk.com/'},signal:controller.signal});
-    if(!r.ok)throw new Error(`VK audio HTTP ${r.status}`);
-    const declared=Number(r.headers.get('content-length')||0);if(declared>STT_MAX_BYTES)throw new Error('Голосовое слишком большое для расшифровки');
-    const ab=await r.arrayBuffer();if(ab.byteLength>STT_MAX_BYTES)throw new Error('Голосовое слишком большое для расшифровки');
-    const type=String(r.headers.get('content-type')||'audio/ogg').split(';')[0]||'audio/ogg';
-    const ext=type.includes('mpeg')?'mp3':type.includes('webm')?'webm':type.includes('wav')?'wav':type.includes('mp4')?'m4a':'ogg';
-    return {buffer:Buffer.from(ab),type,filename:`voice.${ext}`};
-  }catch(err){if(err?.name==='AbortError')throw new Error('Не удалось скачать голосовое: таймаут VK');throw err}finally{clearTimeout(timer)}
+    if(!r.ok)throw new Error(`Аудиофайл HTTP ${r.status}`);
+    const declared=Number(r.headers.get('content-length')||0);if(declared>LOCAL_STT_MAX_BYTES)throw new Error('Голосовое слишком большое для локальной расшифровки');
+    const ab=await r.arrayBuffer();if(ab.byteLength>LOCAL_STT_MAX_BYTES)throw new Error('Голосовое слишком большое для локальной расшифровки');
+    return Buffer.from(ab);
+  }catch(err){if(err?.name==='AbortError')throw new Error('Не удалось скачать голосовое: таймаут');throw err}finally{clearTimeout(timer)}
 }
-async function callExternalStt(form) {
-  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),STT_TIMEOUT_MS);
-  let r;
-  try{
-    r=await fetch(`${STT_BASE_URL}/audio/transcriptions`,{
-      method:'POST',
-      headers:{Authorization:`Bearer ${STT_API_KEY}`},
-      body:form,
-      signal:controller.signal
-    });
-  }catch(err){
-    if(err?.name==='AbortError')throw new Error('Сервис расшифровки отвечает слишком долго');
-    throw err;
-  }finally{clearTimeout(timer)}
-  const body=await r.text();let data=null;try{data=JSON.parse(body)}catch{}
-  if(!r.ok){
-    const msg=String(data?.error?.message||data?.message||body||`HTTP ${r.status}`).replace(/\s+/g,' ').slice(0,360);
-    const e=new Error(`Speech-to-text: ${msg}`);e.status=r.status;throw e;
-  }
-  const text=String(data?.text||'').trim();
-  if(!text)throw new Error('Speech-to-text вернул пустую расшифровку');
-  return text;
+
+let localSttWorker=null,localSttSeq=0,localSttTail=Promise.resolve();
+const localSttPending=new Map();
+function resetLocalSttWorker(reason=''){
+  const w=localSttWorker;localSttWorker=null;
+  if(w){try{w.terminate()}catch{}}
+  for(const [,row] of localSttPending){clearTimeout(row.timer);row.reject(new Error(reason||'Локальный Whisper был перезапущен'))}
+  localSttPending.clear();
 }
-function sttCommonForm() {
-  const form=new FormData();
-  form.append('model',STT_MODEL);
-  form.append('response_format','json');
-  form.append('temperature','0');
-  if(STT_LANGUAGE)form.append('language',STT_LANGUAGE);
-  return form;
+function ensureLocalSttWorker(){
+  if(localSttWorker)return localSttWorker;
+  const workerPath=path.join(ROOT,'lib','local-stt-worker.mjs');
+  const w=new Worker(workerPath,{env:{...process.env,LOCAL_STT_MODEL,LOCAL_STT_DTYPE,LOCAL_STT_LANGUAGE}});
+  w.on('message',msg=>{
+    const row=localSttPending.get(Number(msg?.id||0));if(!row)return;
+    localSttPending.delete(Number(msg.id));clearTimeout(row.timer);
+    if(msg.ok)row.resolve({text:String(msg.text||'').trim(),model:String(msg.model||LOCAL_STT_MODEL)});
+    else row.reject(new Error(String(msg.error||'Whisper не смог распознать голосовое')));
+  });
+  w.on('error',err=>{console.warn('[local STT worker]',err?.message||err);resetLocalSttWorker(`Whisper worker: ${err?.message||err}`)});
+  w.on('exit',code=>{if(localSttWorker===w&&code!==0){console.warn('[local STT worker exit]',code);resetLocalSttWorker(`Whisper worker завершился с кодом ${code}`)}else if(localSttWorker===w)localSttWorker=null});
+  localSttWorker=w;return w;
 }
-async function transcribeVoiceExternal(audioUrl) {
-  if(!STT_API_KEY)return {configured:false,text:'',source:''};
-  let directError='';
-  // Groq supports the `url` field. Trying the VK CDN URL first avoids downloading
-  // and re-uploading the voice message through the small Render instance.
-  try{
-    const direct=sttCommonForm();
-    direct.append('url',String(audioUrl||''));
-    const text=await callExternalStt(direct);
-    return {configured:true,text,source:STT_BASE_URL.includes('groq.com')?'groq-whisper-url':'external-stt-url'};
-  }catch(err){
-    directError=String(err?.message||err).slice(0,240);
-    console.warn('[voice STT direct URL]',directError);
-  }
-  // Some VK CDN links require VK-like request headers and cannot be fetched by
-  // the STT provider directly. In that case proxy only this audio through Render.
-  const audio=await downloadVoiceForStt(audioUrl);
-  const upload=sttCommonForm();
-  upload.append('file',new Blob([audio.buffer],{type:audio.type}),audio.filename);
-  try{
-    const text=await callExternalStt(upload);
-    return {configured:true,text,source:STT_BASE_URL.includes('groq.com')?'groq-whisper-upload':'external-stt-upload',directError};
-  }catch(err){
-    if(directError)err.message=`${err.message} (прямая ссылка также не сработала: ${directError})`;
-    throw err;
-  }
+function runLocalSttBuffer(buffer){
+  if(!LOCAL_STT_ENABLED)throw new Error('Локальная расшифровка отключена');
+  const w=ensureLocalSttWorker(),id=++localSttSeq;
+  const ab=buffer.buffer.slice(buffer.byteOffset,buffer.byteOffset+buffer.byteLength);
+  return new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{
+      localSttPending.delete(id);resetLocalSttWorker('Локальный Whisper превысил лимит времени');reject(new Error('Локальная расшифровка заняла слишком много времени. Повторите ещё раз.'));
+    },LOCAL_STT_TIMEOUT_MS);
+    localSttPending.set(id,{resolve,reject,timer});
+    w.postMessage({id,audio:ab},[ab]);
+  });
+}
+async function transcribeVoiceLocal(audioUrl){
+  if(!LOCAL_STT_ENABLED)return {configured:false,text:'',source:''};
+  // Serialize inference jobs. This avoids two Whisper models competing for RAM/CPU
+  // on the small Render instance and keeps the main CRM responsive.
+  const job=async()=>{
+    const audio=await downloadVoiceForLocalStt(audioUrl);
+    const r=await runLocalSttBuffer(audio);
+    return {configured:true,text:String(r.text||'').trim(),source:'local-whisper',model:r.model||LOCAL_STT_MODEL};
+  };
+  const result=localSttTail.then(job,job);
+  localSttTail=result.catch(()=>undefined);
+  return result;
 }
 
 async function transcribeMissingVoiceMessages(peerId,messages,{max=40,concurrency=2}={}) {
-  if(!STT_API_KEY)return {messages,transcribed:0,missing:0,skipped:0};
+  if(!LOCAL_STT_ENABLED)return {messages,transcribed:0,missing:0,skipped:0};
   const candidates=[];
   for(const m of messages||[]){
     const voice=messageVoiceAttachment(m),cmid=Number(m?.conversationMessageId||0);
@@ -1293,10 +1258,10 @@ async function transcribeMissingVoiceMessages(peerId,messages,{max=40,concurrenc
       const idx=next++;if(idx>=selected.length)return;
       const row=selected[idx];
       try{
-        const ext=await transcribeVoiceExternal(row.voice.url);
+        const ext=await transcribeVoiceLocal(row.voice.url);
         const text=String(ext.text||'').trim();
         if(text){
-          row.voice.transcript=text;row.voice.transcriptState='done';row.voice.transcriptSource=ext.source||'external-stt';
+          row.voice.transcript=text;row.voice.transcriptState='done';row.voice.transcriptSource=ext.source||'local-whisper';
           if(row.cmid)putVoiceTranscriptCache(peerId,row.cmid,text,row.voice.transcriptSource);
           transcribed++;
         }
@@ -2009,7 +1974,7 @@ async function apiRouter(req, res, url) {
   const pathname = url.pathname;
 
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:Boolean(STT_API_KEY), sttModel:STT_API_KEY?STT_MODEL:null });
+    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:LOCAL_STT_ENABLED, sttMode:'local-open-source-whisper', sttModel:LOCAL_STT_ENABLED?LOCAL_STT_MODEL:null, sttNeedsApiKey:false });
   }
 
   if (pathname === '/api/auth/login' && req.method === 'POST') {
@@ -2204,20 +2169,20 @@ async function apiRouter(req, res, url) {
         const raw=await vkCall(s.vkToken,'messages.getHistory',params),items=Array.isArray(raw?.items)?raw.items:[];
         const maps=await enrichVkMapsWithAdminAuthors(s,raw,vkIdentityMaps(raw||{}));
         total=Number(raw?.count||items.length);
-        const pageMessages=applyVoiceTranscriptCache(peerId,await refreshMissingVoiceTranscripts(s,peerId,items.map(item=>normalizeVkMessage(item,maps))));
+        const pageMessages=applyVoiceTranscriptCache(peerId,items.map(item=>normalizeVkMessage(item,maps)));
         for(const m of pageMessages){const key=String(m.id||m.conversationMessageId);if(!seen.has(key)){seen.add(key);rows.push(m)}}
         offset+=items.length;if(!items.length)break;if(offset<total)await sleep(140);
       }
       let exportStt={messages:rows,transcribed:0,missing:0,skipped:0};
-      if(STT_API_KEY){
-        // Full-dialog copy should include voice transcripts whenever possible.
+      if(LOCAL_STT_ENABLED){
+        // Full-dialog copy includes locally generated Whisper transcripts whenever possible.
         // Run only after all VK pages are collected, with low concurrency so this
-        // does not overload the free Render instance or Groq free-tier limits.
+        // does not overload the small Render instance.
         exportStt=await transcribeMissingVoiceMessages(peerId,rows,{max:40,concurrency:2});
       }
       rows.sort((a,b)=>Number(a.date||0)-Number(b.date||0)||Number(a.id||0)-Number(b.id||0));
       const lineFor=m=>{const d=new Date(Number(m.date||0)*1000),stamp=d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}).replace(',',''),author=String(m.displayAuthor||m.author||(m.out?`VK ${VK_DIRECT_AUTHOR}`:'Собеседник'));const parts=[];if(String(m.text||'').trim())parts.push(String(m.text).trim());for(const a of (m.attachments||[])){if(a.type==='audio_message')parts.push(a.transcript?`[Голосовое сообщение: ${a.transcript}]`:'[Голосовое сообщение]');else if(a.type==='photo')parts.push('[Фото]');else if(a.type==='video')parts.push(`[Видео${a.title?`: ${a.title}`:''}]`);else if(a.type==='doc')parts.push(`[Файл${a.title?`: ${a.title}`:''}]`);else if(a.type==='sticker')parts.push('[Стикер]');else parts.push(`[${a.title||a.type||'Вложение'}]`)}return`[${stamp}] ${author}: ${parts.join(' ')||'[Пустое сообщение]'}`};
-      return sendJson(res,200,{ok:true,peerId,count:rows.length,total,text:rows.map(lineFor).join('\n'),voiceTranscribed:Number(exportStt.transcribed||0),voiceMissing:Number(exportStt.missing||0),voiceSkipped:Number(exportStt.skipped||0),sttConfigured:Boolean(STT_API_KEY)});
+      return sendJson(res,200,{ok:true,peerId,count:rows.length,total,text:rows.map(lineFor).join('\n'),voiceTranscribed:Number(exportStt.transcribed||0),voiceMissing:Number(exportStt.missing||0),voiceSkipped:Number(exportStt.skipped||0),sttConfigured:LOCAL_STT_ENABLED});
     } catch(err){return handleApiError(res,err)}
   }
 
@@ -2254,53 +2219,21 @@ async function apiRouter(req, res, url) {
     } catch (err) { return handleApiError(res, err); }
   }
 
-  const vkTranscriptMatch = pathname.match(/^\/api\/vk\/dialogs\/(-?\d+)\/messages\/(\d+)\/transcript$/);
-  if (vkTranscriptMatch && req.method === 'GET') {
-    try {
-      const peerId = Number(vkTranscriptMatch[1]);
-      const cmid = Number(vkTranscriptMatch[2]);
-      if (!peerId || !cmid) return sendJson(res,400,{ok:false,message:'Не удалось определить голосовое сообщение'});
-      let message = null;
-      let voice = null;
-      // VK creates transcripts asynchronously. Re-read the same message a few times,
-      // but keep the request short so the UI never hangs behind a permanent spinner.
-      for (let attempt=0; attempt<3; attempt++) {
-        const params = { peer_id:peerId, conversation_message_ids:String(cmid), extended:1, fields:'photo_100,screen_name' };
-        if (s.vkGroupId) params.group_id = s.vkGroupId;
-        const raw = await vkCall(s.vkToken,'messages.getByConversationMessageId',params);
-        const maps = await enrichVkMapsWithAdminAuthors(s,raw,vkIdentityMaps(raw||{}));
-        const item = Array.isArray(raw?.items) ? raw.items[0] : null;
-        message = item ? normalizeVkMessage(item,maps) : null;
-        voice = messageVoiceAttachment(message);
-        if (String(voice?.transcript || '').trim()) break;
-        if (attempt < 2 && String(voice?.transcriptState || '') === 'in_progress') await sleep(900 + attempt*400);
-        else if (attempt < 2) await sleep(350);
-      }
-      let transcript=String(voice?.transcript||'').trim(),source=transcript?'vk':'',externalError='';
-      const cached=getVoiceTranscriptCache(peerId,cmid);
-      if(!transcript&&cached){transcript=cached.text;source=cached.source}
-      if(!transcript&&voice?.url&&STT_API_KEY){
-        try{
-          const ext=await transcribeVoiceExternal(voice.url);
-          transcript=String(ext.text||'').trim();source=ext.source||'external-stt';
-          if(transcript){putVoiceTranscriptCache(peerId,cmid,transcript,source);voice.transcript=transcript;voice.transcriptState='done';voice.transcriptSource=source}
-        }catch(sttErr){externalError=String(sttErr?.message||sttErr).slice(0,500);console.warn('[voice STT]',externalError)}
-      }
-      return sendJson(res,200,{
-        ok:true,
-        peerId,
-        conversationMessageId:cmid,
-        available:Boolean(transcript),
-        transcript,
-        transcriptSource:source,
-        transcriptState:transcript?'done':String(voice?.transcriptState||''),
-        transcriptError:Number(voice?.transcriptError||0),
-        externalConfigured:Boolean(STT_API_KEY),
-        externalError:externalError||undefined,
-        message
-      });
-    } catch(err){ return handleApiError(res,err); }
-  }
+
+if (pathname === '/api/stt/transcribe' && req.method === 'POST') {
+  if (!requireCsrf(req, res, s)) return;
+  try {
+    const b=await readJson(req),peerId=Number(b.peerId||0),cmid=Number(b.conversationMessageId||0),audioUrl=String(b.audioUrl||'').trim();
+    if(!peerId||!cmid||!audioUrl)return sendJson(res,400,{ok:false,message:'Нужны peerId, ID сообщения и ссылка на голосовое'});
+    const cached=getVoiceTranscriptCache(peerId,cmid);
+    if(cached)return sendJson(res,200,{ok:true,available:true,transcript:cached.text,transcriptSource:cached.source,conversationMessageId:cmid,model:LOCAL_STT_MODEL,cached:true});
+    if(!LOCAL_STT_ENABLED)return sendJson(res,503,{ok:false,error:'STT_DISABLED',message:'Локальная расшифровка отключена на сервере'});
+    const ext=await transcribeVoiceLocal(audioUrl),transcript=String(ext.text||'').trim();
+    if(!transcript)return sendJson(res,502,{ok:false,error:'STT_EMPTY',message:'Whisper не вернул текст'});
+    putVoiceTranscriptCache(peerId,cmid,transcript,'local-whisper');
+    return sendJson(res,200,{ok:true,available:true,transcript,transcriptSource:'local-whisper',conversationMessageId:cmid,model:ext.model||LOCAL_STT_MODEL,cached:false});
+  }catch(err){return handleApiError(res,err)}
+}
 
   if (vkMessagesMatch && req.method === 'POST') {
     if (!requireCsrf(req, res, s)) return;
@@ -2807,7 +2740,7 @@ async function apiRouter(req, res, url) {
       const fresh = String(url.searchParams.get('fresh') || '') === '1';
       const cacheKey = `${s.login}:orders:${customerId || 0}:${limit}:${offset}`;
       if(fresh)cache.delete(cacheKey);
-      const value = await cachedLoad(cacheKey, 60000, async () => {
+      const value = await cachedLoad(cacheKey, 120000, async () => {
         const payload = {
           dateFrom: null,
           dateTill: null,

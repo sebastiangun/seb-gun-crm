@@ -2,7 +2,7 @@
   let csrf = '';
   const inflightGet=new Map(),shortCache=new Map();
   async function request(path, options={}) {
-    const {timeout=32000,cacheMs=0,staleMs=0,...fetchOptions}=options;
+    const {timeout=22000,cacheMs=0,staleMs=0,...fetchOptions}=options;
     const method=String(fetchOptions.method||'GET').toUpperCase(),getKey=method==='GET'?String(path):'';
     if(getKey&&cacheMs>0){const row=shortCache.get(getKey);if(row&&row.until>Date.now())return row.data}
     if(getKey&&inflightGet.has(getKey))return inflightGet.get(getKey);
@@ -42,7 +42,7 @@
     createClient:(p)=>request('/api/clients',{method:'POST',body:JSON.stringify(p),timeout:65000}),
     client:(id,{fresh=false}={})=>request(`/api/clients/${encodeURIComponent(id)}${fresh?'?fresh=1':''}`,{cacheMs:fresh?0:5000}),
     updateClient:(id,p)=>request(`/api/clients/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify(p)}),
-    orders:(customerId,{fresh=false,limit=20}={})=>request(`/api/orders?${qs({customerId,fresh:fresh?1:'',limit})}`,{timeout:22000,cacheMs:fresh?0:30000,staleMs:fresh?0:300000}),
+    orders:(customerId,{fresh=false,limit=20}={})=>request(`/api/orders?${qs({customerId,fresh:fresh?1:'',limit})}`,{timeout:20000,cacheMs:fresh?0:60000,staleMs:fresh?0:600000}),
     createOrder:(p)=>request('/api/orders',{method:'POST',body:JSON.stringify(p),timeout:45000}),
     services:(p={})=>request(`/api/services?${qs(p)}`,{cacheMs:1800000,staleMs:86400000}),
     reminders:(p={})=>request(`/api/reminders?${qs(p)}`),
@@ -53,7 +53,7 @@
     vkStatus:()=>request('/api/vk/status'),
     vkDialogs:({count=50,offset=0,filter='all',q='',includeCrm=true}={})=>request(`/api/vk/dialogs?${qs({count,offset,filter,q,crm:includeCrm?1:0})}`),
     vkMessages:(peerId,{count=100,offset=0,includeCrm=true}={})=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages?${qs({count,offset,crm:includeCrm?1:0})}`),
-    vkTranscript:(peerId,conversationMessageId)=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages/${encodeURIComponent(conversationMessageId)}/transcript`,{timeout:45000}),
+    transcribeVoice:(peerId,conversationMessageId,audioUrl)=>request('/api/stt/transcribe',{method:'POST',body:JSON.stringify({peerId,conversationMessageId,audioUrl}),timeout:150000}),
     dialogText:(peerId)=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/export-text`,{timeout:90000}),
     sendVkMessage:(peerId,{message='',attachment='',stickerId=0,replyTo=0,forwardMessageIds=[]}={})=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages`,{method:'POST',body:JSON.stringify({message,attachment,stickerId,replyTo,forwardMessageIds})}),
     uploadVkMedia:(payload)=>request('/api/vk/upload',{method:'POST',body:JSON.stringify(payload)}),
