@@ -1,10 +1,15 @@
 (() => {
   let csrf = '';
   async function request(path, options={}) {
-    const headers={...(options.headers||{})};
-    if(options.body && !headers['Content-Type']) headers['Content-Type']='application/json';
-    if(csrf && !['GET','HEAD'].includes(String(options.method||'GET').toUpperCase())) headers['X-CSRF-Token']=csrf;
-    const response=await fetch(path,{credentials:'include',...options,headers});
+    const {timeout=32000,...fetchOptions}=options;
+    const headers={...(fetchOptions.headers||{})};
+    if(fetchOptions.body && !headers['Content-Type']) headers['Content-Type']='application/json';
+    if(csrf && !['GET','HEAD'].includes(String(fetchOptions.method||'GET').toUpperCase())) headers['X-CSRF-Token']=csrf;
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeout);
+    let response;
+    try{response=await fetch(path,{credentials:'include',...fetchOptions,headers,signal:controller.signal})}
+    catch(e){if(e?.name==='AbortError')throw new Error('Сервер отвечает слишком долго. Попробуйте ещё раз через несколько секунд.');throw e}
+    finally{clearTimeout(timer)}
     let data=null;try{data=await response.json()}catch{data={ok:false,message:`HTTP ${response.status}`}}
     if(!response.ok){const e=new Error(data?.message||`HTTP ${response.status}`);e.status=response.status;e.code=data?.error;e.details=data?.details;throw e}
     if(data?.csrf)csrf=data.csrf;return data;
@@ -19,7 +24,7 @@
     createClient:(p)=>request('/api/clients',{method:'POST',body:JSON.stringify(p)}),
     client:(id,{fresh=false}={})=>request(`/api/clients/${encodeURIComponent(id)}${fresh?'?fresh=1':''}`),
     updateClient:(id,p)=>request(`/api/clients/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify(p)}),
-    orders:(customerId)=>request(`/api/orders${customerId?`?customerId=${encodeURIComponent(customerId)}`:''}`),
+    orders:(customerId,{fresh=false,limit=20}={})=>request(`/api/orders?${qs({customerId,fresh:fresh?1:'',limit})}`,{timeout:32000}),
     createOrder:(p)=>request('/api/orders',{method:'POST',body:JSON.stringify(p)}),
     services:(p={})=>request(`/api/services?${qs(p)}`),
     reminders:(p={})=>request(`/api/reminders?${qs(p)}`),
@@ -29,8 +34,9 @@
     importAccountUi:(html)=>request('/api/account-ui/import',{method:'POST',body:JSON.stringify({html})}),
     vkStatus:()=>request('/api/vk/status'),
     vkDialogs:({count=50,offset=0,filter='all',q=''}={})=>request(`/api/vk/dialogs?${qs({count,offset,filter,q})}`),
-    vkMessages:(peerId,{count=100,offset=0}={})=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages?${qs({count,offset})}`),
-    sendVkMessage:(peerId,{message='',attachment='',stickerId=0}={})=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages`,{method:'POST',body:JSON.stringify({message,attachment,stickerId})}),
+    vkMessages:(peerId,{count=100,offset=0,includeCrm=true}={})=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages?${qs({count,offset,crm:includeCrm?1:0})}`),
+    dialogText:(peerId)=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/export-text`,{timeout:90000}),
+    sendVkMessage:(peerId,{message='',attachment='',stickerId=0,replyTo=0,forwardMessageIds=[]}={})=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages`,{method:'POST',body:JSON.stringify({message,attachment,stickerId,replyTo,forwardMessageIds})}),
     uploadVkMedia:(payload)=>request('/api/vk/upload',{method:'POST',body:JSON.stringify(payload)}),
     activity:(action,details={})=>request('/api/activity',{method:'POST',body:JSON.stringify({action,details})}),
     createClientFromVk:(peerId,p={})=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/create-client`,{method:'POST',body:JSON.stringify(p)}),
