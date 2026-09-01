@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "26.3.0",
+  "version": "26.4.0",
   "private": true,
-  "description": "seb_gun CRM v26.3: compact collapsible multi-filters, complete dark theme, and graceful auth-expiry recovery",
+  "description": "seb_gun CRM v26.4: classic compact multi-select dropdowns with Apply/Reset and Back-aware navigation",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -22,7 +22,8 @@
     "test:v260": "node tests/integration-v260.js",
     "test:v261": "node tests/integration-v261.js",
     "test:v262": "node tests/integration-v262.js",
-    "test:v263": "node tests/integration-v263.js"
+    "test:v263": "node tests/integration-v263.js",
+    "test:v264": "node tests/integration-v264.js"
   },
   "engines": {
     "node": ">=18"

@@ -51,7 +51,7 @@ services:
       - key: VOICE_TRANSCRIPT_TTL_MS
         value: "7776000000"
 
-      # v26.3 Telegram SLA notifications. Secrets are entered only in Render Environment.
+      # v26.4 Telegram SLA notifications. Secrets are entered only in Render Environment.
       - key: TELEGRAM_BOT_USERNAME
         value: "yozhiki_sebastian_bot"
       - key: NOTIFICATION_TIMEZONE

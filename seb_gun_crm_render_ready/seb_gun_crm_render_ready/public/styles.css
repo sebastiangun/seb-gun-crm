@@ -1525,3 +1525,23 @@ button,input,select,textarea,.notice,.login-card,.info-card,.warning-card{
 [data-theme="dark"] .multi-filter-clear{background:#202b26!important;color:#f0f7f4!important}
 [data-theme="dark"] .multi-filter-label,.filter-fold .bs-filter-caption{color:var(--muted)!important}
 @media(max-width:700px){.filter-fold{margin:7px 0 9px}.filter-fold-body{padding:7px}.filter-fold-toggle{min-height:40px}}
+
+
+/* v26.4: classic compact multi-select dropdowns (no permanently open filter panel) */
+.classic-multi-row{position:relative;overflow:visible!important;margin:8px 0 10px;z-index:8}
+.crm-filter-stack.two.classic-multi-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.bs-classic-filters.multi.classic-multi-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.classic-multi-row .multi-filter-label{font-size:10px;margin-left:2px}
+.classic-multi-row .multi-filter-trigger{min-height:42px;border-radius:10px;padding:0 11px;background:var(--surface)!important}
+.classic-multi-row .multi-filter-trigger b{font-size:12px;flex:0 0 auto}
+.classic-multi-row .multi-filter-menu{position:absolute!important;top:calc(100% + 5px)!important;bottom:auto!important;left:0!important;right:0!important;width:auto!important;max-height:min(46vh,340px)!important;overflow:hidden!important;padding:7px!important;border-radius:11px!important;z-index:120!important}
+.classic-multi-row .multi-filter-options{max-height:min(34vh,260px);overflow:auto;overscroll-behavior:contain;padding-right:2px}
+.classic-multi-row .multi-filter-actions{position:sticky;bottom:0;background:inherit;padding-top:7px;margin-top:3px;border-top:1px solid var(--line)}
+.classic-multi-row .multi-filter-clear,.classic-multi-row .multi-filter-apply{min-height:38px}
+[data-theme="dark"] .classic-multi-row .multi-filter-actions{border-top-color:#34483f}
+@media(max-width:700px){
+  .crm-filter-stack.two.classic-multi-row{grid-template-columns:1fr 1fr;gap:6px}
+  .bs-classic-filters.multi.classic-multi-row{grid-template-columns:1fr;gap:7px}
+  .classic-multi-row .multi-filter-menu{position:absolute!important;top:calc(100% + 4px)!important;bottom:auto!important;max-height:44vh!important}
+  .classic-multi-row .multi-filter-options{max-height:32vh}
+}
