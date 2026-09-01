@@ -1,0 +1,32 @@
+seb_gun CRM v25.6 — самостоятельная расшифровка голосовых
+
+Главное:
+- Голосовые по-прежнему можно слушать через встроенный HTML5-аудиоплеер CRM.
+- Для распознавания НЕ используется VK transcript API.
+- Не нужны GROQ_API_KEY / OPENAI_API_KEY.
+- Распознавание выполняется локально внутри CRM через open-source whisper.cpp.
+- Используется готовый Node binding @fugood/whisper.node с prebuilt Linux binary.
+- Модель: multilingual ggml-tiny-q5_1.bin (~32 MB), скачивается во время Render build и проверяется SHA-256.
+- Перед распознаванием ffmpeg конвертирует OGG/Opus/MP3/M4A/WebM в WAV 16 kHz mono PCM.
+- На Render Free одновременно выполняется только одна расшифровка и используется 1 CPU thread.
+- Модель выгружается после периода бездействия, чтобы вернуть память CRM.
+- Результаты сохраняются в существующий кэш расшифровок.
+
+Почему это должно убрать HTTP 502 предыдущей версии:
+предыдущий v25.5/v25.5.1 использовал JS/Transformers Whisper, а промежуточный v25.6 пытался вынести whisper.cpp во второй Render-сервис. Теперь отдельного сервиса нет: готовый native whisper.cpp addon работает в том же Node Render service.
+
+Render build:
+npm install --omit=dev --include=optional
+node scripts/download-stt-model.js
+npm run check
+
+Проверка после deploy:
+GET /api/health
+Ожидается:
+version = 25.6
+sttConfigured = true
+sttMode = local-native-whisper.cpp-node-addon
+sttNeedsApiKey = false
+sttModelPresent = true
+
+Примечание: Free Render = 0.1 CPU / 512 MB. На длинных голосовых распознавание может занимать заметное время, но запрос не использует внешний STT API и интерфейс чата не блокируется глобальным loader.

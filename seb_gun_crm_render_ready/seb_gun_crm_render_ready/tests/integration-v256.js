@@ -1,0 +1,26 @@
+const fs=require('fs');const path=require('path');
+const root=path.resolve(__dirname,'..');
+const server=fs.readFileSync(path.join(root,'server.js'),'utf8');
+const render=fs.readFileSync(path.join(root,'render.yaml'),'utf8');
+const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
+const stt=fs.readFileSync(path.join(root,'lib','local-whisper-stt.mjs'),'utf8');
+const downloader=fs.readFileSync(path.join(root,'scripts','download-stt-model.js'),'utf8');
+const api=fs.readFileSync(path.join(root,'public','api.js'),'utf8');
+function ok(v,m){if(!v)throw new Error(m)}
+ok(server.includes("const VERSION = '25.6'"),'server version');
+ok(server.includes("import('./lib/local-whisper-stt.mjs')"),'local STT module not wired');
+ok(server.includes("sttMode:'local-native-whisper.cpp-node-addon'"),'health STT mode missing');
+ok(server.includes('localSttReady()'),'local STT readiness missing');
+ok(!server.includes('STT_SERVICE_HOSTPORT'),'old second-service STT still wired');
+ok(!server.includes('callWhisperCppService'),'old HTTP STT client still present');
+ok(stt.includes("@fugood/whisper.node"),'prebuilt whisper.cpp Node binding missing');
+ok(stt.includes("'-ar', '16000'"),'16 kHz conversion missing');
+ok(stt.includes("'-ac', '1'"),'mono conversion missing');
+ok(stt.includes('maxThreads'),'CPU thread limit missing');
+ok(downloader.includes('ggml-tiny-q5_1.bin'),'quantized multilingual model missing');
+ok(downloader.includes('818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7'),'model checksum missing');
+ok(render.includes('node scripts/download-stt-model.js'),'Render build does not download STT model');
+ok(!render.includes('name: seb-gun-stt'),'obsolete second Render service still present');
+ok(pkg.dependencies?.['@fugood/whisper.node']==='1.1.3','whisper.node version is not pinned');
+ok(api.includes('timeout:330000'),'frontend STT timeout not extended');
+console.log('integration-v256 OK');

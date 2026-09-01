@@ -1399,3 +1399,29 @@ button,input,select,textarea,.notice,.login-card,.info-card,.warning-card{
 .voice-playback-error .voice-head::after{content:'Если плеер не стартует — нажмите ↗';font-size:8px;color:#b83b3b;font-weight:700}
 .voice-transcript{border-left:3px solid color-mix(in srgb,var(--brand) 65%,transparent);padding:7px 8px;background:color-mix(in srgb,var(--surface-2) 88%,var(--brand) 12%);border-radius:0 10px 10px 0}
 @media(max-width:699px){.voice-message{min-width:min(270px,78vw)}.voice-player{max-width:100%}.voice-head{font-size:9px}}
+
+/* =========================================================
+   v25.5.1 — readable current quick phrase in dark theme
+   ========================================================= */
+.bs-phrase-row.phrase-current{
+  border-radius:10px;
+  font-weight:700;
+}
+[data-theme="dark"] .bs-phrase-row.phrase-current{
+  background:#1f4936!important;
+  color:#f4fff7!important;
+  box-shadow:inset 3px 0 0 #4ade80,0 0 0 1px rgba(74,222,128,.16)!important;
+}
+[data-theme="dark"] .bs-phrase-row.phrase-current span,
+[data-theme="dark"] .bs-phrase-row.phrase-current b,
+[data-theme="dark"] .bs-phrase-row.phrase-current strong{
+  color:#f4fff7!important;
+}
+[data-theme="dark"] .bs-phrase-row.phrase-current::after{
+  color:#86efac!important;
+}
+[data-theme="dark"] .bs-phrase-row.phrase-current:hover,
+[data-theme="dark"] .bs-phrase-row.phrase-current:active{
+  background:#245640!important;
+  color:#fff!important;
+}
