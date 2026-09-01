@@ -1,0 +1,20 @@
+const fs=require('fs'),path=require('path');
+const root=path.join(__dirname,'..');
+const app=fs.readFileSync(path.join(root,'public/app.js'),'utf8');
+const css=fs.readFileSync(path.join(root,'public/styles.css'),'utf8');
+const server=fs.readFileSync(path.join(root,'server.js'),'utf8');
+const sw=fs.readFileSync(path.join(root,'public/sw.js'),'utf8');
+const html=fs.readFileSync(path.join(root,'public/index.html'),'utf8');
+function ok(v,m){if(!v)throw new Error(m)}
+ok(server.includes("const VERSION = '26.5'"),'server version');
+ok(html.includes('app.js?v=26.5.0'),'app version');
+ok(sw.includes('v26.5.0'),'sw version');
+ok(css.includes('.multi-filter-menu.hidden{display:none!important'),'hidden menu must actually hide');
+ok(css.includes('.multi-filter-chevron'),'triangle CSS');
+ok(app.includes('class="multi-filter-chevron"'),'triangle markup');
+ok(app.includes("box.classList.add('is-open')"),'open state class');
+ok(app.includes("box.classList.remove('is-open')"),'close state class');
+ok(app.includes("history.pushState(nextState"),'filter opens as history overlay');
+ok(app.includes("history.back();return true"),'Back closes overlay');
+ok(app.includes("state[id]=multiFilterCheckedValue(box,id)"),'Apply commits multi selection');
+console.log('v26.5 integration checks: OK');

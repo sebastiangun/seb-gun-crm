@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "26.4.0",
+  "version": "26.5.0",
   "private": true,
-  "description": "seb_gun CRM v26.4: classic compact multi-select dropdowns with Apply/Reset and Back-aware navigation",
+  "description": "seb_gun CRM v26.5: closed-by-default accordion multi-filters with working triangle and Back-safe navigation",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -23,7 +23,8 @@
     "test:v261": "node tests/integration-v261.js",
     "test:v262": "node tests/integration-v262.js",
     "test:v263": "node tests/integration-v263.js",
-    "test:v264": "node tests/integration-v264.js"
+    "test:v264": "node tests/integration-v264.js",
+    "test:v265": "node tests/integration-v265.js"
   },
   "engines": {
     "node": ">=18"
