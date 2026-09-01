@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "25.6.0",
+  "version": "25.7.0",
   "private": true,
-  "description": "seb_gun CRM v25.6: independent local whisper.cpp transcription via prebuilt Node addon; no VK transcript API or cloud STT key; voice playback, transcript cache, sticky scripts, swipes, history navigation, and BlueSales performance safeguards",
+  "description": "seb_gun CRM v25.7: Telegram-style voice notes with expandable transcripts, local whisper.cpp STT, idempotent mobile message sending, sticky scripts, swipes, history navigation, and BlueSales performance safeguards",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -15,7 +15,8 @@
     "test:v253": "node tests/integration-v253.js",
     "test:v254": "node tests/integration-v254.js",
     "test:v255": "node tests/integration-v255.js",
-    "test:v256": "node tests/integration-v256.js"
+    "test:v256": "node tests/integration-v256.js",
+    "test:v257": "node tests/integration-v257.js"
   },
   "engines": {
     "node": ">=18"

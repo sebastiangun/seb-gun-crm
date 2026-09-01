@@ -52,7 +52,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '25.6';
+const VERSION = '25.7';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -107,6 +107,7 @@ const sessions = new Map();
 const cache = new Map();
 const inflight = new Map();
 const voiceTranscriptCache = new Map();
+const recentMessageSends = new Map();
 let blueSalesQueueTail = Promise.resolve();
 let blueSalesQueueDepth = 0;
 let blueSalesLastFinishedAt = 0;
@@ -116,6 +117,10 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function randomToken(bytes = 24) { return crypto.randomBytes(bytes).toString('hex'); }
 function md5Upper(value) { return crypto.createHash('md5').update(String(value), 'utf8').digest('hex').toUpperCase(); }
 function safeJson(value) { try { return JSON.stringify(value); } catch { return '{}'; } }
+function normalizeClientRequestId(value=''){return String(value||'').trim().replace(/[^a-zA-Z0-9._:-]/g,'').slice(0,120)}
+function stableVkRandomId(requestId=''){const b=crypto.createHash('sha256').update(String(requestId)).digest();const n=b.readUInt32BE(0)&0x7fffffff;return n||1}
+function messageSendFingerprint(peerId,b={}){return crypto.createHash('sha256').update(JSON.stringify({peerId:Number(peerId)||0,message:String(b.message||'').trim(),attachment:String(b.attachment||'').trim(),stickerId:Number(b.stickerId||0),replyTo:Number(b.replyTo||0),forwardMessageIds:Array.isArray(b.forwardMessageIds)?b.forwardMessageIds:String(b.forwardMessageIds||'')})).digest('hex')}
+function pruneRecentMessageSends(){const t=Date.now();for(const[k,row]of recentMessageSends)if(Number(row?.expiresAt||0)<=t)recentMessageSends.delete(k)}
 
 function isLoopbackHost(hostname='') {
   const h=String(hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
@@ -2343,19 +2348,38 @@ if ((pathname === '/api/voice/transcribe' || pathname === '/api/stt/transcribe')
       const replyTo = Number(b.replyTo || 0);
       const forwardMessageIds = (Array.isArray(b.forwardMessageIds)?b.forwardMessageIds:String(b.forwardMessageIds||'').split(',')).map(Number).filter(v=>Number.isFinite(v)&&v>0).slice(0,100);
       if (!message && !attachment && !stickerId && !forwardMessageIds.length) return sendJson(res, 400, { ok: false, message: 'Введите сообщение или прикрепите файл' });
-      const params = { peer_id: peerId, random_id: crypto.randomInt(1, 2147483647) };
+
+      // v25.7: idempotent sending. Mobile browsers can repeat submit/touch events or
+      // lose the HTTP response after VK has already accepted a message. The client
+      // therefore sends one stable request id per draft. Repeating that request id
+      // returns the same result instead of creating another VK message.
+      pruneRecentMessageSends();
+      const clientRequestId=normalizeClientRequestId(b.clientRequestId||'');
+      const fingerprint=messageSendFingerprint(peerId,b);
+      const actor=String(s.currentUser?.login||s.currentUser?.name||s.login||'session');
+      const dedupeKey=clientRequestId?`id:${actor}:${peerId}:${clientRequestId}`:`legacy:${actor}:${peerId}:${fingerprint}`;
+      const dedupeTtl=clientRequestId?10*60*1000:8000;
+      const existing=recentMessageSends.get(dedupeKey);
+      if(existing&&Number(existing.expiresAt||0)>Date.now()){
+        try{const result=existing.promise?await existing.promise:existing.result;if(result)return sendJson(res,200,{...result,deduplicated:true})}catch{recentMessageSends.delete(dedupeKey)}
+      }
+
+      const params = { peer_id: peerId, random_id: clientRequestId?stableVkRandomId(clientRequestId):crypto.randomInt(1, 2147483647) };
       if (message) params.message = message;
       if (attachment) params.attachment = attachment;
       if (stickerId) params.sticker_id = stickerId;
       if (replyTo > 0) params.reply_to = replyTo;
       if (forwardMessageIds.length) params.forward_messages = forwardMessageIds.join(',');
-      // Persist which CRM account sent the message inside VK itself. This survives
-      // Render restarts and lets exports distinguish CRM messages from messages sent
-      // directly in VK. Only the display name is stored; no login/password is exposed.
-      params.payload = JSON.stringify({seb_gun_crm:{author:String(s.currentUser?.name||s.login||'CRM'),version:VERSION}});
+      params.payload = JSON.stringify({seb_gun_crm:{author:String(s.currentUser?.name||s.login||'CRM'),version:VERSION,requestId:clientRequestId||undefined}});
       if (s.vkGroupId) params.group_id = s.vkGroupId;
-      const messageId = await vkCall(s.vkToken, 'messages.send', params);
-      return sendJson(res, 200, { ok: true, messageId });
+
+      const sendPromise=(async()=>{const messageId=await vkCall(s.vkToken,'messages.send',params);return{ok:true,messageId,clientRequestId:clientRequestId||null}})();
+      recentMessageSends.set(dedupeKey,{promise:sendPromise,expiresAt:Date.now()+dedupeTtl});
+      try{
+        const result=await sendPromise;
+        recentMessageSends.set(dedupeKey,{result,expiresAt:Date.now()+dedupeTtl});
+        return sendJson(res,200,result);
+      }catch(err){recentMessageSends.delete(dedupeKey);throw err}
     } catch (err) { return handleApiError(res, err); }
   }
 

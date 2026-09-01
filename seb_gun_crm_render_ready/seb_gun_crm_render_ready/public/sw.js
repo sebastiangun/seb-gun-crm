@@ -1,5 +1,5 @@
-const CACHE='bluesales-vk-direct-v25.6.0';
-const ASSETS=['/','/index.html','/styles.css?v=25.6.0','/api.js?v=25.6.0','/app.js?v=25.6.0','/manifest.webmanifest','/icon.svg'];
+const CACHE='bluesales-vk-direct-v25.7.0';
+const ASSETS=['/','/index.html','/styles.css?v=25.7.0','/api.js?v=25.7.0','/app.js?v=25.7.0','/manifest.webmanifest','/icon.svg'];
 
 self.addEventListener('install', event => {
   self.skipWaiting();

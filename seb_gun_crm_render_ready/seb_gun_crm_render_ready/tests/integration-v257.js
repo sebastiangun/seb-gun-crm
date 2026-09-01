@@ -1,0 +1,15 @@
+const fs=require('fs'),path=require('path');const root=path.resolve(__dirname,'..');
+const app=fs.readFileSync(path.join(root,'public/app.js'),'utf8'),api=fs.readFileSync(path.join(root,'public/api.js'),'utf8'),server=fs.readFileSync(path.join(root,'server.js'),'utf8'),css=fs.readFileSync(path.join(root,'public/styles.css'),'utf8');
+const must=(ok,msg)=>{if(!ok)throw new Error(msg)};
+must(app.includes('class="tg-voice"'),'telegram voice UI missing');
+must(app.includes('data-voice-toggle'),'transcript toggle missing');
+must(app.includes('Расшифровать голосовое'),'three-dot transcribe missing');
+must(app.includes('if(state.messageSending)return'),'client send lock missing');
+must(app.includes('clientRequestId=sendRequestIdFor'),'stable request id missing');
+must(app.includes('Sending and refreshing are intentionally separate'),'send/refresh separation missing');
+must(api.includes('clientRequestId'),'API idempotency id missing');
+must(server.includes('recentMessageSends'),'server send dedupe missing');
+must(server.includes('stableVkRandomId'),'stable VK random_id missing');
+must(server.includes("const VERSION = '25.7'"),'version missing');
+must(css.includes('v25.7 — Telegram-like voice notes'),'v25.7 CSS missing');
+console.log('integration-v257: OK');

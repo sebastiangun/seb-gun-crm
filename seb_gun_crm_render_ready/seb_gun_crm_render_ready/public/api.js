@@ -55,7 +55,7 @@
     vkMessages:(peerId,{count=100,offset=0,includeCrm=true}={})=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages?${qs({count,offset,crm:includeCrm?1:0})}`),
     transcribeVoice:(peerId,conversationMessageId,audioUrl)=>request('/api/voice/transcribe',{method:'POST',body:JSON.stringify({peerId,conversationMessageId,audioUrl}),timeout:330000}),
     dialogText:(peerId)=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/export-text`,{timeout:90000}),
-    sendVkMessage:(peerId,{message='',attachment='',stickerId=0,replyTo=0,forwardMessageIds=[]}={})=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages`,{method:'POST',body:JSON.stringify({message,attachment,stickerId,replyTo,forwardMessageIds})}),
+    sendVkMessage:(peerId,{message='',attachment='',stickerId=0,replyTo=0,forwardMessageIds=[],clientRequestId=''}={})=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages`,{method:'POST',body:JSON.stringify({message,attachment,stickerId,replyTo,forwardMessageIds,clientRequestId}),timeout:45000}),
     uploadVkMedia:(payload)=>request('/api/vk/upload',{method:'POST',body:JSON.stringify(payload)}),
     activity:(action,details={})=>request('/api/activity',{method:'POST',body:JSON.stringify({action,details})}),
     createClientFromVk:(peerId,p={})=>request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/create-client`,{method:'POST',body:JSON.stringify(p)}),

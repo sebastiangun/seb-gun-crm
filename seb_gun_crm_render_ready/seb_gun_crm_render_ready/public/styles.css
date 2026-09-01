@@ -1425,3 +1425,30 @@ button,input,select,textarea,.notice,.login-card,.info-card,.warning-card{
   background:#245640!important;
   color:#fff!important;
 }
+
+
+/* =========================================================
+   v25.7 — Telegram-like voice notes + safe mobile sending
+   ========================================================= */
+.tg-voice{display:flex;align-items:center;gap:9px;min-width:min(300px,74vw);max-width:360px;padding:2px 0}
+.tg-voice-audio{display:none!important}
+.tg-voice-play{flex:0 0 42px;width:42px;height:42px;border:0;border-radius:50%;display:grid;place-items:center;background:var(--brand,#046307);color:#fff;font-size:18px;font-weight:900;line-height:1;cursor:pointer;box-shadow:0 2px 7px rgba(4,99,7,.18)}
+.tg-voice-play.playing{font-size:15px}
+.tg-voice-body{min-width:0;flex:1;display:grid;gap:3px}
+.tg-voice-wave-wrap{position:relative;height:28px;display:flex;align-items:center}
+.tg-voice-wave{width:100%;height:28px;display:flex;align-items:center;gap:2px;overflow:hidden;pointer-events:none}
+.tg-voice-wave i{display:block;flex:1;min-width:2px;max-width:4px;height:var(--vh,12px);border-radius:3px;background:color-mix(in srgb,var(--muted) 43%,transparent);transition:background .08s ease}
+.tg-voice-wave i.played{background:var(--brand,#046307)}
+.tg-voice-seek{position:absolute;inset:0;width:100%;height:28px;opacity:0;cursor:pointer;touch-action:pan-x}
+.tg-voice-meta{display:flex;align-items:center;gap:6px;font-size:9px;color:var(--muted);line-height:1.1}
+.tg-voice-meta span:first-child{font-variant-numeric:tabular-nums}
+.tg-voice-meta a{margin-left:auto;color:var(--muted);text-decoration:none;font-weight:900;font-size:12px}
+.tg-voice-text-toggle{flex:0 0 auto;min-width:32px;height:34px;border:1px solid color-mix(in srgb,var(--brand) 32%,var(--line));border-radius:17px;background:color-mix(in srgb,var(--surface) 88%,var(--brand) 12%);color:var(--brand);display:flex;align-items:center;justify-content:center;gap:2px;padding:0 8px;font-weight:900;cursor:pointer}
+.tg-voice-text-toggle span{font-size:13px}.tg-voice-text-toggle b{font-size:10px}.tg-voice-text-toggle.open{background:color-mix(in srgb,var(--brand) 16%,var(--surface))}
+.tg-voice-transcript{margin-top:7px;padding:8px 10px;border-radius:10px;background:color-mix(in srgb,var(--surface-2) 91%,var(--brand) 9%);border-left:3px solid var(--brand)}
+.tg-voice-transcript>div{display:flex;align-items:center;justify-content:space-between;gap:8px}.tg-voice-transcript b{font-size:9px;color:var(--brand)}
+.tg-voice-transcript button{border:0;background:transparent;color:var(--brand);font-size:9px;font-weight:850;cursor:pointer}.tg-voice-transcript p{margin:5px 0 0;white-space:pre-wrap;line-height:1.45;font-size:11px;color:var(--ink)}
+.voice-playback-error .tg-voice-play{background:#b83b3b}.voice-playback-error .tg-voice-meta:after{content:'ошибка аудио';color:#b83b3b;margin-left:2px}
+.send-btn:disabled,.send-btn.sending{opacity:.58!important;cursor:wait!important;pointer-events:none!important;transform:none!important}
+@media(max-width:699px){.tg-voice{min-width:min(255px,75vw);max-width:78vw}.tg-voice-play{width:40px;height:40px;flex-basis:40px}.tg-voice-wave{gap:1.5px}.tg-voice-text-toggle{height:32px;min-width:30px;padding:0 7px}.tg-voice-transcript p{font-size:12px}}
+[data-theme="dark"] .tg-voice-text-toggle{background:#173126;border-color:#315545;color:#b7f0cd}[data-theme="dark"] .tg-voice-transcript{background:#14231d;border-left-color:#69d79b}[data-theme="dark"] .tg-voice-transcript b,[data-theme="dark"] .tg-voice-transcript button{color:#86e5ad}
