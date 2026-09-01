@@ -68,6 +68,12 @@
     updateAdminPhrase:(id,p)=>request(`/api/admin/phrases/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify(p)}),
     moveAdminPhrase:(id,p)=>request(`/api/admin/phrases/${encodeURIComponent(id)}/move`,{method:'POST',body:JSON.stringify(p)}),
     deleteAdminPhrase:(id)=>request(`/api/admin/phrases/${encodeURIComponent(id)}`,{method:'DELETE',body:'{}'}),
+    notificationSettings:()=>request('/api/notifications/settings',{cacheMs:3000}),
+    saveNotificationSettings:(p)=>request('/api/notifications/settings',{method:'POST',body:JSON.stringify(p)}),
+    pairNotificationTelegram:(manager)=>request('/api/notifications/pair',{method:'POST',body:JSON.stringify({manager})}),
+    unpairNotificationTelegram:(manager)=>request('/api/notifications/unpair',{method:'POST',body:JSON.stringify({manager})}),
+    testNotificationTelegram:(manager)=>request('/api/notifications/test',{method:'POST',body:JSON.stringify({manager}),timeout:20000}),
+    checkNotificationsNow:()=>request('/api/notifications/check-now',{method:'POST',body:'{}',timeout:60000}),
     health:()=>request('/api/health')
   };
 })();

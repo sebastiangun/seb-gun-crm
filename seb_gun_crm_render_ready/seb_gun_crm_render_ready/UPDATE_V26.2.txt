@@ -1,0 +1,10 @@
+seb_gun CRM v26.2
+
+1. Новый диалог всегда открывается в самом низу. После первого ручного wheel/touch/pointer управление scroll полностью отдаётся пользователю; layout observer больше не двигает чат.
+2. Менеджеры, CRM-статусы и теги во вкладках Диалоги/Клиенты/Напоминания стали мультивыбором. Значения хранятся в URL через запятую.
+3. Telegram SLA: один bot token, отдельное правило и Telegram chat для каждого менеджера, SLA только в рабочие минуты, дефолт 10:00-22:00 / 8 минут.
+4. /api/notifications/check можно будить внешним scheduler каждую минуту через Bearer NOTIFICATION_CHECK_SECRET.
+5. Bot pairing: CRM -> Еще -> Telegram-уведомления -> Подключить Telegram -> /start одноразового кода.
+6. TELEGRAM_BOT_TOKEN, BlueSales notification credentials и scheduler secret НЕ хранятся в GitHub.
+
+ВАЖНО: токен, опубликованный в чате, нужно отозвать через BotFather и создать новый.

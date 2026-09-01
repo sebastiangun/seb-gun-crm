@@ -99,3 +99,28 @@ VK `messages.getConversations` официально поддерживает `fi
 
 For a GitHub + Render deployment, see `DEPLOY_RENDER.md` and `render.yaml`.
 Never commit `.env.local`; store VK credentials in Render Environment Variables.
+
+## v26.2 — Telegram SLA notifications
+
+Secrets are never stored in GitHub. Configure them in Render Environment:
+
+- `TELEGRAM_BOT_TOKEN` — regenerated BotFather token.
+- `TELEGRAM_BOT_USERNAME` — public bot username, e.g. `yozhiki_sebastian_bot`.
+- `TELEGRAM_WEBHOOK_SECRET` — optional random secret for Telegram webhook verification. If omitted the server derives a stable secret from the bot token.
+- `NOTIFICATION_CHECK_SECRET` — random secret required by `/api/notifications/check`.
+- `BLUESALES_NOTIFICATION_LOGIN` / `BLUESALES_NOTIFICATION_PASSWORD` — a BlueSales account used by the background checker so notifications do not depend on an open browser session.
+- `NOTIFICATION_TIMEZONE` — default `Europe/Moscow`.
+
+After deploy open CRM -> More -> Telegram notifications. Select a manager, set SLA/work hours, save, then press Connect Telegram and press START in the bot. One bot supports multiple managers; each rule stores its own Telegram chat.
+
+The external scheduler should call once per minute:
+
+`POST https://seb-gun-crm.onrender.com/api/notifications/check`
+
+with HTTP header:
+
+`Authorization: Bearer <NOTIFICATION_CHECK_SECRET>`
+
+SLA counts working minutes only. Example with 10:00-22:00 / 8 minutes: an incoming message at 09:30 becomes due at 10:08; one at 21:57 becomes due at 10:05 next day if no reply is sent.
+
+The default notification-settings JSON is runtime-local. Render Free can replace its filesystem when an instance is recreated, so keep a backup of the rules or add persistent storage before treating this as mission-critical monitoring.

@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "26.0.0",
+  "version": "26.2.0",
   "private": true,
-  "description": "seb_gun CRM v26.0: no-jump message menus/transcripts, async STT jobs, fast SpeechRecognition-compatible Google fallback, stable audio and safe mobile sending",
+  "description": "seb_gun CRM v26.2: Telegram SLA alerts, per-manager bot pairing, multi-select CRM filters, and bottom-on-open chat with user-owned scrolling",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -19,7 +19,9 @@
     "test:v257": "node tests/integration-v257.js",
     "test:v258": "node tests/integration-v258.js",
     "test:v259": "node tests/integration-v259.js",
-    "test:v260": "node tests/integration-v260.js"
+    "test:v260": "node tests/integration-v260.js",
+    "test:v261": "node tests/integration-v261.js",
+    "test:v262": "node tests/integration-v262.js"
   },
   "engines": {
     "node": ">=18"

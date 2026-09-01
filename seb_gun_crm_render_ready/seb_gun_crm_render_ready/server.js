@@ -55,12 +55,22 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '26.0';
+const VERSION = '26.2';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
 const VK_DIRECT_AUTHOR = String(process.env.VK_DIRECT_AUTHOR || 'Дарья А.').trim();
+
+// v26.2 Telegram SLA notifications. Secrets live only in Render Environment.
+const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const TELEGRAM_BOT_USERNAME = String(process.env.TELEGRAM_BOT_USERNAME || 'yozhiki_sebastian_bot').trim().replace(/^@/, '');
+const TELEGRAM_WEBHOOK_SECRET = String(process.env.TELEGRAM_WEBHOOK_SECRET || (TELEGRAM_BOT_TOKEN ? crypto.createHash('sha256').update(TELEGRAM_BOT_TOKEN).digest('hex').slice(0,48) : '')).trim();
+const NOTIFICATION_CHECK_SECRET = String(process.env.NOTIFICATION_CHECK_SECRET || '').trim();
+const NOTIFICATION_BS_LOGIN = String(process.env.BLUESALES_NOTIFICATION_LOGIN || '').trim();
+const NOTIFICATION_BS_PASSWORD = String(process.env.BLUESALES_NOTIFICATION_PASSWORD || '');
+const NOTIFICATION_STORE = path.join(ROOT, 'data', 'notification-settings.json');
+const NOTIFICATION_DEFAULT_TZ = String(process.env.NOTIFICATION_TIMEZONE || 'Europe/Moscow').trim();
 
 // v26.0: independent local speech-to-text. The source messenger only provides
 // the audio file; recognition is performed by open-source Transformers.js Whisper
@@ -1054,9 +1064,10 @@ async function getAllCustomersComplete(session) {
   });
 }
 function sameText(a,b){return String(a??'').trim().toLocaleLowerCase('ru-RU')===String(b??'').trim().toLocaleLowerCase('ru-RU')}
-function customerHasTag(c,tag){if(!tag)return true;return(c.tags||[]).some(t=>sameText(t?.name??t,tag))}
-function customerMatchesManager(c,manager){if(!manager)return true;return sameText(c.manager,manager)||sameText(c.managerLogin,manager)}
-function customerMatchesStatus(c,status){if(!status)return true;return sameText(c.crmStatus,status)}
+function multiParamValues(value){return [...new Set(String(value||'').split(',').map(v=>v.trim()).filter(Boolean))]}
+function customerHasTag(c,tag){const values=multiParamValues(tag);if(!values.length)return true;return values.some(v=>(c.tags||[]).some(t=>sameText(t?.name??t,v)))}
+function customerMatchesManager(c,manager){const values=multiParamValues(manager);if(!values.length)return true;return values.some(v=>sameText(c.manager,v)||sameText(c.managerLogin,v))}
+function customerMatchesStatus(c,status){const values=multiParamValues(status);if(!values.length)return true;return values.some(v=>sameText(c.crmStatus,v))}
 
 async function getCustomersByNextContactRange(session, nextFrom = null, nextTo = null) {
   const key = `${session.login}:next-contact:${nextFrom || '*'}:${nextTo || '*'}`;
@@ -2143,11 +2154,157 @@ async function adminUsersForSession(session){
   return out;
 }
 
+
+function notificationDefaultStore(){return {version:1,rules:[],pairCodes:{},notified:{},updatedAt:0}}
+function readNotificationStore(){
+  try{
+    if(!fs.existsSync(NOTIFICATION_STORE))return notificationDefaultStore();
+    const raw=JSON.parse(fs.readFileSync(NOTIFICATION_STORE,'utf8'));
+    return {...notificationDefaultStore(),...(raw&&typeof raw==='object'?raw:{})};
+  }catch(err){console.warn('[notifications store read]',err?.message||err);return notificationDefaultStore()}
+}
+function writeNotificationStore(store){
+  try{fs.mkdirSync(path.dirname(NOTIFICATION_STORE),{recursive:true});store.updatedAt=Date.now();fs.writeFileSync(NOTIFICATION_STORE,JSON.stringify(store,null,2),'utf8');return true}
+  catch(err){console.warn('[notifications store write]',err?.message||err);return false}
+}
+function safeNotificationRule(rule={}){
+  return {
+    id:String(rule.id||crypto.randomUUID?.()||randomToken(8)),
+    manager:String(rule.manager||'').trim(),
+    enabled:Boolean(rule.enabled),
+    filter:'unanswered',
+    statuses:multiParamValues(Array.isArray(rule.statuses)?rule.statuses.join(','):rule.statuses),
+    slaMinutes:Math.min(Math.max(Number(rule.slaMinutes||8),1),240),
+    workStart:/^\d{2}:\d{2}$/.test(String(rule.workStart||''))?String(rule.workStart):'10:00',
+    workEnd:/^\d{2}:\d{2}$/.test(String(rule.workEnd||''))?String(rule.workEnd):'22:00',
+    timezone:String(rule.timezone||NOTIFICATION_DEFAULT_TZ||'Europe/Moscow').trim(),
+    repeatMinutes:Math.min(Math.max(Number(rule.repeatMinutes||0),0),1440),
+    telegramChatId:String(rule.telegramChatId||'').trim(),
+    telegramUsername:String(rule.telegramUsername||'').trim(),
+    telegramFirstName:String(rule.telegramFirstName||'').trim(),
+    updatedAt:Number(rule.updatedAt||Date.now())
+  }
+}
+function notificationRulePublic(rule={}){const r=safeNotificationRule(rule);return {...r,telegramChatId:undefined,telegramConnected:Boolean(r.telegramChatId)}}
+function notificationRuleKey(manager=''){return String(manager||'').trim().toLocaleLowerCase('ru-RU')}
+function findNotificationRule(store,manager=''){const k=notificationRuleKey(manager);return (store.rules||[]).find(r=>notificationRuleKey(r.manager)===k)||null}
+function upsertNotificationRule(store,input={}){
+  const manager=String(input.manager||'').trim();if(!manager)throw Object.assign(new Error('Выберите менеджера'),{status:400});
+  const existing=findNotificationRule(store,manager)||{};const next=safeNotificationRule({...existing,...input,manager,telegramChatId:existing.telegramChatId||input.telegramChatId||'',telegramUsername:existing.telegramUsername||'',telegramFirstName:existing.telegramFirstName||'',updatedAt:Date.now()});
+  const idx=(store.rules||[]).findIndex(r=>notificationRuleKey(r.manager)===notificationRuleKey(manager));if(idx>=0)store.rules[idx]=next;else store.rules.push(next);return next
+}
+async function telegramCall(method,payload={}){
+  if(!TELEGRAM_BOT_TOKEN)throw Object.assign(new Error('TELEGRAM_BOT_TOKEN не настроен'),{status:503,code:'TELEGRAM_NOT_CONFIGURED'});
+  const response=await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)});
+  const data=await response.json().catch(()=>({ok:false,description:`HTTP ${response.status}`}));
+  if(!response.ok||!data?.ok)throw Object.assign(new Error(data?.description||`Telegram HTTP ${response.status}`),{status:502,code:'TELEGRAM_API'});
+  return data.result
+}
+async function sendTelegramText(chatId,text,{url='',button='Открыть диалог'}={}){
+  const payload={chat_id:String(chatId),text:String(text||''),disable_web_page_preview:true};
+  if(url)payload.reply_markup={inline_keyboard:[[{text:button,url}]]};
+  return telegramCall('sendMessage',payload)
+}
+async function ensureTelegramWebhook(){
+  if(!TELEGRAM_BOT_TOKEN||!PUBLIC_BASE_URL)return false;
+  const url=`${PUBLIC_BASE_URL}/api/telegram/webhook`;
+  await telegramCall('setWebhook',{url,secret_token:TELEGRAM_WEBHOOK_SECRET,allowed_updates:['message']});
+  console.log(`[Telegram] webhook ready: ${url}`);return true
+}
+function notificationServiceSession(){
+  if(!NOTIFICATION_BS_LOGIN||!NOTIFICATION_BS_PASSWORD||!PRESET_VK_TOKEN)return null;
+  return {login:NOTIFICATION_BS_LOGIN,passwordHash:md5Upper(NOTIFICATION_BS_PASSWORD),webPassword:NOTIFICATION_BS_PASSWORD,vkToken:PRESET_VK_TOKEN,vkGroupId:PRESET_VK_COMMUNITY||null,currentUser:{login:NOTIFICATION_BS_LOGIN,name:NOTIFICATION_BS_LOGIN}}
+}
+function notificationCheckAuthorized(req,url){
+  if(!NOTIFICATION_CHECK_SECRET)return false;
+  const auth=String(req.headers.authorization||'');if(auth===`Bearer ${NOTIFICATION_CHECK_SECRET}`)return true;
+  return String(url.searchParams.get('key')||'')===NOTIFICATION_CHECK_SECRET
+}
+const zonedFormatterCache=new Map();
+function zonedParts(ts,timeZone){
+  const key=String(timeZone||NOTIFICATION_DEFAULT_TZ);let fmt=zonedFormatterCache.get(key);
+  if(!fmt){fmt=new Intl.DateTimeFormat('en-US',{timeZone:key,weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});zonedFormatterCache.set(key,fmt)}
+  const out={weekday:'',hour:0,minute:0};for(const p of fmt.formatToParts(new Date(ts))){if(p.type==='weekday')out.weekday=p.value;if(p.type==='hour')out.hour=Number(p.value);if(p.type==='minute')out.minute=Number(p.value)}return out
+}
+function hhmmMinutes(value='00:00'){const [h,m]=String(value).split(':').map(Number);return Math.max(0,Math.min(1439,(Number(h)||0)*60+(Number(m)||0)))}
+function notificationWorkingNow(ts,rule){
+  const p=zonedParts(ts,rule.timezone),minute=p.hour*60+p.minute,start=hhmmMinutes(rule.workStart),end=hhmmMinutes(rule.workEnd);
+  if(start===end)return true;return start<end?(minute>=start&&minute<end):(minute>=start||minute<end)
+}
+function workingMinutesUntilThreshold(startMs,endMs,rule,threshold){
+  if(!Number.isFinite(startMs)||!Number.isFinite(endMs)||endMs<=startMs)return 0;
+  const need=Math.max(1,Number(threshold||rule.slaMinutes||8)),maxLookback=8*24*60,span=Math.min(maxLookback,Math.ceil((endMs-startMs)/60000)+2);let count=0;
+  let t=Math.max(startMs,endMs-maxLookback*60000);t=Math.floor(t/60000)*60000;
+  for(let i=0;i<span&&t<endMs;i++,t+=60000){if(notificationWorkingNow(t,rule)&&++count>=need)return count}
+  return count
+}
+async function unansweredSinceForPeer(session,peerId){
+  const params={peer_id:Number(peerId),count:100,offset:0,extended:0};if(session.vkGroupId)params.group_id=session.vkGroupId;
+  const raw=await vkCall(session.vkToken,'messages.getHistory',params),items=Array.isArray(raw?.items)?raw.items:[];let earliest=0,seenIncoming=false;
+  for(const m of items){if(Number(m?.out||0)===1)break;seenIncoming=true;const d=Number(m?.date||0);if(d)earliest=d}
+  return seenIncoming?earliest:0
+}
+async function loadUnansweredDialogsForNotifications(session,{maxPages=5}={}){
+  const all=[];let offset=0;for(let page=0;page<maxPages;page++){
+    const params={count:200,offset,filter:'unanswered',extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;
+    const raw=await vkCall(session.vkToken,'messages.getConversations',params),maps=vkIdentityMaps(raw||{}),rows=(raw?.items||[]).map(x=>normalizeVkDialog(x,maps));all.push(...rows);offset+=rows.length;if(!rows.length||offset>=Number(raw?.count||0))break
+  }
+  const vkIds=all.filter(d=>d.peerType==='user'&&d.peerId>0).map(d=>d.peerId);
+  if(vkIds.length){try{const linked=await getCustomersByVkIds(session,vkIds),byVk=new Map(linked.filter(c=>c.social?.vkId).map(c=>[Number(c.social.vkId),c]));for(const d of all){const c=byVk.get(d.peerId);if(c)d.crm={clientId:c.id,fullName:c.fullName,crmStatus:c.crmStatus,manager:c.manager,managerLogin:c.managerLogin,tags:c.tags}}}catch(err){console.warn('[notifications crm link]',err?.message||err)}}
+  return all
+}
+function notificationDialogUrl(peerId){const base=PUBLIC_BASE_URL||'';return base?`${base}/?dialog=${encodeURIComponent(peerId)}#/dialog/${encodeURIComponent(peerId)}`:''}
+async function runNotificationCheck({session=null,manual=false}={}){
+  const store=readNotificationStore(),rules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.enabled&&r.telegramChatId&&r.manager);if(!rules.length)return {ok:true,checked:0,sent:0,message:'Нет активных подключённых правил'};
+  const s=session||notificationServiceSession();if(!s)throw Object.assign(new Error('Для фоновой проверки задайте BLUESALES_NOTIFICATION_LOGIN и BLUESALES_NOTIFICATION_PASSWORD в Render'),{status:503,code:'NOTIFICATION_CREDENTIALS'});
+  const nowMs=Date.now(),activeRules=rules.filter(r=>notificationWorkingNow(nowMs,r));if(!activeRules.length)return {ok:true,checked:0,sent:0,outsideWorkingHours:true};
+  const dialogs=await loadUnansweredDialogsForNotifications(s),relevant=dialogs.filter(d=>activeRules.some(r=>customerMatchesManager(d.crm||{},r.manager)&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(','))));let sent=0,checked=0;
+  for(const d of relevant){
+    const matching=activeRules.filter(r=>customerMatchesManager(d.crm||{},r.manager)&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(',')));if(!matching.length)continue;
+    let since=0;try{since=await unansweredSinceForPeer(s,d.peerId)}catch(err){console.warn('[notifications history]',d.peerId,err?.message||err);continue}if(!since)continue;checked++;
+    const startMs=since*1000;
+    for(const r of matching){
+      const worked=workingMinutesUntilThreshold(startMs,nowMs,r,r.slaMinutes);if(worked<r.slaMinutes)continue;
+      const key=`${r.id}:${d.peerId}:${since}`,prev=store.notified?.[key]||null;
+      if(prev){if(!r.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<r.repeatMinutes*60000)continue}
+      const client=d.crm?.fullName||d.name||`VK ${d.peerId}`,snippet=String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),text=`🔴 Просрочен ответ — ${r.manager}\n\n${client}\nБез ответа: больше ${r.slaMinutes} рабочих минут\n${snippet?`\n«${snippet}»`:''}`;
+      await sendTelegramText(r.telegramChatId,text,{url:notificationDialogUrl(d.peerId)});store.notified[key]={sentAt:nowMs,manager:r.manager,peerId:d.peerId,since};sent++
+    }
+  }
+  // Keep the small JSON store bounded on Render's ephemeral filesystem.
+  const cutoff=nowMs-14*24*60*60*1000;for(const[k,v]of Object.entries(store.notified||{}))if(Number(v?.sentAt||0)<cutoff)delete store.notified[k];writeNotificationStore(store);
+  return {ok:true,checked,sent,dialogs:dialogs.length,manual}
+}
+async function handleTelegramWebhook(req,res){
+  if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'Telegram bot не настроен'});
+  if(TELEGRAM_WEBHOOK_SECRET&&String(req.headers['x-telegram-bot-api-secret-token']||'')!==TELEGRAM_WEBHOOK_SECRET)return sendJson(res,403,{ok:false});
+  const update=await readJson(req),msg=update?.message;if(!msg?.chat?.id)return sendJson(res,200,{ok:true});
+  const text=String(msg.text||'').trim(),chatId=String(msg.chat.id),store=readNotificationStore();
+  const m=text.match(/^\/start(?:\s+([A-Za-z0-9_-]+))?/i);
+  if(m){const code=String(m[1]||'');const pair=store.pairCodes?.[code];if(pair&&Number(pair.expiresAt||0)>Date.now()){
+      const rule=findNotificationRule(store,pair.manager)||upsertNotificationRule(store,{manager:pair.manager,enabled:false});rule.telegramChatId=chatId;rule.telegramUsername=String(msg.from?.username||'');rule.telegramFirstName=String(msg.from?.first_name||'');delete store.pairCodes[code];writeNotificationStore(store);await sendTelegramText(chatId,`✅ seb_gun CRM подключена.\nМенеджер: ${rule.manager}\nУведомления: ${rule.enabled?'включены':'пока выключены'}`);return sendJson(res,200,{ok:true})
+    }
+    await sendTelegramText(chatId,'Откройте «CRM → Ещё → Telegram-уведомления» и нажмите «Подключить Telegram».');return sendJson(res,200,{ok:true})
+  }
+  if(/^\/status/i.test(text)){const rule=(store.rules||[]).find(r=>String(r.telegramChatId||'')===chatId);await sendTelegramText(chatId,rule?`CRM подключена: ${rule.manager}. SLA ${rule.slaMinutes} мин, ${rule.workStart}–${rule.workEnd}.`:'Этот Telegram ещё не привязан к менеджеру.');return sendJson(res,200,{ok:true})}
+  return sendJson(res,200,{ok:true})
+}
+
 async function apiRouter(req, res, url) {
   const pathname = url.pathname;
 
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:sttReady(), sttMode:STT_PROVIDER==='google-legacy'?'async-google-speechrecognition':(STT_PROVIDER==='speechrecognition'?'async-google-speechrecognition':'async-local-whisper'), sttProvider:STT_PROVIDER, sttModel:STT_PROVIDER==='google-legacy'?'SpeechRecognition/Google':(STT_ENABLED?STT_MODEL:null), sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttAsync:true });
+    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:sttReady(), sttMode:STT_PROVIDER==='google-legacy'?'async-google-speechrecognition':(STT_PROVIDER==='speechrecognition'?'async-google-speechrecognition':'async-local-whisper'), sttProvider:STT_PROVIDER, sttModel:STT_PROVIDER==='google-legacy'?'SpeechRecognition/Google':(STT_ENABLED?STT_MODEL:null), sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttAsync:true, telegramConfigured:Boolean(TELEGRAM_BOT_TOKEN), notificationSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET), notificationWorkerCredentials:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD) });
+  }
+
+
+  if (pathname === '/api/telegram/webhook' && req.method === 'POST') {
+    try{return await handleTelegramWebhook(req,res)}catch(err){console.error('[Telegram webhook]',err?.message||err);return sendJson(res,200,{ok:true})}
+  }
+
+  if (pathname === '/api/notifications/check' && (req.method === 'POST' || req.method === 'GET')) {
+    if(!notificationCheckAuthorized(req,url))return sendJson(res,403,{ok:false,message:'Неверный ключ планировщика'});
+    try{return sendJson(res,200,await runNotificationCheck({manual:false}))}catch(err){return handleApiError(res,err)}
   }
 
   if (pathname === '/api/auth/login' && req.method === 'POST') {
@@ -2210,6 +2367,28 @@ async function apiRouter(req, res, url) {
 
   const s = requireAuth(req, res);
   if (!s) return;
+
+  if (pathname === '/api/notifications/settings' && req.method === 'GET') {
+    const store=readNotificationStore();
+    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:TELEGRAM_BOT_USERNAME,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),rules:(store.rules||[]).map(notificationRulePublic),filesystemPersistent:false});
+  }
+  if (pathname === '/api/notifications/settings' && req.method === 'POST') {
+    if(!requireCsrf(req,res,s))return;
+    try{const body=await readJson(req),store=readNotificationStore(),rule=upsertNotificationRule(store,body);writeNotificationStore(store);return sendJson(res,200,{ok:true,rule:notificationRulePublic(rule)})}catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/notifications/pair' && req.method === 'POST') {
+    if(!requireCsrf(req,res,s))return;
+    try{if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'Добавьте новый TELEGRAM_BOT_TOKEN в Render Environment'});const body=await readJson(req),manager=String(body.manager||'').trim();if(!manager)return sendJson(res,400,{ok:false,message:'Выберите менеджера'});const store=readNotificationStore();upsertNotificationRule(store,{manager,...(findNotificationRule(store,manager)||{})});const code=randomToken(12);store.pairCodes=store.pairCodes||{};store.pairCodes[code]={manager,expiresAt:Date.now()+15*60*1000};writeNotificationStore(store);return sendJson(res,200,{ok:true,pairUrl:`https://t.me/${TELEGRAM_BOT_USERNAME}?start=${code}`,expiresMinutes:15})}catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/notifications/unpair' && req.method === 'POST') {
+    if(!requireCsrf(req,res,s))return;const body=await readJson(req),store=readNotificationStore(),rule=findNotificationRule(store,body.manager);if(rule){rule.telegramChatId='';rule.telegramUsername='';rule.telegramFirstName='';writeNotificationStore(store)}return sendJson(res,200,{ok:true})
+  }
+  if (pathname === '/api/notifications/test' && req.method === 'POST') {
+    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req),store=readNotificationStore(),rule=findNotificationRule(store,body.manager);if(!rule?.telegramChatId)return sendJson(res,400,{ok:false,message:'Сначала подключите Telegram этого менеджера'});await sendTelegramText(rule.telegramChatId,`✅ Тест seb_gun CRM\nМенеджер: ${rule.manager}\nSLA: ${rule.slaMinutes} рабочих минут\nГрафик: ${rule.workStart}–${rule.workEnd}`);return sendJson(res,200,{ok:true})}catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/notifications/check-now' && req.method === 'POST') {
+    if(!requireCsrf(req,res,s))return;try{return sendJson(res,200,await runNotificationCheck({session:s,manual:true}))}catch(err){return handleApiError(res,err)}
+  }
 
   if (pathname === '/api/activity' && req.method === 'POST') {
     if (!requireCsrf(req, res, s)) return;
@@ -2821,8 +3000,8 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       const tag = String(url.searchParams.get('tag') || '').trim();
       let customers = [], hasMore = false, totalHint = 0;
 
-      if (manager && !q && !status && !tag) {
-        const page = await getCustomersPage(s, { count: limit, offset, managers:[manager] });
+      if (multiParamValues(manager).length === 1 && !q && !status && !tag) {
+        const page = await getCustomersPage(s, { count: limit, offset, managers:multiParamValues(manager) });
         customers = page.customers; hasMore = page.notReturnedCount > 0; totalHint = page.count + page.notReturnedCount;
       } else if (!q && !status && !manager && !tag) {
         const page = await getCustomersPage(s, { count: limit, offset });
@@ -3096,6 +3275,7 @@ server.listen(PORT, HOST, () => {
   console.log('Для доступа из интернета размещайте этот сервер за HTTPS (VPS/Reverse Proxy).');
   console.log('Не закрывайте это окно во время работы локального сайта.');
   console.log('');
+  if(TELEGRAM_BOT_TOKEN&&PUBLIC_BASE_URL)setTimeout(()=>ensureTelegramWebhook().catch(err=>console.warn('[Telegram webhook setup]',err?.message||err)),1200);
 });
 
 process.on('SIGINT', () => server.close(() => process.exit(0)));
