@@ -35,7 +35,9 @@ services:
       - key: LOCAL_STT_LANGUAGE
         value: "russian"
       - key: LOCAL_STT_TIMEOUT_MS
-        value: "120000"
+        value: "90000"
+      - key: VOICE_TRANSCRIPT_TTL_MS
+        value: "7776000000"
       - key: VK_TOKEN
         sync: false
       - key: VK_COMMUNITY

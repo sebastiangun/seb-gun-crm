@@ -1388,3 +1388,14 @@ button,input,select,textarea,.notice,.login-card,.info-card,.warning-card{
 .voice-transcript-empty small{display:block;line-height:1.35}
 .voice-transcript-empty button:disabled{opacity:.6;cursor:wait}
 .phrase-current{scroll-margin-block:150px 90px}
+
+
+/* v25.5 — CRM-style voice messages: independent playback + transcription */
+.voice-message{display:grid;gap:7px;min-width:min(290px,72vw)}
+.voice-head{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:10px;font-weight:850;color:var(--muted)}
+.voice-head a{display:grid;place-items:center;width:26px;height:24px;border:1px solid var(--line);border-radius:8px;color:var(--brand);text-decoration:none;background:var(--surface)}
+.voice-player{display:block;width:100%;max-width:330px;min-height:38px;accent-color:var(--brand)}
+.voice-playback-error .voice-player{outline:1px solid #b83b3b;border-radius:20px}
+.voice-playback-error .voice-head::after{content:'Если плеер не стартует — нажмите ↗';font-size:8px;color:#b83b3b;font-weight:700}
+.voice-transcript{border-left:3px solid color-mix(in srgb,var(--brand) 65%,transparent);padding:7px 8px;background:color-mix(in srgb,var(--surface-2) 88%,var(--brand) 12%);border-radius:0 10px 10px 0}
+@media(max-width:699px){.voice-message{min-width:min(270px,78vw)}.voice-player{max-width:100%}.voice-head{font-size:9px}}

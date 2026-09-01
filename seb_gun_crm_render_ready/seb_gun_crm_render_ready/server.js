@@ -53,22 +53,24 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '25.4';
+const VERSION = '25.5';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
 const VK_DIRECT_AUTHOR = String(process.env.VK_DIRECT_AUTHOR || 'Дарья А.').trim();
 
-// v25.4: local open-source speech-to-text. No Groq/OpenAI key and no VK transcript API.
-// The worker uses @huggingface/transformers + Xenova/whisper-tiny and runs outside
-// the main Node event loop, so a long transcription does not freeze CRM HTTP requests.
+// v25.5: CRM-style voice pipeline. Audio playback and transcription are independent.
+// Playback is proxied by this server with HTTP Range support (important for mobile seeking).
+// Transcription uses a local open-source Whisper worker and never asks VK for transcript text.
 const LOCAL_STT_ENABLED = String(process.env.LOCAL_STT_ENABLED ?? '1') !== '0';
 const LOCAL_STT_MODEL = String(process.env.LOCAL_STT_MODEL || 'Xenova/whisper-tiny').trim();
 const LOCAL_STT_DTYPE = String(process.env.LOCAL_STT_DTYPE || 'q8').trim();
 const LOCAL_STT_LANGUAGE = String(process.env.LOCAL_STT_LANGUAGE || 'russian').trim();
 const LOCAL_STT_TIMEOUT_MS = Math.min(Math.max(Number(process.env.LOCAL_STT_TIMEOUT_MS || 120000), 15000), 180000);
 const LOCAL_STT_MAX_BYTES = Math.min(Math.max(Number(process.env.LOCAL_STT_MAX_BYTES || 16 * 1024 * 1024), 1024 * 1024), 24 * 1024 * 1024);
+const VOICE_TRANSCRIPT_STORE = path.join(ROOT, 'data', 'voice-transcripts.json');
+const VOICE_TRANSCRIPT_TTL_MS = Math.max(Number(process.env.VOICE_TRANSCRIPT_TTL_MS || 90 * 24 * 60 * 60 * 1000), 24 * 60 * 60 * 1000);
 
 const BS_SCREENSHOT_STATUS_COLORS = {
   'Не учитывать в лидах':'#848B8C',
@@ -1157,15 +1159,48 @@ function isAllowedMediaHost(hostname) {
 function transcriptCacheKey(peerId, conversationMessageId) {
   return `${Number(peerId)||0}:${Number(conversationMessageId)||0}`;
 }
+let voiceTranscriptSaveTimer=null;
+function loadVoiceTranscriptStore() {
+  try {
+    if (!fs.existsSync(VOICE_TRANSCRIPT_STORE)) return;
+    const parsed=JSON.parse(fs.readFileSync(VOICE_TRANSCRIPT_STORE,'utf8'));
+    const rows=parsed && typeof parsed==='object' ? (parsed.items||parsed) : {};
+    for (const [key,row] of Object.entries(rows||{})) {
+      const text=String(row?.text||'').trim();
+      const updatedAt=Number(row?.updatedAt||Date.now());
+      if(!text || updatedAt+VOICE_TRANSCRIPT_TTL_MS<Date.now()) continue;
+      voiceTranscriptCache.set(key,{text,source:String(row?.source||'local-whisper'),updatedAt,expiresAt:updatedAt+VOICE_TRANSCRIPT_TTL_MS});
+    }
+    console.log(`[voice transcript cache] loaded ${voiceTranscriptCache.size}`);
+  } catch(err) { console.warn('[voice transcript cache load]',err?.message||err); }
+}
+function persistVoiceTranscriptStoreSoon() {
+  clearTimeout(voiceTranscriptSaveTimer);
+  voiceTranscriptSaveTimer=setTimeout(()=>{
+    try {
+      const items={};
+      for(const [key,row] of voiceTranscriptCache){
+        if(!row?.text || Number(row.expiresAt||0)<Date.now()) continue;
+        items[key]={text:row.text,source:row.source||'local-whisper',updatedAt:Number(row.updatedAt||Date.now())};
+      }
+      fs.mkdirSync(path.dirname(VOICE_TRANSCRIPT_STORE),{recursive:true});
+      const tmp=`${VOICE_TRANSCRIPT_STORE}.tmp`;
+      fs.writeFileSync(tmp,JSON.stringify({version:1,updatedAt:new Date().toISOString(),items},null,2),'utf8');
+      fs.renameSync(tmp,VOICE_TRANSCRIPT_STORE);
+    } catch(err) { console.warn('[voice transcript cache save]',err?.message||err); }
+  },250);
+}
 function putVoiceTranscriptCache(peerId, conversationMessageId, text, source='local-whisper') {
   const clean=String(text||'').trim();
   if(!clean)return;
-  voiceTranscriptCache.set(transcriptCacheKey(peerId,conversationMessageId),{text:clean,source:String(source||'local-whisper'),expiresAt:Date.now()+24*60*60*1000});
+  const updatedAt=Date.now();
+  voiceTranscriptCache.set(transcriptCacheKey(peerId,conversationMessageId),{text:clean,source:String(source||'local-whisper'),updatedAt,expiresAt:updatedAt+VOICE_TRANSCRIPT_TTL_MS});
+  persistVoiceTranscriptStoreSoon();
 }
 function getVoiceTranscriptCache(peerId, conversationMessageId) {
   const key=transcriptCacheKey(peerId,conversationMessageId),row=voiceTranscriptCache.get(key);
   if(!row)return null;
-  if(Number(row.expiresAt||0)<Date.now()){voiceTranscriptCache.delete(key);return null}
+  if(Number(row.expiresAt||0)<Date.now()){voiceTranscriptCache.delete(key);persistVoiceTranscriptStoreSoon();return null}
   return row;
 }
 function applyVoiceTranscriptCache(peerId,messages=[]) {
@@ -1177,6 +1212,7 @@ function applyVoiceTranscriptCache(peerId,messages=[]) {
   }
   return messages;
 }
+loadVoiceTranscriptStore();
 async function downloadVoiceForLocalStt(rawUrl) {
   let target;
   try{target=new URL(String(rawUrl||''))}catch{throw Object.assign(new Error('Некорректная ссылка голосового сообщения'),{status:400})}
@@ -1271,6 +1307,44 @@ async function transcribeMissingVoiceMessages(peerId,messages,{max=40,concurrenc
   await Promise.all(Array.from({length:Math.max(1,Math.min(Number(concurrency)||1,4))},worker));
   const missing=(messages||[]).filter(m=>{const v=messageVoiceAttachment(m);return v&&!String(v.transcript||'').trim()}).length;
   return {messages,transcribed,missing,skipped:Math.max(0,candidates.length-selected.length)};
+}
+
+async function proxyVoiceAudio(req, res, rawUrl) {
+  let target;
+  try { target=new URL(String(rawUrl||'')); }
+  catch { return sendJson(res,400,{ok:false,message:'Некорректная ссылка аудио'}); }
+  if(target.protocol!=='https:' || !isAllowedMediaHost(target.hostname)) {
+    return sendJson(res,400,{ok:false,message:'Этот аудио-хост не разрешён'});
+  }
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),30000);
+  const headers={
+    'Accept':'audio/mpeg,audio/ogg,audio/webm,audio/*,*/*;q=0.8',
+    'User-Agent':req.headers['user-agent']||`seb_gun-CRM/${VERSION}`,
+    'Referer':'https://vk.com/'
+  };
+  if(req.headers.range) headers.Range=String(req.headers.range);
+  let upstream;
+  try {
+    upstream=await fetch(target,{method:'GET',redirect:'follow',headers,signal:controller.signal});
+  } catch(err) {
+    clearTimeout(timeout);
+    return sendJson(res,err?.name==='AbortError'?504:502,{ok:false,message:err?.name==='AbortError'?'Аудио отвечает слишком долго':`Не удалось загрузить аудио: ${err.message}`});
+  }
+  clearTimeout(timeout);
+  if(!upstream.ok && upstream.status!==206) return sendJson(res,upstream.status||502,{ok:false,message:`Аудио HTTP ${upstream.status}`});
+  const out={
+    'Content-Type':upstream.headers.get('content-type')||'audio/mpeg',
+    'Cache-Control':'private, max-age=3600, stale-while-revalidate=86400',
+    'Accept-Ranges':upstream.headers.get('accept-ranges')||'bytes',
+    'X-Content-Type-Options':'nosniff',
+    'Cross-Origin-Resource-Policy':'same-origin'
+  };
+  for(const name of ['content-length','content-range','etag','last-modified']){
+    const v=upstream.headers.get(name);if(v)out[name.split('-').map(x=>x[0].toUpperCase()+x.slice(1)).join('-')]=v;
+  }
+  res.writeHead(upstream.status===206?206:200,out);
+  if(!upstream.body)return res.end();
+  try{for await(const chunk of upstream.body)res.write(chunk);res.end()}catch(err){try{res.destroy(err)}catch{}}
 }
 
 async function proxyVkMedia(req, res, rawUrl) {
@@ -1974,7 +2048,7 @@ async function apiRouter(req, res, url) {
   const pathname = url.pathname;
 
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:LOCAL_STT_ENABLED, sttMode:'local-open-source-whisper', sttModel:LOCAL_STT_ENABLED?LOCAL_STT_MODEL:null, sttNeedsApiKey:false });
+    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:LOCAL_STT_ENABLED, sttMode:'crm-audio-pipeline/local-open-source-whisper', sttModel:LOCAL_STT_ENABLED?LOCAL_STT_MODEL:null, sttNeedsApiKey:false });
   }
 
   if (pathname === '/api/auth/login' && req.method === 'POST') {
@@ -2051,6 +2125,10 @@ async function apiRouter(req, res, url) {
 
   if (pathname === '/api/media' && req.method === 'GET') {
     return proxyVkMedia(req, res, url.searchParams.get('url'));
+  }
+
+  if (pathname === '/api/voice/audio' && req.method === 'GET') {
+    return proxyVoiceAudio(req, res, url.searchParams.get('url'));
   }
 
   if (pathname === '/api/vk/status' && req.method === 'GET') {
@@ -2220,16 +2298,16 @@ async function apiRouter(req, res, url) {
   }
 
 
-if (pathname === '/api/stt/transcribe' && req.method === 'POST') {
+if ((pathname === '/api/voice/transcribe' || pathname === '/api/stt/transcribe') && req.method === 'POST') {
   if (!requireCsrf(req, res, s)) return;
   try {
     const b=await readJson(req),peerId=Number(b.peerId||0),cmid=Number(b.conversationMessageId||0),audioUrl=String(b.audioUrl||'').trim();
-    if(!peerId||!cmid||!audioUrl)return sendJson(res,400,{ok:false,message:'Нужны peerId, ID сообщения и ссылка на голосовое'});
+    if(!peerId||!cmid||!audioUrl)return sendJson(res,400,{ok:false,message:'Не удалось определить аудиофайл голосового'});
     const cached=getVoiceTranscriptCache(peerId,cmid);
     if(cached)return sendJson(res,200,{ok:true,available:true,transcript:cached.text,transcriptSource:cached.source,conversationMessageId:cmid,model:LOCAL_STT_MODEL,cached:true});
-    if(!LOCAL_STT_ENABLED)return sendJson(res,503,{ok:false,error:'STT_DISABLED',message:'Локальная расшифровка отключена на сервере'});
+    if(!LOCAL_STT_ENABLED)return sendJson(res,503,{ok:false,error:'STT_DISABLED',message:'Расшифровка отключена на сервере'});
     const ext=await transcribeVoiceLocal(audioUrl),transcript=String(ext.text||'').trim();
-    if(!transcript)return sendJson(res,502,{ok:false,error:'STT_EMPTY',message:'Whisper не вернул текст'});
+    if(!transcript)return sendJson(res,502,{ok:false,error:'STT_EMPTY',message:'Не удалось распознать речь в этом голосовом'});
     putVoiceTranscriptCache(peerId,cmid,transcript,'local-whisper');
     return sendJson(res,200,{ok:true,available:true,transcript,transcriptSource:'local-whisper',conversationMessageId:cmid,model:ext.model||LOCAL_STT_MODEL,cached:false});
   }catch(err){return handleApiError(res,err)}

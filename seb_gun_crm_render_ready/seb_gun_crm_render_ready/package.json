@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "25.4.0",
+  "version": "25.5.0",
   "private": true,
-  "description": "seb_gun CRM v25.4: local open-source Whisper STT (Transformers.js, no Groq/VK transcript dependency), sticky script drawer, mobile edge swipes, unified browser history, and reduced BlueSales/order UI stalls",
+  "description": "seb_gun CRM v25.5: CRM-style voice playback proxy with Range support, cached local Whisper transcription, sticky scripts drawer, mobile swipes, history navigation, and BlueSales performance safeguards",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -13,7 +13,8 @@
     "test:v251": "node tests/integration-v251.js",
     "test:v252": "node tests/integration-v252.js",
     "test:v253": "node tests/integration-v253.js",
-    "test:v254": "node tests/integration-v254.js"
+    "test:v254": "node tests/integration-v254.js",
+    "test:v255": "node tests/integration-v255.js"
   },
   "engines": {
     "node": ">=18"
