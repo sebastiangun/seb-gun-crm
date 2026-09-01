@@ -55,14 +55,14 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '26.2';
+const VERSION = '26.3';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
 const VK_DIRECT_AUTHOR = String(process.env.VK_DIRECT_AUTHOR || 'Дарья А.').trim();
 
-// v26.2 Telegram SLA notifications. Secrets live only in Render Environment.
+// v26.3 Telegram SLA notifications. Secrets live only in Render Environment.
 const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TELEGRAM_BOT_USERNAME = String(process.env.TELEGRAM_BOT_USERNAME || 'yozhiki_sebastian_bot').trim().replace(/^@/, '');
 const TELEGRAM_WEBHOOK_SECRET = String(process.env.TELEGRAM_WEBHOOK_SECRET || (TELEGRAM_BOT_TOKEN ? crypto.createHash('sha256').update(TELEGRAM_BOT_TOKEN).digest('hex').slice(0,48) : '')).trim();

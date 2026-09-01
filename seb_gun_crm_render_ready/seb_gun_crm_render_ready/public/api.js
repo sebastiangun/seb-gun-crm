@@ -1,6 +1,12 @@
 (() => {
   let csrf = '';
+  let authExpiredSignaled=false;
   const inflightGet=new Map(),shortCache=new Map();
+  function signalAuthExpired(data,path){
+    if(authExpiredSignaled)return;
+    authExpiredSignaled=true;csrf='';shortCache.clear();inflightGet.clear();
+    try{window.dispatchEvent(new CustomEvent('bs-auth-expired',{detail:{path:String(path||''),message:String(data?.message||'Сессия завершилась')}}))}catch{}
+  }
   async function request(path, options={}) {
     const {timeout=22000,cacheMs=0,staleMs=0,...fetchOptions}=options;
     const method=String(fetchOptions.method||'GET').toUpperCase(),getKey=method==='GET'?String(path):'';
@@ -16,13 +22,18 @@
     catch(e){if(e?.name==='AbortError')throw new Error('Сервер отвечает слишком долго. Попробуйте ещё раз через несколько секунд.');throw e}
     finally{clearTimeout(timer)}
     let data=null;try{data=await response.json()}catch{data={ok:false,message:`HTTP ${response.status}`}}
-    if(!response.ok){const e=new Error(data?.message||`HTTP ${response.status}`);e.status=response.status;e.code=data?.error;e.details=data?.details;throw e}
+    if(!response.ok){
+      const e=new Error(data?.message||`HTTP ${response.status}`);e.status=response.status;e.code=data?.error;e.details=data?.details;
+      if(response.status===401&&data?.error==='AUTH_REQUIRED'&&!String(path).startsWith('/api/auth/'))signalAuthExpired(data,path);
+      throw e
+    }
+    if(data?.authenticated===true)authExpiredSignaled=false;
     if(data?.csrf)csrf=data.csrf;if(getKey&&cacheMs>0)shortCache.set(getKey,{data,until:Date.now()+cacheMs,staleUntil:Date.now()+cacheMs+Math.max(0,Number(staleMs||0))});return data;
     })();
     if(getKey)inflightGet.set(getKey,run);
     try{return await run}
     catch(err){
-      if(getKey&&staleMs>0){
+      if(err?.status!==401&&getKey&&staleMs>0){
         const row=shortCache.get(getKey);
         if(row&&Number(row.staleUntil||0)>Date.now()){
           console.warn('[API stale fallback]',path,err?.message||err);
@@ -34,8 +45,8 @@
   }
   function qs(obj){const q=new URLSearchParams();for(const[k,v]of Object.entries(obj||{}))if(v!==''&&v!=null)q.set(k,v);return q.toString()}
   window.BSAPI={
-    session:()=>request('/api/session'),
-    login:(login,password)=>request('/api/auth/login',{method:'POST',body:JSON.stringify({login,password})}),
+    session:async()=>{const d=await request('/api/session');if(d?.authenticated)authExpiredSignaled=false;return d},
+    login:async(login,password)=>{const d=await request('/api/auth/login',{method:'POST',body:JSON.stringify({login,password})});authExpiredSignaled=false;return d},
     async logout(){const d=await request('/api/auth/logout',{method:'POST',body:'{}'});csrf='';return d},
     meta:()=>request('/api/meta',{cacheMs:60000,staleMs:600000}),
     clients:(p={})=>request(`/api/clients?${qs(p)}`),

@@ -100,7 +100,7 @@ VK `messages.getConversations` официально поддерживает `fi
 For a GitHub + Render deployment, see `DEPLOY_RENDER.md` and `render.yaml`.
 Never commit `.env.local`; store VK credentials in Render Environment Variables.
 
-## v26.2 — Telegram SLA notifications
+## v26.3 — Telegram SLA notifications
 
 Secrets are never stored in GitHub. Configure them in Render Environment:
 
