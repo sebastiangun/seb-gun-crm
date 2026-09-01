@@ -1452,3 +1452,13 @@ button,input,select,textarea,.notice,.login-card,.info-card,.warning-card{
 .send-btn:disabled,.send-btn.sending{opacity:.58!important;cursor:wait!important;pointer-events:none!important;transform:none!important}
 @media(max-width:699px){.tg-voice{min-width:min(255px,75vw);max-width:78vw}.tg-voice-play{width:40px;height:40px;flex-basis:40px}.tg-voice-wave{gap:1.5px}.tg-voice-text-toggle{height:32px;min-width:30px;padding:0 7px}.tg-voice-transcript p{font-size:12px}}
 [data-theme="dark"] .tg-voice-text-toggle{background:#173126;border-color:#315545;color:#b7f0cd}[data-theme="dark"] .tg-voice-transcript{background:#14231d;border-left-color:#69d79b}[data-theme="dark"] .tg-voice-transcript b,[data-theme="dark"] .tg-voice-transcript button{color:#86e5ad}
+
+
+/* =========================================================
+   v25.8 — user-owned scroll + universal voice playback
+   ========================================================= */
+.chat-messages{overflow-anchor:auto!important;overscroll-behavior-y:contain!important;touch-action:pan-y!important}
+.msg-row{overflow-anchor:auto!important}
+.chat-bottom-anchor{overflow-anchor:none!important}
+.tg-voice-play.loading{opacity:.65;cursor:wait}
+.tg-voice-meta .voice-buffering{color:var(--muted);font-size:8px}

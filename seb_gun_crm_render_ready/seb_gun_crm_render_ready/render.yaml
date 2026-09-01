@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
 
-    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install --omit=dev --include=optional && node scripts/download-stt-model.js && npm run check
+    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install --omit=dev && npm run check
     startCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm start
 
     healthCheckPath: /api/health
@@ -27,23 +27,21 @@ services:
       - key: VK_DIRECT_AUTHOR
         value: "Дарья А."
 
-      # Independent speech-to-text. The audio file is decoded with ffmpeg and
-      # recognized locally by whisper.cpp through a prebuilt Node addon.
-      # No VK transcript endpoint, GROQ_API_KEY or OPENAI_API_KEY is used.
+      # Independent open-source speech-to-text. Audio is converted with the bundled
+      # ffmpeg-static binary and recognized by Transformers.js Whisper in a worker.
+      # No VK transcript API and no external STT API key is used.
       - key: STT_ENABLED
         value: "1"
       - key: STT_LANGUAGE
-        value: "ru"
+        value: "russian"
       - key: STT_MODEL
-        value: "whisper.cpp/tiny-q5_1"
-      - key: STT_MODEL_PATH
-        value: "models/ggml-tiny-q5_1.bin"
-      - key: STT_THREADS
-        value: "1"
+        value: "onnx-community/whisper-tiny"
+      - key: STT_DTYPE
+        value: "q8"
       - key: STT_TIMEOUT_MS
         value: "300000"
       - key: STT_IDLE_RELEASE_MS
-        value: "600000"
+        value: "300000"
       - key: VOICE_TRANSCRIPT_TTL_MS
         value: "7776000000"
 

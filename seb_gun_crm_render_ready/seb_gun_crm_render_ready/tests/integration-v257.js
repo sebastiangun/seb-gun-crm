@@ -10,6 +10,6 @@ must(app.includes('Sending and refreshing are intentionally separate'),'send/ref
 must(api.includes('clientRequestId'),'API idempotency id missing');
 must(server.includes('recentMessageSends'),'server send dedupe missing');
 must(server.includes('stableVkRandomId'),'stable VK random_id missing');
-must(server.includes("const VERSION = '25.7'"),'version missing');
+must(/const VERSION = '25\.[78]'/.test(server),'version missing');
 must(css.includes('v25.7 — Telegram-like voice notes'),'v25.7 CSS missing');
 console.log('integration-v257: OK');

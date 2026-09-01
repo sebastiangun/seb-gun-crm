@@ -1,0 +1,7 @@
+seb_gun CRM v25.8
+
+1. Исправлен прыгающий scroll чата: удалено многократное восстановление позиции на 40..4200 мс и длинный bottom-lock. Ручная прокрутка всегда имеет приоритет.
+2. Голосовые для воспроизведения конвертируются один раз в MP3 через ffmpeg-static и отдаются с HTTP Range. Это повышает совместимость iPhone/Android/desktop.
+3. Расшифровка больше не использует native @fugood/whisper.node. Используется open-source @huggingface/transformers Whisper tiny q8 в отдельном Worker Thread.
+4. Добавлен современный meta mobile-web-app-capable.
+5. Сохранена защита v25.7 от дублей сообщений.

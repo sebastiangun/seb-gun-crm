@@ -6,6 +6,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
 const { URL } = require('url');
 const BlueSalesWeb = require('./lib/bluesales-web');
 
@@ -52,26 +55,29 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '25.7';
+const VERSION = '25.8';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
 const VK_DIRECT_AUTHOR = String(process.env.VK_DIRECT_AUTHOR || 'Дарья А.').trim();
 
-// v25.6: independent local speech-to-text. We only take the audio file from the message;
-// transcription itself is performed inside this Node service with the open-source whisper.cpp engine
-// through the prebuilt @fugood/whisper.node binding. No VK transcript API and no external STT key.
+// v25.8: independent local speech-to-text. The source messenger only provides
+// the audio file; recognition is performed by open-source Transformers.js Whisper
+// in a dedicated worker. No VK transcript endpoint or external STT API key.
 const STT_ENABLED = String(process.env.STT_ENABLED ?? '1') !== '0';
-const STT_LANGUAGE = String(process.env.STT_LANGUAGE || 'ru').trim();
-const STT_MODEL = String(process.env.STT_MODEL || 'whisper.cpp/tiny-q5_1').trim();
-const STT_MODEL_PATH = path.resolve(ROOT, String(process.env.STT_MODEL_PATH || 'models/ggml-tiny-q5_1.bin'));
-const STT_THREADS = Math.min(Math.max(Number(process.env.STT_THREADS || 1), 1), 2);
-const STT_TIMEOUT_MS = Math.min(Math.max(Number(process.env.STT_TIMEOUT_MS || 240000), 30000), 360000);
-const STT_IDLE_RELEASE_MS = Math.min(Math.max(Number(process.env.STT_IDLE_RELEASE_MS || 600000), 60000), 3600000);
+const STT_LANGUAGE = String(process.env.STT_LANGUAGE || 'russian').trim();
+const STT_MODEL = String(process.env.STT_MODEL || 'onnx-community/whisper-tiny').trim();
+const STT_DTYPE = String(process.env.STT_DTYPE || 'q8').trim();
+const STT_TIMEOUT_MS = Math.min(Math.max(Number(process.env.STT_TIMEOUT_MS || 300000), 30000), 360000);
+const STT_IDLE_RELEASE_MS = Math.min(Math.max(Number(process.env.STT_IDLE_RELEASE_MS || 300000), 60000), 3600000);
 const STT_MAX_BYTES = Math.min(Math.max(Number(process.env.STT_MAX_BYTES || 16 * 1024 * 1024), 1024 * 1024), 24 * 1024 * 1024);
 const VOICE_TRANSCRIPT_STORE = path.join(ROOT, 'data', 'voice-transcripts.json');
 const VOICE_TRANSCRIPT_TTL_MS = Math.max(Number(process.env.VOICE_TRANSCRIPT_TTL_MS || 90 * 24 * 60 * 60 * 1000), 24 * 60 * 60 * 1000);
+let FFMPEG_BIN = String(process.env.FFMPEG_PATH || '').trim();
+if (!FFMPEG_BIN) { try { FFMPEG_BIN = require('ffmpeg-static') || 'ffmpeg'; } catch { FFMPEG_BIN = 'ffmpeg'; } }
+const VOICE_PLAYBACK_DIR = path.join(os.tmpdir(), 'seb-gun-voice-playback-v258');
+const voicePlaybackInflight = new Map();
 
 const BS_SCREENSHOT_STATUS_COLORS = {
   'Не учитывать в лидах':'#848B8C',
@@ -1175,7 +1181,7 @@ function loadVoiceTranscriptStore() {
       const text=String(row?.text||'').trim();
       const updatedAt=Number(row?.updatedAt||Date.now());
       if(!text || updatedAt+VOICE_TRANSCRIPT_TTL_MS<Date.now()) continue;
-      voiceTranscriptCache.set(key,{text,source:String(row?.source||'local-whisper.cpp'),updatedAt,expiresAt:updatedAt+VOICE_TRANSCRIPT_TTL_MS});
+      voiceTranscriptCache.set(key,{text,source:String(row?.source||'transformers.js-whisper'),updatedAt,expiresAt:updatedAt+VOICE_TRANSCRIPT_TTL_MS});
     }
     console.log(`[voice transcript cache] loaded ${voiceTranscriptCache.size}`);
   } catch(err) { console.warn('[voice transcript cache load]',err?.message||err); }
@@ -1187,7 +1193,7 @@ function persistVoiceTranscriptStoreSoon() {
       const items={};
       for(const [key,row] of voiceTranscriptCache){
         if(!row?.text || Number(row.expiresAt||0)<Date.now()) continue;
-        items[key]={text:row.text,source:row.source||'local-whisper.cpp',updatedAt:Number(row.updatedAt||Date.now())};
+        items[key]={text:row.text,source:row.source||'transformers.js-whisper',updatedAt:Number(row.updatedAt||Date.now())};
       }
       fs.mkdirSync(path.dirname(VOICE_TRANSCRIPT_STORE),{recursive:true});
       const tmp=`${VOICE_TRANSCRIPT_STORE}.tmp`;
@@ -1196,7 +1202,7 @@ function persistVoiceTranscriptStoreSoon() {
     } catch(err) { console.warn('[voice transcript cache save]',err?.message||err); }
   },250);
 }
-function putVoiceTranscriptCache(peerId, conversationMessageId, text, source='local-whisper.cpp') {
+function putVoiceTranscriptCache(peerId, conversationMessageId, text, source='transformers.js-whisper') {
   const clean=String(text||'').trim();
   if(!clean)return;
   const updatedAt=Date.now();
@@ -1220,12 +1226,10 @@ function applyVoiceTranscriptCache(peerId,messages=[]) {
 }
 loadVoiceTranscriptStore();
 let localSttModulePromise = null;
-function localSttReady() {
-  return Boolean(STT_ENABLED && fs.existsSync(STT_MODEL_PATH));
-}
+function localSttReady() { return Boolean(STT_ENABLED); }
 async function getLocalSttModule() {
   if (!localSttModulePromise) {
-    localSttModulePromise = import('./lib/local-whisper-stt.mjs').catch(err => {
+    localSttModulePromise = import('./lib/local-transformers-stt.mjs').catch(err => {
       localSttModulePromise = null;
       throw err;
     });
@@ -1270,10 +1274,6 @@ async function downloadVoiceForStt(rawUrl) {
 let sttTail = Promise.resolve();
 async function transcribeVoiceLocal(audioUrl) {
   if (!STT_ENABLED) return { configured: false, text: '', source: '' };
-  if (!fs.existsSync(STT_MODEL_PATH)) {
-    const e = new Error('Локальная модель Whisper не найдена. Перезапустите deploy: модель должна скачиваться во время build.');
-    e.code = 'STT_MODEL_MISSING'; e.status = 503; throw e;
-  }
   const job = async () => {
     const audio = await downloadVoiceForStt(audioUrl);
     let mod;
@@ -1284,24 +1284,16 @@ async function transcribeVoiceLocal(audioUrl) {
     }
     try {
       const r = await mod.transcribeBuffer(audio.buffer, {
-        mimeType: audio.mimeType,
-        modelPath: STT_MODEL_PATH,
-        modelName: STT_MODEL,
-        language: STT_LANGUAGE,
-        maxThreads: STT_THREADS,
-        timeoutMs: STT_TIMEOUT_MS,
+        mimeType: audio.mimeType, ffmpegPath: FFMPEG_BIN, modelName: STT_MODEL,
+        dtype: STT_DTYPE, language: STT_LANGUAGE, timeoutMs: STT_TIMEOUT_MS,
         idleReleaseMs: STT_IDLE_RELEASE_MS,
       });
-      return { configured: true, text: String(r?.text || '').trim(), source: 'local-whisper.cpp', model: STT_MODEL };
+      return { configured: true, text: String(r?.text || '').trim(), source: 'transformers.js-whisper', model: STT_MODEL };
     } catch (err) {
       const e = new Error(String(err?.message || err || 'Ошибка локальной расшифровки'));
-      e.code = err?.code || 'STT_LOCAL';
-      e.status = Number(err?.status || 503);
-      throw e;
+      e.code = err?.code || 'STT_LOCAL'; e.status = Number(err?.status || 503); throw e;
     }
   };
-  // Render Free has only a fraction of a CPU. Keep a single transcription in flight so the CRM
-  // stays responsive and voice jobs do not compete for memory/CPU.
   const result = sttTail.then(job, job);
   sttTail = result.catch(() => undefined);
   return result;
@@ -1323,7 +1315,7 @@ async function transcribeMissingVoiceMessages(peerId,messages,{max=12,concurrenc
     try {
       const ext=await transcribeVoiceLocal(row.voice.url),text=String(ext.text||'').trim();
       if(text){
-        row.voice.transcript=text;row.voice.transcriptState='done';row.voice.transcriptSource=ext.source||'local-whisper.cpp';
+        row.voice.transcript=text;row.voice.transcriptState='done';row.voice.transcriptSource=ext.source||'transformers.js-whisper';
         if(row.cmid)putVoiceTranscriptCache(peerId,row.cmid,text,row.voice.transcriptSource);
         transcribed++;
       }
@@ -1333,6 +1325,50 @@ async function transcribeMissingVoiceMessages(peerId,messages,{max=12,concurrenc
   return {messages,transcribed,missing,skipped:Math.max(0,candidates.length-selected.length)};
 }
 
+
+function playbackCacheKey(rawUrl) { return crypto.createHash('sha256').update(String(rawUrl || '')).digest('hex'); }
+function extForAudioMime(mime='audio/ogg') { const x=String(mime||'').toLowerCase(); if(x.includes('webm'))return'.webm'; if(x.includes('mpeg')||x.includes('mp3'))return'.mp3'; if(x.includes('mp4')||x.includes('m4a'))return'.m4a'; if(x.includes('wav'))return'.wav'; return'.ogg'; }
+async function ensureVoicePlaybackMp3(rawUrl) {
+  const key=playbackCacheKey(rawUrl),dir=VOICE_PLAYBACK_DIR,out=path.join(dir,`${key}.mp3`);
+  try { const st=await fs.promises.stat(out); if(st.size>512)return out; } catch {}
+  if(voicePlaybackInflight.has(key))return voicePlaybackInflight.get(key);
+  const task=(async()=>{
+    await fs.promises.mkdir(dir,{recursive:true});
+    const audio=await downloadVoiceForStt(rawUrl),tmpDir=await fs.promises.mkdtemp(path.join(os.tmpdir(),'seb-gun-play-'));
+    const input=path.join(tmpDir,`input${extForAudioMime(audio.mimeType)}`),tmpOut=path.join(tmpDir,'voice.mp3');
+    try {
+      await fs.promises.writeFile(input,audio.buffer);
+      await execFileAsync(FFMPEG_BIN,['-hide_banner','-loglevel','error','-nostdin','-y','-i',input,'-vn','-ac','1','-ar','24000','-c:a','libmp3lame','-b:a','56k',tmpOut],{timeout:60000,maxBuffer:1024*1024});
+      const st=await fs.promises.stat(tmpOut); if(st.size<256)throw new Error('FFmpeg создал пустой аудиофайл');
+      await fs.promises.copyFile(tmpOut,out); return out;
+    } finally { fs.promises.rm(tmpDir,{recursive:true,force:true}).catch(()=>{}); }
+  })().finally(()=>voicePlaybackInflight.delete(key));
+  voicePlaybackInflight.set(key,task); return task;
+}
+function serveFileWithRange(req,res,filePath,mime='audio/mpeg') {
+  let st; try{st=fs.statSync(filePath)}catch{return sendJson(res,404,{ok:false,message:'Аудио не найдено'})}
+  const size=st.size,range=String(req.headers.range||'');
+  const common={'Content-Type':mime,'Accept-Ranges':'bytes','Cache-Control':'private, max-age=86400','X-Content-Type-Options':'nosniff','Content-Disposition':'inline'};
+  if(range){
+    const m=/bytes=(\\d*)-(\\d*)/.exec(range);
+    if(!m){res.writeHead(416,{...common,'Content-Range':`bytes */${size}`});return res.end()}
+    let start=m[1]?Number(m[1]):0,end=m[2]?Number(m[2]):size-1;
+    if(!m[1]&&m[2]){const suffix=Number(m[2]);start=Math.max(0,size-suffix);end=size-1}
+    start=Math.max(0,Math.min(start,size-1));end=Math.max(start,Math.min(end,size-1));
+    res.writeHead(206,{...common,'Content-Range':`bytes ${start}-${end}/${size}`,'Content-Length':String(end-start+1)});
+    if(req.method==='HEAD')return res.end();
+    return fs.createReadStream(filePath,{start,end}).pipe(res);
+  }
+  res.writeHead(200,{...common,'Content-Length':String(size)});
+  if(req.method==='HEAD')return res.end();
+  fs.createReadStream(filePath).pipe(res);
+}
+async function proxyVoicePlayback(req,res,rawUrl){
+  let target;try{target=new URL(String(rawUrl||''))}catch{return sendJson(res,400,{ok:false,message:'Некорректная ссылка аудио'})}
+  if(target.protocol!=='https:'||!isAllowedMediaHost(target.hostname))return sendJson(res,400,{ok:false,message:'Этот аудио-хост не разрешён'});
+  try{const file=await ensureVoicePlaybackMp3(target.href);return serveFileWithRange(req,res,file,'audio/mpeg')}
+  catch(err){console.error('[voice playback]',err?.stack||err);return sendJson(res,502,{ok:false,error:'VOICE_PLAYBACK',message:`Не удалось подготовить голосовое: ${String(err?.message||err).slice(0,220)}`})}
+}
 async function proxyVoiceAudio(req, res, rawUrl) {
   let target;
   try { target=new URL(String(rawUrl||'')); }
@@ -2072,7 +2108,7 @@ async function apiRouter(req, res, url) {
   const pathname = url.pathname;
 
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:localSttReady(), sttMode:'local-native-whisper.cpp-node-addon', sttModel:STT_ENABLED?STT_MODEL:null, sttNeedsApiKey:false, sttModelPresent:fs.existsSync(STT_MODEL_PATH) });
+    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:localSttReady(), sttMode:'local-open-source-transformers.js-whisper', sttModel:STT_ENABLED?STT_MODEL:null, sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttModelPresent:true });
   }
 
   if (pathname === '/api/auth/login' && req.method === 'POST') {
@@ -2149,6 +2185,10 @@ async function apiRouter(req, res, url) {
 
   if (pathname === '/api/media' && req.method === 'GET') {
     return proxyVkMedia(req, res, url.searchParams.get('url'));
+  }
+
+  if (pathname === '/api/voice/playback' && (req.method === 'GET' || req.method === 'HEAD')) {
+    return proxyVoicePlayback(req, res, url.searchParams.get('url'));
   }
 
   if (pathname === '/api/voice/audio' && req.method === 'GET') {
@@ -2329,11 +2369,11 @@ if ((pathname === '/api/voice/transcribe' || pathname === '/api/stt/transcribe')
     const cached=getVoiceTranscriptCache(peerId,cmid);
     if(cached)return sendJson(res,200,{ok:true,available:true,transcript:cached.text,transcriptSource:cached.source,conversationMessageId:cmid,model:STT_MODEL,cached:true});
     if(!STT_ENABLED)return sendJson(res,503,{ok:false,error:'STT_DISABLED',message:'Расшифровка отключена на сервере'});
-    if(!localSttReady())return sendJson(res,503,{ok:false,error:'STT_NOT_CONFIGURED',message:'Локальная модель Whisper не готова. Проверьте build log Render.'});
+    if(!localSttReady())return sendJson(res,503,{ok:false,error:'STT_NOT_CONFIGURED',message:'Локальная расшифровка отключена на сервере'});
     const ext=await transcribeVoiceLocal(audioUrl),transcript=String(ext.text||'').trim();
     if(!transcript)return sendJson(res,422,{ok:false,error:'STT_EMPTY',message:'Не удалось распознать речь в этом голосовом'});
-    putVoiceTranscriptCache(peerId,cmid,transcript,'local-whisper.cpp');
-    return sendJson(res,200,{ok:true,available:true,transcript,transcriptSource:'local-whisper.cpp',conversationMessageId:cmid,model:ext.model||STT_MODEL,cached:false});
+    putVoiceTranscriptCache(peerId,cmid,transcript,'transformers.js-whisper');
+    return sendJson(res,200,{ok:true,available:true,transcript,transcriptSource:'transformers.js-whisper',conversationMessageId:cmid,model:ext.model||STT_MODEL,cached:false});
   }catch(err){return handleApiError(res,err)}
 }
 

@@ -1,12 +1,12 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "25.7.0",
+  "version": "25.8.0",
   "private": true,
-  "description": "seb_gun CRM v25.7: Telegram-style voice notes with expandable transcripts, local whisper.cpp STT, idempotent mobile message sending, sticky scripts, swipes, history navigation, and BlueSales performance safeguards",
+  "description": "seb_gun CRM v25.8: stable messenger scroll, universal MP3 voice playback, open-source Transformers.js Whisper STT fallback, Telegram-style voice notes, and safe idempotent mobile sending",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check lib/bluesales-web.js && node --check lib/local-whisper-stt.mjs && node --check scripts/download-stt-model.js && node --check public/api.js && node --check public/app.js && node --check public/sw.js",
+    "check": "node --check server.js && node --check lib/bluesales-web.js && node --check lib/local-transformers-stt.mjs && node --check lib/transformers-stt-worker.mjs && node --check public/api.js && node --check public/app.js && node --check public/sw.js",
     "test:core": "node tests/ui-parser-v209.js && node tests/integration-v209.js && node tests/integration-v210.js && node tests/integration-v220.js && node tests/integration-v230.js && node tests/integration-v240.js && node tests/integration-v241.js && node tests/integration-v242.js && node tests/integration-v243.js && node tests/integration-v244.js",
     "test": "node tests/ui-parser-v209.js && node tests/integration-v209.js && node tests/integration-v210.js && node tests/integration-v220.js && node tests/integration-v230.js && node tests/integration-v240.js && node tests/integration-v241.js && node tests/integration-v242.js && node tests/integration-v243.js && node tests/integration-v244.js && node tests/integration-v245.js",
     "test:v25": "node tests/integration-v250.js",
@@ -16,12 +16,14 @@
     "test:v254": "node tests/integration-v254.js",
     "test:v255": "node tests/integration-v255.js",
     "test:v256": "node tests/integration-v256.js",
-    "test:v257": "node tests/integration-v257.js"
+    "test:v257": "node tests/integration-v257.js",
+    "test:v258": "node tests/integration-v258.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "@fugood/whisper.node": "1.1.3"
+    "@huggingface/transformers": "^4.2.0",
+    "ffmpeg-static": "^5.2.0"
   }
 }
