@@ -1,18 +1,20 @@
 {
-  "source": "phrases-blueSales-20260830-171207.md",
-  "phrases": 143,
-  "groups": 23,
+  "source": "phrases-blueSales-20260901-215250.md",
+  "phrases": 151,
+  "groups": 25,
   "emojiPreserved": true,
-  "attachments": 35,
+  "attachments": 47,
+  "uniqueAttachments": 34,
   "attachmentsByType": {
     "doc": 1,
-    "audio_message": 21,
-    "photo": 13
+    "audio_message": 35,
+    "photo": 11
   },
+  "kinescopeVideoLinks": 34,
   "managerNames": [
     "0.1 Сергей К.",
-    "0.1 Софа С.",
-    "0.2 Адель Х."
+    "0.2 Адель Х.",
+    "Красавчик бот"
   ],
-  "sergeyAllowed": 143
+  "sergeyAllowed": 151
 }

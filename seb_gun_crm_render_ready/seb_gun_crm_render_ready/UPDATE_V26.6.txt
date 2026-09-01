@@ -1,0 +1,11 @@
+seb_gun CRM v26.6
+
+- Drawer open/close no longer redraws the full chat.
+- Phrase selection is type=button + preventDefault/stopPropagation and keeps the draft.
+- Phrase drawer uses device cache when Render/BlueSales is temporarily slow.
+- Header Scripts/CRM buttons and mobile edge swipe open drawers immediately; server data loads afterward.
+- Same-chat Back/Forward only toggles drawer DOM instead of rerendering the chat.
+- Multi-filter menus use hidden + inert and move focus back to the trigger before closing; removes aria-hidden/focus warning.
+- Unified UI font family and consistent control/text sizing.
+- Default API timeout raised for Render Free cold start; session gets 60s.
+- Service worker/frontend version 26.6.0.

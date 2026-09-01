@@ -1,0 +1,26 @@
+const fs=require('fs'),path=require('path'),assert=require('assert');
+const root=path.join(__dirname,'..');
+const app=fs.readFileSync(path.join(root,'public/app.js'),'utf8');
+const css=fs.readFileSync(path.join(root,'public/styles.css'),'utf8');
+const api=fs.readFileSync(path.join(root,'public/api.js'),'utf8');
+const index=fs.readFileSync(path.join(root,'public/index.html'),'utf8');
+const sw=fs.readFileSync(path.join(root,'public/sw.js'),'utf8');
+const server=fs.readFileSync(path.join(root,'server.js'),'utf8');
+assert(server.includes("const VERSION = '26.6'"));
+assert(index.includes('app.js?v=26.6.0')&&index.includes('api.js?v=26.6.0'));
+assert(sw.includes('v26.6.0'));
+assert(app.includes('function syncChatDrawerDom()'));
+const openDrawer=app.slice(app.indexOf('function openChatDrawer'),app.indexOf('function closeChatDrawer'));
+assert(openDrawer.includes('syncChatDrawerDom()')&&!openDrawer.includes('renderChatKeepScroll()'));
+const phraseBind=app.slice(app.indexOf('function bindPhraseButtons'),app.indexOf('function refreshPhraseListOnly'));
+assert(phraseBind.includes('e.preventDefault()')&&phraseBind.includes("b.type='button'"));
+assert(app.includes("state.leftDrawer=drawerOverlay==='phrases';")&&app.includes('syncChatDrawerDom();'));
+
+assert(app.includes("toast('Скрипт вставлен в сообщение — нажмите ➤ для отправки','ok')"));
+assert(app.includes('loadPhraseDataCache()')&&app.includes('savePhraseDataCache(d)'));
+assert(app.includes('menu.hidden=true')&&app.includes('menu.inert=true'));
+assert(app.includes('menu.hidden=false')&&app.includes('menu.inert=false'));
+assert(!app.includes("menu.setAttribute('aria-hidden','true')"));
+assert(css.includes('--ui-font:Inter')&&css.includes('.multi-filter-menu[hidden]'));
+assert(api.includes('timeout=35000')&&api.includes("'/api/session',{timeout:60000}"));
+console.log('v26.6 integration checks: OK');

@@ -8,7 +8,7 @@
     try{window.dispatchEvent(new CustomEvent('bs-auth-expired',{detail:{path:String(path||''),message:String(data?.message||'Сессия завершилась')}}))}catch{}
   }
   async function request(path, options={}) {
-    const {timeout=22000,cacheMs=0,staleMs=0,...fetchOptions}=options;
+    const {timeout=35000,cacheMs=0,staleMs=0,...fetchOptions}=options;
     const method=String(fetchOptions.method||'GET').toUpperCase(),getKey=method==='GET'?String(path):'';
     if(getKey&&cacheMs>0){const row=shortCache.get(getKey);if(row&&row.until>Date.now())return row.data}
     if(getKey&&inflightGet.has(getKey))return inflightGet.get(getKey);
@@ -45,7 +45,7 @@
   }
   function qs(obj){const q=new URLSearchParams();for(const[k,v]of Object.entries(obj||{}))if(v!==''&&v!=null)q.set(k,v);return q.toString()}
   window.BSAPI={
-    session:async()=>{const d=await request('/api/session');if(d?.authenticated)authExpiredSignaled=false;return d},
+    session:async()=>{const d=await request('/api/session',{timeout:60000});if(d?.authenticated)authExpiredSignaled=false;return d},
     login:async(login,password)=>{const d=await request('/api/auth/login',{method:'POST',body:JSON.stringify({login,password})});authExpiredSignaled=false;return d},
     async logout(){const d=await request('/api/auth/logout',{method:'POST',body:'{}'});csrf='';return d},
     meta:()=>request('/api/meta',{cacheMs:60000,staleMs:600000}),
@@ -58,7 +58,7 @@
     services:(p={})=>request(`/api/services?${qs(p)}`,{cacheMs:1800000,staleMs:86400000}),
     reminders:(p={})=>request(`/api/reminders?${qs(p)}`),
     deleteReminder:(id)=>request(`/api/reminders/${encodeURIComponent(id)}`,{method:'DELETE',body:'{}'}),
-    quickPhrases:()=>request('/api/quick-phrases',{cacheMs:600000,staleMs:86400000}),
+    quickPhrases:()=>request('/api/quick-phrases',{timeout:16000,cacheMs:600000,staleMs:86400000}),
     syncAccountUi:()=>request('/api/account-ui/sync',{method:'POST',body:'{}'}),
     importAccountUi:(html)=>request('/api/account-ui/import',{method:'POST',body:JSON.stringify({html})}),
     vkStatus:()=>request('/api/vk/status'),
