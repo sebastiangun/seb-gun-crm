@@ -55,7 +55,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '26.7';
+const VERSION = '26.8';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -250,6 +250,20 @@ async function readJson(req, limit = 1024 * 1024) {
   if (!raw) return {};
   try { return JSON.parse(raw); }
   catch { throw Object.assign(new Error('Некорректный JSON'), { status: 400 }); }
+}
+
+async function readBuffer(req, limit = 32 * 1024 * 1024) {
+  return await new Promise((resolve, reject) => {
+    const chunks=[];let total=0,done=false;
+    const fail=err=>{if(done)return;done=true;reject(err)};
+    req.on('data', chunk => {
+      if(done)return;const b=Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk);total+=b.length;
+      if(total>limit){fail(Object.assign(new Error('Файл больше допустимого размера'),{status:413}));return}
+      chunks.push(b);
+    });
+    req.on('end',()=>{if(done)return;done=true;resolve(Buffer.concat(chunks,total))});
+    req.on('error',fail);
+  });
 }
 
 function extractBusySeconds(errorText) {
@@ -1783,7 +1797,7 @@ async function uploadVkDocument(session, peerId, buffer, filename, mimeType, typ
   const uploaded = await postMultipart(info?.upload_url, 'file', buffer, filename, mimeType);
   const saved = await vkCall(session.vkToken, 'docs.save', { file: uploaded?.file, title: filename || 'Файл' });
   const obj = saved?.audio_message || saved?.doc || saved?.graffiti || (Array.isArray(saved) ? saved[0] : null);
-  const attachment = attachmentId('doc', obj);
+  const attachment = attachmentId(type === 'audio_message' ? 'audio_message' : 'doc', obj);
   if (!attachment) throw new VkApiError('VK сохранил файл, но не вернул owner_id/id', 'VK_UPLOAD', saved);
   return { attachment, kind: type, raw: saved };
 }
@@ -1871,20 +1885,31 @@ async function uploadAndSaveVkMessagePhoto(session, peerId, info, buffer, filena
   );
 }
 
-async function uploadVkMedia(session, { peerId, type, filename, mimeType, dataBase64 }) {
-  const buffer = Buffer.from(String(dataBase64 || ''), 'base64');
-  if (!buffer.length) throw Object.assign(new Error('Файл пустой'), {status:400});
+async function uploadVkMediaBuffer(session, { peerId, type, filename, mimeType, buffer }) {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) throw Object.assign(new Error('Файл пустой'), {status:400});
   if (buffer.length > 30 * 1024 * 1024) throw Object.assign(new Error('Файл больше 30 МБ'), {status:413});
   if (type === 'photo') {
-    // VK API schema for photos.getMessagesUploadServer accepts peer_id for user/group tokens.
-    // Do not add group_id here: it is not a parameter of this method.
-    const info = await vkCall(session.vkToken, 'photos.getMessagesUploadServer', { peer_id: peerId });
-    const result = await uploadAndSaveVkMessagePhoto(session, peerId, info, buffer, filename || 'photo.jpg', mimeType || 'image/jpeg');
-    const saved = result.saved;
-    const photo = Array.isArray(saved) ? saved[0] : saved?.[0] || saved;
-    const attachment = attachmentId('photo', photo);
-    if (!attachment) throw new VkApiError('VK сохранил фото, но не вернул owner_id/id', 'VK_UPLOAD', saved);
-    return { attachment, kind:'photo' };
+    try {
+      const info = await vkCall(session.vkToken, 'photos.getMessagesUploadServer', { peer_id: peerId });
+      const result = await uploadAndSaveVkMessagePhoto(session, peerId, info, buffer, filename || 'photo.jpg', mimeType || 'image/jpeg');
+      const saved = result.saved;
+      const photo = Array.isArray(saved) ? saved[0] : saved?.[0] || saved;
+      const attachment = attachmentId('photo', photo);
+      if (!attachment) throw new VkApiError('VK сохранил фото, но не вернул owner_id/id', 'VK_UPLOAD', saved);
+      return { attachment, kind:'photo' };
+    } catch (photoErr) {
+      // VK periodically returns a bulk upload endpoint or rejects phone formats
+      // (HEIC/WEBP). Do not fail the whole composer: retry through documents so
+      // the operator can still attach the file from the device.
+      console.warn('[VK photo upload] photo path failed, document fallback:', photoErr?.code||photoErr?.message||photoErr);
+      try {
+        const doc = await uploadVkDocument(session, peerId, buffer, filename || 'photo.jpg', mimeType || 'application/octet-stream', 'doc');
+        return {...doc, kind:'photo-fallback-doc', fallback:true, photoError:String(photoErr?.code||photoErr?.message||'VK_UPLOAD')};
+      } catch (docErr) {
+        if (photoErr instanceof VkApiError) throw new VkApiError(`${photoErr.message}; резервная загрузка файла тоже не удалась: ${docErr.message}`, photoErr.code || 'VK_UPLOAD', {photo:photoErr.details,doc:docErr.details});
+        throw docErr;
+      }
+    }
   }
   if (type === 'audio_message') return uploadVkDocument(session, peerId, buffer, filename || 'voice.ogg', mimeType || 'audio/ogg', 'audio_message');
   if (type === 'video') {
@@ -1904,6 +1929,11 @@ async function uploadVkMedia(session, { peerId, type, filename, mimeType, dataBa
     }
   }
   return uploadVkDocument(session, peerId, buffer, filename || 'file', mimeType || 'application/octet-stream', 'doc');
+}
+
+async function uploadVkMedia(session, { peerId, type, filename, mimeType, dataBase64 }) {
+  const buffer = Buffer.from(String(dataBase64 || ''), 'base64');
+  return uploadVkMediaBuffer(session,{peerId,type,filename,mimeType,buffer});
 }
 
 async function createCustomerFromDraft(session, draft) {
@@ -2648,6 +2678,14 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
   if (pathname === '/api/vk/upload' && req.method === 'POST') {
     if (!requireCsrf(req, res, s)) return;
     try {
+      if (url.searchParams.get('binary') === '1') {
+        const peerId=Number(url.searchParams.get('peerId')||0),type=String(url.searchParams.get('type')||'doc'),filename=String(url.searchParams.get('filename')||'file'),mimeType=String(req.headers['x-upload-mime']||req.headers['content-type']||'application/octet-stream').split(';')[0].trim();
+        if(!peerId)return sendJson(res,400,{ok:false,message:'Нужен peerId'});
+        const buffer=await readBuffer(req,31*1024*1024);
+        if(!buffer.length)return sendJson(res,400,{ok:false,message:'Файл пустой'});
+        const result=await uploadVkMediaBuffer(s,{peerId,type,filename,mimeType,buffer});
+        return sendJson(res,200,{ok:true,...result});
+      }
       const b = await readJson(req, 45 * 1024 * 1024);
       const peerId = Number(b.peerId || 0);
       const type = String(b.type || 'doc');

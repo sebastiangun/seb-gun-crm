@@ -1,0 +1,8 @@
+seb_gun CRM v26.8
+
+1. Dialog list auto-loads all pages; manual “Загрузить ещё” removed.
+2. Persistent per-dialog composer draft in localStorage: text + script attachments survive re-renders, polling, switching dialogs and reloads; cleared only after confirmed send.
+3. Voice transcripts are re-applied from device cache on every message refresh, not only first open. Server-returned transcripts are also copied to device cache.
+4. New dialog opening is pinned to the bottom during initial layout settling, but the first manual touch/wheel cancels all automatic scroll immediately.
+5. Device file upload now sends raw binary instead of base64 JSON, reducing payload size and memory. Photo upload has VK document fallback for temporary bulk endpoint / unsupported phone image formats.
+6. Frontend/server/cache version: 26.8 / 26.8.0.

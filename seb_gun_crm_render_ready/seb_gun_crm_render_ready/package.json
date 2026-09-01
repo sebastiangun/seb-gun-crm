@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "26.7.0",
+  "version": "26.8.0",
   "private": true,
-  "description": "seb_gun CRM v26.7: full BlueSales scripts replacement with preserved emoji, media attachments and video links",
+  "description": "seb_gun CRM v26.8: auto-load all dialogs, persistent per-dialog drafts/transcripts, reliable bottom-open and binary VK uploads",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -26,7 +26,8 @@
     "test:v264": "node tests/integration-v264.js",
     "test:v265": "node tests/integration-v265.js",
     "test:v266": "node tests/integration-v266.js",
-    "test:v267": "node tests/integration-v267.js"
+    "test:v267": "node tests/integration-v267.js",
+    "test:v268": "node tests/integration-v268.js"
   },
   "engines": {
     "node": ">=18"
