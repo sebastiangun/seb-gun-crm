@@ -1457,8 +1457,25 @@ button,input,select,textarea,.notice,.login-card,.info-card,.warning-card{
 /* =========================================================
    v25.8 — user-owned scroll + universal voice playback
    ========================================================= */
-.chat-messages{overflow-anchor:auto!important;overscroll-behavior-y:contain!important;touch-action:pan-y!important}
-.msg-row{overflow-anchor:auto!important}
+.chat-messages{overflow-anchor:none!important;overscroll-behavior-y:contain!important;touch-action:pan-y!important;scroll-behavior:auto!important}
+.msg-row,.chat-message-flow{overflow-anchor:none!important}
 .chat-bottom-anchor{overflow-anchor:none!important}
 .tg-voice-play.loading{opacity:.65;cursor:wait}
 .tg-voice-meta .voice-buffering{color:var(--muted);font-size:8px}
+
+
+/* =========================================================
+   v25.9 — Telegram-like stable chat viewport
+   Reserve media geometry before the network finishes so late images do not
+   move the conversation under the user's finger. Scroll position itself is
+   maintained in app.js by a message-id anchor + ResizeObserver.
+   ========================================================= */
+.msg-media-reserved{background:color-mix(in srgb,var(--surface-3) 92%,var(--line) 8%)}
+.msg-photo>img.msg-media-reserved,.msg-photo.msg-media-reserved>img,.msg-preview.msg-media-reserved{width:min(100%,430px);height:auto;display:block}
+.msg-photo.msg-media-reserved{overflow:hidden;border-radius:10px}
+.msg-sticker.msg-media-reserved{height:auto}
+.chat-message-flow{contain:layout style;width:100%}
+@media(max-width:699px){
+  .chat-messages{-webkit-overflow-scrolling:touch;scroll-snap-type:none!important}
+  .msg-photo>img.msg-media-reserved,.msg-preview.msg-media-reserved{width:100%;max-width:100%}
+}

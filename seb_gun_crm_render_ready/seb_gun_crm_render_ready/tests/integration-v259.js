@@ -1,0 +1,17 @@
+const fs=require('fs'),path=require('path'),assert=require('assert');
+const root=path.join(__dirname,'..');
+const app=fs.readFileSync(path.join(root,'public','app.js'),'utf8');
+const css=fs.readFileSync(path.join(root,'public','styles.css'),'utf8');
+const server=fs.readFileSync(path.join(root,'server.js'),'utf8');
+const index=fs.readFileSync(path.join(root,'public','index.html'),'utf8');
+assert(app.includes('installChatLayoutObserver'));
+assert(app.includes('ResizeObserver'));
+assert(app.includes('/api/voice/audio?url='));
+assert(app.includes('data-fallback-src'));
+assert(app.includes('/api/voice/playback?url='));
+assert(server.includes('bestPhotoMeta'));
+assert(server.includes("width: pm.width, height: pm.height"));
+assert(css.includes('v25.9 — Telegram-like stable chat viewport'));
+assert(index.includes('mobile-web-app-capable'));
+assert(index.includes('app.js?v=25.9.0'));
+console.log('integration-v259: OK');

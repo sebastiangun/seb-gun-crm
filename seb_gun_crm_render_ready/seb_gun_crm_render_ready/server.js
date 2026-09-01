@@ -55,14 +55,14 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '25.8';
+const VERSION = '25.9';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
 const VK_DIRECT_AUTHOR = String(process.env.VK_DIRECT_AUTHOR || 'Дарья А.').trim();
 
-// v25.8: independent local speech-to-text. The source messenger only provides
+// v25.9: independent local speech-to-text. The source messenger only provides
 // the audio file; recognition is performed by open-source Transformers.js Whisper
 // in a dedicated worker. No VK transcript endpoint or external STT API key.
 const STT_ENABLED = String(process.env.STT_ENABLED ?? '1') !== '0';
@@ -552,11 +552,17 @@ function vkAvatarForPeer(peer, conversation, maps) {
   return '';
 }
 
-function bestPhotoUrl(photo) {
+function bestPhotoMeta(photo) {
   const sizes = Array.isArray(photo?.sizes) ? photo.sizes : [];
   const sorted = [...sizes].sort((a, b) => (Number(b.width || 0) * Number(b.height || 0)) - (Number(a.width || 0) * Number(a.height || 0)));
-  return String(sorted[0]?.url || photo?.photo_807 || photo?.photo_604 || photo?.photo_130 || '');
+  const best = sorted[0] || {};
+  return {
+    url: String(best?.url || photo?.photo_807 || photo?.photo_604 || photo?.photo_130 || ''),
+    width: Number(best?.width || photo?.width || 0),
+    height: Number(best?.height || photo?.height || 0)
+  };
 }
+function bestPhotoUrl(photo) { return bestPhotoMeta(photo).url; }
 
 function stickerUrl(x) {
   const plain = Array.isArray(x?.images) ? [...x.images] : [];
@@ -613,8 +619,16 @@ function normalizeVkAttachments(list) {
   return list.map(a => {
     const type = String(a?.type || '');
     const x = a?.[type] || {};
-    if (type === 'photo') return { type, url: bestPhotoUrl(x), preview: bestPhotoUrl(x), title: 'Фото' };
-    if (type === 'sticker') return { type, url: stickerUrl(x), preview: stickerUrl(x), title: 'Стикер', stickerId: Number(x?.sticker_id || 0) };
+    if (type === 'photo') {
+      const pm=bestPhotoMeta(x);
+      return { type, url: pm.url, preview: pm.url, title: 'Фото', width: pm.width, height: pm.height };
+    }
+    if (type === 'sticker') {
+      const rows=[...(Array.isArray(x?.images)?x.images:[]),...(Array.isArray(x?.images_with_background)?x.images_with_background:[])].filter(Boolean);
+      rows.sort((a,b)=>(Number(b?.width||0)*Number(b?.height||0))-(Number(a?.width||0)*Number(a?.height||0)));
+      const sm=rows[0]||{};
+      return { type, url: stickerUrl(x), preview: stickerUrl(x), title: 'Стикер', stickerId: Number(x?.sticker_id || 0), width:Number(sm.width||0), height:Number(sm.height||0) };
+    }
     if (type === 'doc') {
       const voice = audioMessageFromDoc(x);
       if (voice) return voice;
@@ -623,7 +637,10 @@ function normalizeVkAttachments(list) {
     if (type === 'video') {
       const owner = Number(x?.owner_id || 0), id = Number(x?.id || 0);
       const external = owner && id ? `https://vk.com/video${owner}_${id}` : '';
-      return { type, url: external, preview: String(x?.image?.slice?.(-1)?.[0]?.url || ''), title: String(x?.title || 'Видео') };
+      const images=Array.isArray(x?.image)?[...x.image]:[];
+      images.sort((a,b)=>(Number(b?.width||0)*Number(b?.height||0))-(Number(a?.width||0)*Number(a?.height||0)));
+      const vm=images[0]||{};
+      return { type, url: external, preview: String(vm.url || ''), title: String(x?.title || 'Видео'), width:Number(vm.width||0), height:Number(vm.height||0) };
     }
     if (type === 'audio_message') return {
       type,
@@ -3008,7 +3025,8 @@ function handleApiError(res, err) {
     return sendJson(res, status, { ok: false, error: err.code, message: err.message, details: err.details || undefined });
   }
   const status = err && err.status ? err.status : 500;
-  return sendJson(res, status, { ok: false, error: 'SERVER', message: err?.message || 'Внутренняя ошибка сервера' });
+  const code = String(err?.code || (status===503?'SERVICE_UNAVAILABLE':'SERVER'));
+  return sendJson(res, status, { ok: false, error: code, message: err?.message || 'Внутренняя ошибка сервера' });
 }
 
 const server = http.createServer(async (req, res) => {

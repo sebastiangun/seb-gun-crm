@@ -1,0 +1,9 @@
+seb_gun CRM v25.9
+
+- Chat scroll is anchored by message ID and visual offset.
+- ResizeObserver compensates for late image/video/sticker layout changes without dragging the user to an old position.
+- VK media dimensions are preserved so images reserve space before loading.
+- Voice playback tries the original proxied audio first, then automatically falls back to server MP3 conversion.
+- Local Whisper remains independent from VK transcript APIs.
+- mobile-web-app-capable is included; frontend assets use v25.9.0.
+- Safe idempotent sending from v25.7 is preserved.

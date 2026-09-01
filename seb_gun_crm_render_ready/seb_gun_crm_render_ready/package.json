@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "25.8.0",
+  "version": "25.9.0",
   "private": true,
-  "description": "seb_gun CRM v25.8: stable messenger scroll, universal MP3 voice playback, open-source Transformers.js Whisper STT fallback, Telegram-style voice notes, and safe idempotent mobile sending",
+  "description": "seb_gun CRM v25.9: Telegram-like stable anchored chat scrolling, reserved media geometry, direct+MP3 fallback voice playback, local Whisper STT, and safe idempotent mobile sending",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -17,7 +17,8 @@
     "test:v255": "node tests/integration-v255.js",
     "test:v256": "node tests/integration-v256.js",
     "test:v257": "node tests/integration-v257.js",
-    "test:v258": "node tests/integration-v258.js"
+    "test:v258": "node tests/integration-v258.js",
+    "test:v259": "node tests/integration-v259.js"
   },
   "engines": {
     "node": ">=18"
