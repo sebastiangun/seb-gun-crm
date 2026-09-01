@@ -1479,3 +1479,13 @@ button,input,select,textarea,.notice,.login-card,.info-card,.warning-card{
   .chat-messages{-webkit-overflow-scrolling:touch;scroll-snap-type:none!important}
   .msg-photo>img.msg-media-reserved,.msg-preview.msg-media-reserved{width:100%;max-width:100%}
 }
+
+/* v26.0: opening the three-dot menu never rerenders/reflows the message list. */
+.msg-action-menu.hidden{display:none!important}
+.msg-action-menu{contain:layout paint}
+
+
+.voice-stt-status{margin-top:6px;padding:6px 9px;border-radius:9px;font-size:10px;font-weight:800;line-height:1.35;background:rgba(4,99,7,.08);color:var(--brand-2,#046307)}
+.voice-stt-status.error{background:rgba(190,50,50,.10);color:#b32d2d}
+[data-theme="dark"] .voice-stt-status{background:#173126;color:#9ee8bb}
+[data-theme="dark"] .voice-stt-status.error{background:#3a1d1d;color:#ffaaaa}

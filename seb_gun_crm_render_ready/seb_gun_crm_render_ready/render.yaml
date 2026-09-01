@@ -27,11 +27,17 @@ services:
       - key: VK_DIRECT_AUTHOR
         value: "Дарья А."
 
-      # Independent open-source speech-to-text. Audio is converted with the bundled
-      # ffmpeg-static binary and recognized by Transformers.js Whisper in a worker.
-      # No VK transcript API and no external STT API key is used.
+      # v26.0 async STT: quick SpeechRecognition-compatible Google backend.
+      # It does not use VK transcript. The request returns immediately and the UI polls a background job.
+      # The generic key behavior follows the open-source Uberi/SpeechRecognition implementation and is best-effort/testing-grade.
       - key: STT_ENABLED
         value: "1"
+      - key: STT_PROVIDER
+        value: "google-legacy"
+      - key: STT_PROVIDER_TIMEOUT_MS
+        value: "45000"
+      - key: STT_LOCAL_FALLBACK
+        value: "0"
       - key: STT_LANGUAGE
         value: "russian"
       - key: STT_MODEL

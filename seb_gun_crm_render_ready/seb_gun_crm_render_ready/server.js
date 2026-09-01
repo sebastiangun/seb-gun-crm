@@ -55,14 +55,14 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '25.9';
+const VERSION = '26.0';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
 const VK_DIRECT_AUTHOR = String(process.env.VK_DIRECT_AUTHOR || 'Дарья А.').trim();
 
-// v25.9: independent local speech-to-text. The source messenger only provides
+// v26.0: independent local speech-to-text. The source messenger only provides
 // the audio file; recognition is performed by open-source Transformers.js Whisper
 // in a dedicated worker. No VK transcript endpoint or external STT API key.
 const STT_ENABLED = String(process.env.STT_ENABLED ?? '1') !== '0';
@@ -71,6 +71,10 @@ const STT_MODEL = String(process.env.STT_MODEL || 'onnx-community/whisper-tiny')
 const STT_DTYPE = String(process.env.STT_DTYPE || 'q8').trim();
 const STT_TIMEOUT_MS = Math.min(Math.max(Number(process.env.STT_TIMEOUT_MS || 300000), 30000), 360000);
 const STT_IDLE_RELEASE_MS = Math.min(Math.max(Number(process.env.STT_IDLE_RELEASE_MS || 300000), 60000), 3600000);
+const STT_PROVIDER = String(process.env.STT_PROVIDER || 'google-legacy').trim().toLowerCase();
+const STT_PROVIDER_TIMEOUT_MS = Math.min(Math.max(Number(process.env.STT_PROVIDER_TIMEOUT_MS || 45000), 5000), 120000);
+const STT_LOCAL_FALLBACK = String(process.env.STT_LOCAL_FALLBACK || '0') === '1';
+const STT_JOB_TTL_MS = Math.max(Number(process.env.STT_JOB_TTL_MS || 15*60*1000),60000);
 const STT_MAX_BYTES = Math.min(Math.max(Number(process.env.STT_MAX_BYTES || 16 * 1024 * 1024), 1024 * 1024), 24 * 1024 * 1024);
 const VOICE_TRANSCRIPT_STORE = path.join(ROOT, 'data', 'voice-transcripts.json');
 const VOICE_TRANSCRIPT_TTL_MS = Math.max(Number(process.env.VOICE_TRANSCRIPT_TTL_MS || 90 * 24 * 60 * 60 * 1000), 24 * 60 * 60 * 1000);
@@ -113,6 +117,7 @@ const sessions = new Map();
 const cache = new Map();
 const inflight = new Map();
 const voiceTranscriptCache = new Map();
+const voiceTranscriptJobs = new Map();
 const recentMessageSends = new Map();
 let blueSalesQueueTail = Promise.resolve();
 let blueSalesQueueDepth = 0;
@@ -1316,8 +1321,25 @@ async function transcribeVoiceLocal(audioUrl) {
   return result;
 }
 
+let googleSttModulePromise=null;
+async function getGoogleSttModule(){if(!googleSttModulePromise)googleSttModulePromise=import('./lib/google-speech-stt.mjs').catch(err=>{googleSttModulePromise=null;throw err});return googleSttModulePromise}
+function sttReady(){return Boolean(STT_ENABLED)}
+async function transcribeVoicePreferred(audioUrl){
+ if(!STT_ENABLED){const e=new Error('Расшифровка отключена на сервере');e.code='STT_DISABLED';e.status=503;throw e}
+ const audio=await downloadVoiceForStt(audioUrl)
+ if(STT_PROVIDER==='google-legacy'||STT_PROVIDER==='speechrecognition'){
+  try{const mod=await getGoogleSttModule();const r=await mod.transcribeBuffer(audio.buffer,{mimeType:audio.mimeType,ffmpegPath:FFMPEG_BIN,language:'ru-RU',timeoutMs:STT_PROVIDER_TIMEOUT_MS});return{configured:true,text:String(r?.text||'').trim(),source:'google-speechrecognition',model:'SpeechRecognition/Google'}}
+  catch(err){if(!STT_LOCAL_FALLBACK)throw err;console.warn('[stt google fallback -> local]',err?.message||err)}
+ }
+ return transcribeVoiceLocal(audioUrl)
+}
+function transcriptJobKey(peerId,cmid){return `${Number(peerId)||0}:${Number(cmid)||0}`}
+function pruneTranscriptJobs(){const now=Date.now();for(const[k,j]of voiceTranscriptJobs)if(now-Number(j.updatedAt||j.createdAt||0)>STT_JOB_TTL_MS)voiceTranscriptJobs.delete(k)}
+function enqueueTranscriptJob(peerId,cmid,audioUrl){pruneTranscriptJobs();const key=transcriptJobKey(peerId,cmid),cached=getVoiceTranscriptCache(peerId,cmid);if(cached)return{status:'done',transcript:cached.text,source:cached.source,cached:true};const existing=voiceTranscriptJobs.get(key);if(existing&&['queued','processing'].includes(existing.status))return existing;const job={key,status:'queued',createdAt:Date.now(),updatedAt:Date.now(),peerId,cmid,transcript:'',source:'',error:'',errorCode:''};voiceTranscriptJobs.set(key,job);setImmediate(async()=>{job.status='processing';job.updatedAt=Date.now();try{const ext=await transcribeVoicePreferred(audioUrl),text=String(ext?.text||'').trim();if(!text)throw Object.assign(new Error('Речь не удалось распознать'),{code:'STT_EMPTY',status:422});putVoiceTranscriptCache(peerId,cmid,text,ext.source||STT_PROVIDER);job.status='done';job.transcript=text;job.source=ext.source||STT_PROVIDER;job.model=ext.model||''}catch(err){job.status='error';job.error=String(err?.message||err);job.errorCode=String(err?.code||'STT_ERROR');job.httpStatus=Number(err?.status||503);console.warn('[voice STT job]',peerId,cmid,job.errorCode,job.error)}finally{job.updatedAt=Date.now()}});return job}
+function transcriptJobResponse(peerId,cmid){const cached=getVoiceTranscriptCache(peerId,cmid);if(cached)return{ok:true,status:'done',available:true,transcript:cached.text,transcriptSource:cached.source,cached:true};const job=voiceTranscriptJobs.get(transcriptJobKey(peerId,cmid));if(!job)return{ok:true,status:'idle',available:false};return{ok:true,status:job.status,available:job.status==='done',transcript:job.transcript||'',transcriptSource:job.source||'',error:job.error||'',errorCode:job.errorCode||'',startedAt:job.createdAt,updatedAt:job.updatedAt}}
+
 async function transcribeMissingVoiceMessages(peerId,messages,{max=12,concurrency=1}={}) {
-  if(!localSttReady())return {messages,transcribed:0,missing:0,skipped:0};
+  if(!sttReady())return {messages,transcribed:0,missing:0,skipped:0};
   const candidates=[];
   for(const m of messages||[]){
     const voice=messageVoiceAttachment(m),cmid=Number(m?.conversationMessageId||0);
@@ -1330,9 +1352,9 @@ async function transcribeMissingVoiceMessages(peerId,messages,{max=12,concurrenc
   const selected=candidates.slice(0,Math.max(0,Number(max)||0));
   for (const row of selected) {
     try {
-      const ext=await transcribeVoiceLocal(row.voice.url),text=String(ext.text||'').trim();
+      const ext=await transcribeVoicePreferred(row.voice.url),text=String(ext.text||'').trim();
       if(text){
-        row.voice.transcript=text;row.voice.transcriptState='done';row.voice.transcriptSource=ext.source||'transformers.js-whisper';
+        row.voice.transcript=text;row.voice.transcriptState='done';row.voice.transcriptSource=ext.source||STT_PROVIDER;
         if(row.cmid)putVoiceTranscriptCache(peerId,row.cmid,text,row.voice.transcriptSource);
         transcribed++;
       }
@@ -2125,7 +2147,7 @@ async function apiRouter(req, res, url) {
   const pathname = url.pathname;
 
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:localSttReady(), sttMode:'local-open-source-transformers.js-whisper', sttModel:STT_ENABLED?STT_MODEL:null, sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttModelPresent:true });
+    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:sttReady(), sttMode:STT_PROVIDER==='google-legacy'?'async-google-speechrecognition':(STT_PROVIDER==='speechrecognition'?'async-google-speechrecognition':'async-local-whisper'), sttProvider:STT_PROVIDER, sttModel:STT_PROVIDER==='google-legacy'?'SpeechRecognition/Google':(STT_ENABLED?STT_MODEL:null), sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttAsync:true });
   }
 
   if (pathname === '/api/auth/login' && req.method === 'POST') {
@@ -2333,14 +2355,14 @@ async function apiRouter(req, res, url) {
         offset+=items.length;if(!items.length)break;if(offset<total)await sleep(140);
       }
       let exportStt={messages:rows,transcribed:0,missing:0,skipped:0};
-      if(localSttReady()){
+      if(sttReady()){
         // Full-dialog copy reuses cached transcripts and may transcribe a limited number
         // of still-missing voice messages through the independent local whisper.cpp engine.
         exportStt=await transcribeMissingVoiceMessages(peerId,rows,{max:12,concurrency:1});
       }
       rows.sort((a,b)=>Number(a.date||0)-Number(b.date||0)||Number(a.id||0)-Number(b.id||0));
       const lineFor=m=>{const d=new Date(Number(m.date||0)*1000),stamp=d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}).replace(',',''),author=String(m.displayAuthor||m.author||(m.out?`VK ${VK_DIRECT_AUTHOR}`:'Собеседник'));const parts=[];if(String(m.text||'').trim())parts.push(String(m.text).trim());for(const a of (m.attachments||[])){if(a.type==='audio_message')parts.push(a.transcript?`[Голосовое сообщение: ${a.transcript}]`:'[Голосовое сообщение]');else if(a.type==='photo')parts.push('[Фото]');else if(a.type==='video')parts.push(`[Видео${a.title?`: ${a.title}`:''}]`);else if(a.type==='doc')parts.push(`[Файл${a.title?`: ${a.title}`:''}]`);else if(a.type==='sticker')parts.push('[Стикер]');else parts.push(`[${a.title||a.type||'Вложение'}]`)}return`[${stamp}] ${author}: ${parts.join(' ')||'[Пустое сообщение]'}`};
-      return sendJson(res,200,{ok:true,peerId,count:rows.length,total,text:rows.map(lineFor).join('\n'),voiceTranscribed:Number(exportStt.transcribed||0),voiceMissing:Number(exportStt.missing||0),voiceSkipped:Number(exportStt.skipped||0),sttConfigured:localSttReady()});
+      return sendJson(res,200,{ok:true,peerId,count:rows.length,total,text:rows.map(lineFor).join('\n'),voiceTranscribed:Number(exportStt.transcribed||0),voiceMissing:Number(exportStt.missing||0),voiceSkipped:Number(exportStt.skipped||0),sttConfigured:sttReady()});
     } catch(err){return handleApiError(res,err)}
   }
 
@@ -2383,15 +2405,19 @@ if ((pathname === '/api/voice/transcribe' || pathname === '/api/stt/transcribe')
   try {
     const b=await readJson(req),peerId=Number(b.peerId||0),cmid=Number(b.conversationMessageId||0),audioUrl=String(b.audioUrl||'').trim();
     if(!peerId||!cmid||!audioUrl)return sendJson(res,400,{ok:false,message:'Не удалось определить аудиофайл голосового'});
-    const cached=getVoiceTranscriptCache(peerId,cmid);
-    if(cached)return sendJson(res,200,{ok:true,available:true,transcript:cached.text,transcriptSource:cached.source,conversationMessageId:cmid,model:STT_MODEL,cached:true});
     if(!STT_ENABLED)return sendJson(res,503,{ok:false,error:'STT_DISABLED',message:'Расшифровка отключена на сервере'});
-    if(!localSttReady())return sendJson(res,503,{ok:false,error:'STT_NOT_CONFIGURED',message:'Локальная расшифровка отключена на сервере'});
-    const ext=await transcribeVoiceLocal(audioUrl),transcript=String(ext.text||'').trim();
-    if(!transcript)return sendJson(res,422,{ok:false,error:'STT_EMPTY',message:'Не удалось распознать речь в этом голосовом'});
-    putVoiceTranscriptCache(peerId,cmid,transcript,'transformers.js-whisper');
-    return sendJson(res,200,{ok:true,available:true,transcript,transcriptSource:'transformers.js-whisper',conversationMessageId:cmid,model:ext.model||STT_MODEL,cached:false});
+    const cached=getVoiceTranscriptCache(peerId,cmid);
+    if(cached)return sendJson(res,200,{ok:true,status:'done',available:true,transcript:cached.text,transcriptSource:cached.source,conversationMessageId:cmid,cached:true});
+    const job=enqueueTranscriptJob(peerId,cmid,audioUrl);
+    return sendJson(res,202,{ok:true,status:job.status||'queued',available:false,conversationMessageId:cmid,message:'Расшифровка запущена в фоне'});
   }catch(err){return handleApiError(res,err)}
+}
+if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/transcribe/status') && req.method === 'GET') {
+  const peerId=Number(url.searchParams.get('peerId')||0),cmid=Number(url.searchParams.get('conversationMessageId')||0);
+  if(!peerId||!cmid)return sendJson(res,400,{ok:false,message:'Не указан peerId или conversationMessageId'});
+  const row=transcriptJobResponse(peerId,cmid);
+  if(row.status==='error')return sendJson(res,200,row);
+  return sendJson(res,200,row);
 }
 
   if (vkMessagesMatch && req.method === 'POST') {

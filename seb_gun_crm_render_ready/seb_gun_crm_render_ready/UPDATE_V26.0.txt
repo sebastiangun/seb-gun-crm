@@ -1,0 +1,7 @@
+seb_gun CRM v26.0
+
+- Three-dot message menu opens/closes in DOM without rerendering the chat, so the dialog no longer jumps when choosing Transcribe.
+- Voice transcription is asynchronous: POST returns 202 immediately, client polls status, no long HTTP request => no gateway timeout from waiting on STT.
+- Primary STT is a lightweight Google SpeechRecognition-compatible backend based on the open-source Uberi/SpeechRecognition request format; it does not use VK transcript.
+- Local Whisper remains optional fallback via STT_LOCAL_FALLBACK=1, but is disabled by default on Render Free to avoid CPU/RAM stalls.
+- Transcript is inserted into the existing message DOM while preserving that message visual position.
