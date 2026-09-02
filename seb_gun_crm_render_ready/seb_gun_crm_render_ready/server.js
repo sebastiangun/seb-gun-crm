@@ -56,7 +56,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.1';
+const VERSION = '28.2';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -1532,30 +1532,34 @@ async function proxyVkMedia(req, res, rawUrl) {
   if (target.protocol !== 'https:' || !isAllowedMediaHost(target.hostname)) {
     return sendJson(res, 400, { ok:false, message:'Этот медиа-хост не разрешён' });
   }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
-  let upstream;
-  try {
-    upstream = await fetch(target, {
-      method: 'GET',
-      redirect: 'follow',
-      headers: {
-        'Accept': req.headers.accept || 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-        'User-Agent': req.headers['user-agent'] || `BlueSales-Mobile-Web/${VERSION}`,
-        'Referer': 'https://vk.com/'
-      },
-      signal: controller.signal
-    });
-  } catch (err) {
-    clearTimeout(timeout);
-    const status = err?.name === 'AbortError' ? 504 : 502;
-    return sendJson(res, status, { ok:false, message: err?.name === 'AbortError' ? 'VK media timeout' : `VK media network error: ${err.message}` });
+  let kind='';try{kind=new URL(req.url,`http://${req.headers.host||'localhost'}`).searchParams.get('kind')||''}catch{}
+  const imageRequest=kind==='image';
+  let upstream=null,lastError=null;
+  const variants=[
+    {'Accept':req.headers.accept||'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8','User-Agent':req.headers['user-agent']||`seb_gun-CRM/${VERSION}`,'Referer':'https://vk.com/'},
+    {'Accept':'image/avif,image/webp,image/*,*/*;q=0.8','User-Agent':'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36'},
+  ];
+  for(let attempt=0;attempt<variants.length;attempt++){
+    const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),Math.min(API_TIMEOUT_MS,attempt===0?7000:4000));
+    try{
+      upstream=await fetch(target,{method:'GET',redirect:'follow',headers:variants[attempt],signal:controller.signal});
+      if(upstream.ok)break;
+      lastError=new Error(`VK media HTTP ${upstream.status}`);
+      try{await upstream.body?.cancel()}catch{}
+      upstream=null;
+    }catch(err){lastError=err;upstream=null}
+    finally{clearTimeout(timeout)}
+    if(lastError?.name==='AbortError')break;
+    if(attempt+1<variants.length)await sleep(120);
   }
-  clearTimeout(timeout);
-
-  if (!upstream.ok) {
-    return sendJson(res, upstream.status || 502, { ok:false, message:`VK media HTTP ${upstream.status}` });
+  if(!upstream?.ok){
+    if(imageRequest){
+      const svg='<svg xmlns="http://www.w3.org/2000/svg" width="320" height="220" viewBox="0 0 320 220"><rect width="320" height="220" rx="18" fill="#e7f1ec"/><path d="M92 154l45-49 32 30 24-23 39 42H92z" fill="#8fb7a1"/><circle cx="205" cy="75" r="18" fill="#66a483"/><text x="160" y="190" text-anchor="middle" font-family="Arial,sans-serif" font-size="13" fill="#416553">Фото временно недоступно</text></svg>';
+      res.writeHead(200,{'Content-Type':'image/svg+xml; charset=utf-8','Cache-Control':'public, max-age=45','X-Media-Fallback':'1','X-Content-Type-Options':'nosniff'});
+      return res.end(svg);
+    }
+    const timeout=lastError?.name==='AbortError';
+    return sendJson(res,timeout?504:502,{ok:false,message:timeout?'VK media timeout':String(lastError?.message||'VK media unavailable')});
   }
 
   const type = upstream.headers.get('content-type') || 'application/octet-stream';
@@ -2622,12 +2626,11 @@ async function apiRouter(req, res, url) {
         for(const m of pageMessages){const key=String(m.id||m.conversationMessageId);if(!seen.has(key)){seen.add(key);rows.push(m)}}
         offset+=items.length;if(!items.length)break;if(offset<total)await sleep(140);
       }
-      let exportStt={messages:rows,transcribed:0,missing:0,skipped:0};
-      if(sttReady()){
-        // Full-dialog copy reuses cached transcripts and may transcribe a limited number
-        // of still-missing voice messages through the independent local whisper.cpp engine.
-        exportStt=await transcribeMissingVoiceMessages(peerId,rows,{max:12,concurrency:1});
-      }
+      // Copying must never start speech recognition for old messages. It only
+      // reuses transcripts already in cache; otherwise a large dialog can lock
+      // a free Render instance for minutes.
+      const voices=rows.flatMap(m=>(m.attachments||[]).filter(a=>a.type==='audio_message'));
+      const exportStt={transcribed:voices.filter(a=>String(a.transcript||'').trim()).length,missing:voices.filter(a=>!String(a.transcript||'').trim()).length,skipped:0};
       rows.sort((a,b)=>Number(a.date||0)-Number(b.date||0)||Number(a.id||0)-Number(b.id||0));
       const lineFor=m=>{const d=new Date(Number(m.date||0)*1000),stamp=d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}).replace(',',''),author=String(m.displayAuthor||m.author||(m.out?`VK ${VK_DIRECT_AUTHOR}`:'Собеседник'));const parts=[];if(String(m.text||'').trim())parts.push(String(m.text).trim());for(const a of (m.attachments||[])){if(a.type==='audio_message')parts.push(a.transcript?`[Голосовое сообщение: ${a.transcript}]`:'[Голосовое сообщение]');else if(a.type==='photo')parts.push('[Фото]');else if(a.type==='video')parts.push(`[Видео${a.title?`: ${a.title}`:''}]`);else if(a.type==='doc')parts.push(`[Файл${a.title?`: ${a.title}`:''}]`);else if(a.type==='sticker')parts.push('[Стикер]');else parts.push(`[${a.title||a.type||'Вложение'}]`)}return`[${stamp}] ${author}: ${parts.join(' ')||'[Пустое сообщение]'}`};
       return sendJson(res,200,{ok:true,peerId,count:rows.length,total,text:rows.map(lineFor).join('\n'),voiceTranscribed:Number(exportStt.transcribed||0),voiceMissing:Number(exportStt.missing||0),voiceSkipped:Number(exportStt.skipped||0),sttConfigured:sttReady()});
@@ -3098,8 +3101,10 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       const tag = String(url.searchParams.get('tag') || '').trim();
       let customers = [], hasMore = false, totalHint = 0;
 
-      if (multiParamValues(manager).length === 1 && !q && !status && !tag) {
-        const page = await getCustomersPage(s, { count: limit, offset, managers:multiParamValues(manager) });
+      if (multiParamValues(manager).length > 0 && !q && !status && !tag) {
+        const managerValues=multiParamValues(manager);
+        const managerKey=`${s.login}:clients-manager:${managerValues.join('|')}:${limit}:${offset}`;
+        const page = await cachedLoad(managerKey,60000,()=>getCustomersPage(s,{count:limit,offset,managers:managerValues}));
         customers = page.customers; hasMore = page.notReturnedCount > 0; totalHint = page.count + page.notReturnedCount;
       } else if (!q && !status && !manager && !tag) {
         const page = await getCustomersPage(s, { count: limit, offset });
