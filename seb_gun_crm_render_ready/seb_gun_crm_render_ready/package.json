@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.0.0",
+  "version": "28.1.0",
   "private": true,
-  "description": "seb_gun CRM v28.0: Vue 3 + Pinia + Vue Router + Vite frontend over existing VK + BlueSales Node API",
+  "description": "seb_gun CRM v28.1: hardened Vue 3 + Pinia frontend over existing VK + BlueSales Node API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -32,7 +32,8 @@
     "test:v270": "node tests/integration-v270.js",
     "build": "vite build --config frontend/vite.config.js",
     "check:runtime": "node --check server.js && node --check lib/bluesales-web.js && node --check lib/google-speech-stt.mjs && node --check lib/local-transformers-stt.mjs && node --check lib/transformers-stt-worker.mjs",
-    "test:v280": "node tests/integration-v280.js"
+    "test:v280": "node tests/integration-v280.js",
+    "test:v281": "node tests/integration-v281.js"
   },
   "engines": {
     "node": ">=18"
