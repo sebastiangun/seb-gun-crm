@@ -1,6 +1,9 @@
 <script setup>
+import { ref, watch } from 'vue'
 import { api } from '../services/api'
-defineProps({ dialog: Object })
+const props = defineProps({ dialog: Object })
+const avatarFailed = ref(false)
+watch(() => props.dialog?.avatar, () => { avatarFailed.value = false })
 function fmt(ts) {
   if (!ts) return ''
   const d = new Date(Number(ts) * 1000)
@@ -12,7 +15,7 @@ function fmt(ts) {
 </script>
 <template>
   <article class="dialog-row">
-    <img v-if="dialog.avatar" class="avatar" :src="api.mediaUrl(dialog.avatar)" alt="" loading="lazy">
+    <img v-if="dialog.avatar && !avatarFailed" class="avatar" :src="api.imageUrl(dialog.avatar)" alt="" loading="lazy" @error="avatarFailed=true">
     <div v-else class="avatar avatar-fallback">{{ (dialog.name || '?').slice(0,1).toUpperCase() }}</div>
     <div class="dialog-body">
       <div class="dialog-title-line"><strong>{{ dialog.name }}</strong><time>{{ fmt(dialog.lastMessageAt) }}</time></div>

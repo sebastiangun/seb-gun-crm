@@ -90,7 +90,8 @@ export const useChatStore = defineStore('chat', {
           replyTo: this.replyTo?.conversationMessageId || 0,
           clientRequestId,
         })
-        drafts.clear(this.peerId)
+        // Do not erase text typed while this request was in flight.
+        drafts.clearIfRequestId(this.peerId, clientRequestId)
         this.replyTo = null
         await this.refreshLatest()
         this.forceBottomToken++

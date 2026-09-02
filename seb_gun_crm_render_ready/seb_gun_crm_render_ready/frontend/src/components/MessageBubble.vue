@@ -14,6 +14,7 @@ async function copy() {
   menu.value = false
 }
 function imgStyle(a) { return a.width && a.height ? { aspectRatio: `${a.width}/${a.height}` } : {} }
+function hideBrokenImage(e) { if (e?.currentTarget) e.currentTarget.style.display = 'none' }
 </script>
 <template>
   <article class="message-line" :class="{out: message.out}">
@@ -23,10 +24,10 @@ function imgStyle(a) { return a.width && a.height ? { aspectRatio: `${a.width}/$
       <p v-if="message.text" class="message-text">{{ message.text }}</p>
       <div v-if="message.attachments?.length" class="attachments-grid">
         <template v-for="(a,i) in message.attachments" :key="`${a.type}-${i}`">
-          <img v-if="a.type==='photo'" class="message-photo" :style="imgStyle(a)" :src="api.mediaUrl(a.url)" alt="Фото" loading="lazy">
-          <a v-else-if="a.type==='video'" class="media-card" :href="a.url" target="_blank" rel="noreferrer"><img v-if="a.preview" :src="api.mediaUrl(a.preview)" loading="lazy"><span>▶ {{ a.title || 'Видео' }}</span></a>
+          <img v-if="a.type==='photo'" class="message-photo" :style="imgStyle(a)" :src="api.imageUrl(a.url)" alt="Фото" loading="lazy" @error="hideBrokenImage">
+          <a v-else-if="a.type==='video'" class="media-card" :href="a.url" target="_blank" rel="noreferrer"><img v-if="a.preview" :src="api.imageUrl(a.preview)" loading="lazy" @error="hideBrokenImage"><span>▶ {{ a.title || 'Видео' }}</span></a>
           <a v-else-if="a.type==='doc'" class="doc-card" :href="api.mediaUrl(a.url)" target="_blank" rel="noreferrer">📎 <span>{{ a.title || 'Файл' }}</span></a>
-          <img v-else-if="a.type==='sticker'" class="sticker" :src="api.mediaUrl(a.url)" alt="Стикер" loading="lazy">
+          <img v-else-if="a.type==='sticker'" class="sticker" :src="api.imageUrl(a.url)" alt="Стикер" loading="lazy" @error="hideBrokenImage">
           <VoiceMessage v-else-if="a.type==='audio_message'" :attachment="a" :busy="['queued','processing'].includes(transcriptJob?.status)" @transcribe="$emit('transcribe', message)" />
           <a v-else-if="a.url" class="doc-card" :href="a.url" target="_blank">🔗 {{ a.title || a.type }}</a>
         </template>

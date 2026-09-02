@@ -119,6 +119,12 @@ export const api = {
   pairTelegram: (manager) => request('/api/notifications/pair', { method: 'POST', body: { manager } }),
   testTelegram: (manager) => request('/api/notifications/test', { method: 'POST', body: { manager } }),
   checkNotifications: () => request('/api/notifications/check-now', { method: 'POST', body: '{}', timeout: 65000 }),
+  // Images do not need CORS permission to render. Loading them directly avoids
+  // routing every avatar/photo through a sleeping Render instance and removes
+  // the recurring /api/media 502/424 failures from ordinary chat rendering.
+  imageUrl: (url) => {
+    try { const parsed = new URL(String(url || '')); return parsed.protocol === 'https:' ? parsed.href : '' } catch { return '' }
+  },
   mediaUrl: (url) => url ? `/api/media?${query({ url })}` : '',
   voiceUrl: (url) => url ? `/api/voice/audio?${query({ url })}` : '',
   voicePlaybackUrl: (url) => url ? `/api/voice/playback?${query({ url })}` : '',

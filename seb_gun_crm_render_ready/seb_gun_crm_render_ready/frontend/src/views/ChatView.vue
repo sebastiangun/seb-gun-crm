@@ -18,6 +18,7 @@ const drafts = useDraftsStore()
 const session = useSessionStore()
 const ui = useUiStore()
 const scroller = ref(null)
+const avatarFailed = ref(false)
 const nearBottom = ref(true)
 const userControlled = ref(false)
 const swipe = { x:0, y:0, side:'', active:false }
@@ -79,7 +80,7 @@ function onPointerUp(e) {
 
 watch(() => chat.forceBottomToken, () => scrollBottom(true))
 watch(() => chat.messages.length, () => { if (!userControlled.value || nearBottom.value) scrollBottom(false) })
-watch(() => route.params.peerId, async id => { if (id) { userControlled.value=false; await chat.open(id); scrollBottom(false) } })
+watch(() => route.params.peerId, async id => { if (id) { avatarFailed.value=false; userControlled.value=false; await chat.open(id); scrollBottom(false) } })
 
 onMounted(async () => {
   drafts.init(session.loginName)
@@ -93,7 +94,7 @@ onBeforeUnmount(() => chat.close())
   <main class="chat-page" @pointerdown.passive="onPointerDown" @pointerup.passive="onPointerUp">
     <header class="chat-header">
       <button type="button" class="icon-circle" @click="router.push('/dialogs')">‹</button>
-      <img v-if="chat.peer?.avatar" class="chat-avatar" :src="api.mediaUrl(chat.peer.avatar)" alt="">
+      <img v-if="chat.peer?.avatar && !avatarFailed" class="chat-avatar" :src="api.imageUrl(chat.peer.avatar)" alt="" @error="avatarFailed=true">
       <div v-else class="chat-avatar avatar-fallback">{{ (chat.peer?.name||'?').slice(0,1) }}</div>
       <div class="chat-heading"><strong>{{ chat.peer?.name || 'Диалог' }}</strong><small>{{ chat.crm?.crmStatus || (chat.loading ? 'Загрузка…' : 'VK') }}</small></div>
       <button type="button" class="header-action" @click="openPanel('phrases')">⚡</button>
