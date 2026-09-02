@@ -14,6 +14,7 @@ const BlueSalesWeb = require('./lib/bluesales-web');
 
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
+const LEGACY_PUBLIC = path.join(ROOT, 'legacy-public');
 
 // Local private configuration. This file stays on the server and is never sent to the browser.
 function loadLocalEnv(file) {
@@ -55,7 +56,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '26.9';
+const VERSION = '28.0';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -137,6 +138,19 @@ let blueSalesLastFinishedAt = 0;
 function now() { return Date.now(); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function randomToken(bytes = 24) { return crypto.randomBytes(bytes).toString('hex'); }
+const SESSION_SEAL_KEY = crypto.createHash('sha256').update(String(process.env.SESSION_SECRET || PRESET_VK_TOKEN || 'seb-gun-crm-v27-session-fallback')).digest();
+function sealSessionSnapshot(session={}) {
+  try {
+    const payload={v:1,login:String(session.login||''),passwordHash:String(session.passwordHash||''),currentUser:session.currentUser||null,vkGroupId:session.vkGroupId||null,vkGroupName:String(session.vkGroupName||''),vkGroupScreenName:String(session.vkGroupScreenName||''),vkGroupPhoto:String(session.vkGroupPhoto||''),csrf:String(session.csrf||''),createdAt:Number(session.createdAt||now()),expiresAt:Number(session.expiresAt||now()+SESSION_TTL_MS)};
+    const iv=crypto.randomBytes(12),cipher=crypto.createCipheriv('aes-256-gcm',SESSION_SEAL_KEY,iv),plain=Buffer.from(JSON.stringify(payload),'utf8'),enc=Buffer.concat([cipher.update(plain),cipher.final()]),tag=cipher.getAuthTag();
+    return `v1.${Buffer.concat([iv,tag,enc]).toString('base64url')}`;
+  } catch { return randomToken(); }
+}
+function unsealSessionSnapshot(token='') {
+  try {
+    const raw=String(token||'');if(!raw.startsWith('v1.'))return null;const buf=Buffer.from(raw.slice(3),'base64url');if(buf.length<29)return null;const iv=buf.subarray(0,12),tag=buf.subarray(12,28),enc=buf.subarray(28),dec=crypto.createDecipheriv('aes-256-gcm',SESSION_SEAL_KEY,iv);dec.setAuthTag(tag);const payload=JSON.parse(Buffer.concat([dec.update(enc),dec.final()]).toString('utf8'));if(!payload?.login||!payload?.passwordHash||Number(payload.expiresAt||0)<now())return null;return {login:String(payload.login),passwordHash:String(payload.passwordHash),webPassword:'',currentUser:decorateUserAccess(payload.currentUser||{login:payload.login}),uiProfile:null,uiSyncState:'restored',uiSyncMessage:'Сессия восстановлена после перезапуска сервера',vkToken:PRESET_VK_TOKEN,vkGroupId:payload.vkGroupId||PRESET_VK_COMMUNITY||null,vkGroupName:String(payload.vkGroupName||'VK Сообщество'),vkGroupScreenName:String(payload.vkGroupScreenName||''),vkGroupPhoto:String(payload.vkGroupPhoto||''),csrf:String(payload.csrf||randomToken(16)),expiresAt:Number(payload.expiresAt),createdAt:Number(payload.createdAt||now()),restoredFromCookie:true};
+  } catch { return null; }
+}
 function md5Upper(value) { return crypto.createHash('md5').update(String(value), 'utf8').digest('hex').toUpperCase(); }
 function safeJson(value) { try { return JSON.stringify(value); } catch { return '{}'; } }
 function normalizeClientRequestId(value=''){return String(value||'').trim().replace(/[^a-zA-Z0-9._:-]/g,'').slice(0,120)}
@@ -196,13 +210,22 @@ function parseCookies(req) {
 function getSession(req) {
   const sid = parseCookies(req)[COOKIE_NAME];
   if (!sid) return null;
-  const s = sessions.get(sid);
+  let s = sessions.get(sid);
+  if (!s) {
+    // v27: the cookie contains an encrypted API-session snapshot. Render Free may
+    // restart the Node process and wipe the in-memory Map; we can restore the
+    // BlueSales API password hash without storing the plaintext password.
+    s = unsealSessionSnapshot(sid);
+    if (s) sessions.set(sid,s);
+  }
   if (!s) return null;
   if (s.expiresAt < now()) {
     sessions.delete(sid);
     return null;
   }
-  s.expiresAt = now() + SESSION_TTL_MS;
+  // In-memory sessions remain sliding. A restored sealed cookie keeps its fixed
+  // 12h lifetime; a new login creates a new sealed cookie.
+  if (!s.restoredFromCookie) s.expiresAt = now() + SESSION_TTL_MS;
   return s;
 }
 
@@ -1568,9 +1591,14 @@ function requireCsrf(req, res, s) {
 
 function publicFile(reqPath) {
   let p = decodeURIComponent(reqPath.split('?')[0]);
+  let base = PUBLIC;
+  if (p === '/legacy' || p.startsWith('/legacy/')) {
+    base = LEGACY_PUBLIC;
+    p = p === '/legacy' || p === '/legacy/' ? '/index.html' : p.slice('/legacy'.length);
+  }
   if (p === '/') p = '/index.html';
-  const full = path.normalize(path.join(PUBLIC, p));
-  if (!full.startsWith(PUBLIC)) return null;
+  const full = path.normalize(path.join(base, p));
+  if (!full.startsWith(base)) return null;
   return full;
 }
 
@@ -2355,7 +2383,7 @@ async function apiRouter(req, res, url) {
   const pathname = url.pathname;
 
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:sttReady(), sttMode:STT_PROVIDER==='google-legacy'?'async-google-speechrecognition':(STT_PROVIDER==='speechrecognition'?'async-google-speechrecognition':'async-local-whisper'), sttProvider:STT_PROVIDER, sttModel:STT_PROVIDER==='google-legacy'?'SpeechRecognition/Google':(STT_ENABLED?STT_MODEL:null), sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttAsync:true, telegramConfigured:Boolean(TELEGRAM_BOT_TOKEN), notificationSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET), notificationWorkerCredentials:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD), clock:appClockPayload() });
+    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:sttReady(), sttMode:STT_PROVIDER==='google-legacy'?'async-google-speechrecognition':(STT_PROVIDER==='speechrecognition'?'async-google-speechrecognition':'async-local-whisper'), sttProvider:STT_PROVIDER, sttModel:STT_PROVIDER==='google-legacy'?'SpeechRecognition/Google':(STT_ENABLED?STT_MODEL:null), sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttAsync:true, telegramConfigured:Boolean(TELEGRAM_BOT_TOKEN), notificationSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET), notificationWorkerCredentials:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD), sessionResume:true, clock:appClockPayload() });
   }
 
 
@@ -2383,7 +2411,6 @@ async function apiRouter(req, res, url) {
     } catch (err) { return handleApiError(res, err); }
     const userList = arrayFromResponse(users, ['users', 'Users']).map(normalizeUser).map(decorateUserAccess);
     const currentUser = decorateUserAccess(currentUserFrom(userList, login));
-    const sid = randomToken();
     const cachedUi = readUiSync(login);
     const s = {
       login,
@@ -2402,6 +2429,7 @@ async function apiRouter(req, res, url) {
       expiresAt: now() + SESSION_TTL_MS,
       createdAt: now()
     };
+    const sid = sealSessionSnapshot(s);
     sessions.set(sid, s);
     // Best-effort account sync: uses the same BlueSales credentials only to create an in-memory
     // authenticated web session and read the account's own Quick Phrases / UI metadata.
@@ -3254,7 +3282,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       // Cache raw date windows, not computed groups: a reminder with today's
       // explicit time can become overdue as the clock moves without another
       // expensive full BlueSales scan.
-      const cacheKey=`${s.login}:reminders:raw:v26.9:${today}`;
+      const cacheKey=`${s.login}:reminders:raw:v27.0:${today}`;
       let rawBuckets=cacheGet(cacheKey);
       if(!rawBuckets){
         rawBuckets={

@@ -1,3 +1,54 @@
+# seb_gun CRM v28.0 — Vue core
+
+Это новая ветка интерфейса. Backend Node.js, VK API и BlueSales API сохранены, frontend переписан на Vue 3 + Pinia + Vue Router + Vite.
+
+## Запуск / Render
+
+```bash
+npm install
+npm run build
+npm run check:runtime
+npm run test:v280
+npm start
+```
+
+Render использует те же команды из `render.yaml`. Секреты (`VK_TOKEN`, Telegram и BlueSales notification credentials) задаются только в Render Environment.
+
+## Архитектура frontend
+
+- `frontend/src/stores/dialogs.js` — список диалогов и polling;
+- `frontend/src/stores/chat.js` — сообщения, загрузка ранней истории, отправка, STT;
+- `frontend/src/stores/drafts.js` — persistent draft по `peerId`;
+- `frontend/src/stores/phrases.js` — 151 быстрый скрипт;
+- `frontend/src/stores/clients.js` / `reminders.js` — BlueSales экраны;
+- `frontend/src/components/MultiFilterSheet.vue` — мобильные мультифильтры;
+- `frontend/src/components/PhraseDrawer.vue` — левая шторка скриптов;
+- `frontend/src/components/ClientDrawer.vue` — правая карточка BlueSales;
+- `frontend/src/views/ChatView.vue` — чат без full-render старого `app.js`.
+
+Старый v27 frontend сохранён в `legacy-public/` и доступен по `/legacy/`. Новый root не регистрирует старый Service Worker; Vite создаёт hashed assets.
+
+См. `UPDATE_V28.0.txt`.
+
+---
+
+# seb_gun CRM v27.0
+
+Стабильное мобильное ядро поверх существующих VK + BlueSales интеграций.
+
+Ключевые изменения v27.0:
+- диалоги показываются после первой страницы, остальные догружаются в фоне без ручной кнопки;
+- revision-safe черновики не позволяют старому DOM стереть выбранный скрипт;
+- на Android/iOS мультифильтры открываются как bottom sheet, кнопки «Сбросить / Применить» закреплены внизу;
+- мобильный чат больше не делает full-render после фоновой загрузки BlueSales;
+- polling списка диалогов патчит только список;
+- HttpOnly session cookie содержит зашифрованный API snapshot и позволяет восстановить сессию после restart Render; plaintext пароль в cookie не пишется;
+- сохранены 151 скрипт, VK-вложения, Telegram SLA, расшифровка и защита от дублей.
+
+См. `UPDATE_V27.0.txt`.
+
+---
+
 # seb_gun CRM + VK DIRECT v25.6
 
 CRM использует BlueSales и VK для сообщений, но **расшифровка голосовых полностью независима от VK transcript**.

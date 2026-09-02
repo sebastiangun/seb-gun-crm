@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
 
-    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install --omit=dev && npm run check
+    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install && npm run build && npm run check:runtime && npm run test:v280
     startCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm start
 
     healthCheckPath: /api/health
@@ -27,7 +27,7 @@ services:
       - key: VK_DIRECT_AUTHOR
         value: "Дарья А."
 
-      # v26.0 async STT: quick SpeechRecognition-compatible Google backend.
+      # v28.0 async STT: quick SpeechRecognition-compatible Google backend.
       # It does not use VK transcript. The request returns immediately and the UI polls a background job.
       # The generic key behavior follows the open-source Uberi/SpeechRecognition implementation and is best-effort/testing-grade.
       - key: STT_ENABLED
@@ -51,7 +51,7 @@ services:
       - key: VOICE_TRANSCRIPT_TTL_MS
         value: "7776000000"
 
-      # v26.5 Telegram SLA notifications. Secrets are entered only in Render Environment.
+      # v28.0 Telegram SLA notifications. Secrets are entered only in Render Environment.
       - key: TELEGRAM_BOT_USERNAME
         value: "yozhiki_sebastian_bot"
       - key: NOTIFICATION_TIMEZONE

@@ -1,0 +1,16 @@
+seb_gun CRM v28.0 — новый компонентный frontend
+
+- Новый frontend: Vue 3 + Pinia + Vue Router + Vite.
+- Node/VK/BlueSales backend сохранён.
+- Старый интерфейс v27 доступен по /legacy/.
+- Раздельные stores: dialogs, chat/messages, drafts, phrases, clients, reminders, session, UI.
+- Черновики отдельны для каждого peerId и сохраняются в localStorage; polling их не очищает.
+- Диалог открывается на последних сообщениях; после ручного scroll интерфейс не должен сам таскать пользователя.
+- Polling обновляет только message store / dialog store, а не весь экран.
+- Android multi-filter = bottom sheet с фиксированными кнопками Сбросить/Применить.
+- Скрипты используют все 151 фразу, вложения и подстановки [Имя]/[ФИО]/и т.д.
+- Фото с устройства грузится бинарно через существующий /api/vk/upload.
+- Защита от дублей использует существующий clientRequestId + server/VK random_id backend.
+- Vite генерирует hashed assets; старый Service Worker не обслуживает новый root frontend.
+
+Render: npm install -> npm run build -> npm run check:runtime -> npm start.
