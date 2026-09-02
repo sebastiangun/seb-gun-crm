@@ -1,0 +1,16 @@
+{
+  "name": "seb_gun CRM Legacy v27",
+  "short_name": "seb_gun legacy",
+  "start_url": "/legacy/",
+  "display": "standalone",
+  "background_color": "#F4FAF7",
+  "theme_color": "#046307",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
