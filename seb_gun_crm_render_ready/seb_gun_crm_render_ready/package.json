@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.2.0",
+  "version": "28.3.0",
   "private": true,
-  "description": "seb_gun CRM v28.2: responsive Vue workspace with persistent routing and BlueSales load protection",
+  "description": "seb_gun CRM v28.3: optimistic outbox, notifications and v27-style BlueSales cards",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -34,7 +34,8 @@
     "check:runtime": "node --check server.js && node --check lib/bluesales-web.js && node --check lib/google-speech-stt.mjs && node --check lib/local-transformers-stt.mjs && node --check lib/transformers-stt-worker.mjs",
     "test:v280": "node tests/integration-v280.js",
     "test:v281": "node tests/integration-v281.js",
-    "test:v282": "node tests/integration-v282.js"
+    "test:v282": "node tests/integration-v282.js",
+    "test:v283": "node tests/integration-v283.js"
   },
   "engines": {
     "node": ">=18"

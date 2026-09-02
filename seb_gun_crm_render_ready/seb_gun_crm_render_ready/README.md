@@ -1,4 +1,4 @@
-# seb_gun CRM v28.2 — Vue workspace
+# seb_gun CRM v28.3 — Vue workspace
 
 Это новая ветка интерфейса. Backend Node.js, VK API и BlueSales API сохранены, frontend переписан на Vue 3 + Pinia + Vue Router + Vite.
 
@@ -28,7 +28,7 @@ Render использует те же команды из `render.yaml`. Сек�
 
 Старый v27 frontend сохранён в `legacy-public/` и доступен по `/legacy/`. Новый root не регистрирует старый Service Worker; Vite создаёт hashed assets.
 
-См. `UPDATE_V28.0.txt`, `UPDATE_V28.1.txt` и `UPDATE_V28.2.txt`.
+См. `UPDATE_V28.0.txt`, `UPDATE_V28.1.txt`, `UPDATE_V28.2.txt` и `UPDATE_V28.3.txt`.
 
 ---
 

@@ -56,7 +56,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.2';
+const VERSION = '28.3';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -2346,7 +2346,7 @@ async function loadUnansweredDialogsForNotifications(session,{maxPages=5}={}){
   if(vkIds.length){try{const linked=await getCustomersByVkIds(session,vkIds),byVk=new Map(linked.filter(c=>c.social?.vkId).map(c=>[Number(c.social.vkId),c]));for(const d of all){const c=byVk.get(d.peerId);if(c)d.crm={clientId:c.id,fullName:c.fullName,crmStatus:c.crmStatus,manager:c.manager,managerLogin:c.managerLogin,tags:c.tags}}}catch(err){console.warn('[notifications crm link]',err?.message||err)}}
   return all
 }
-function notificationDialogUrl(peerId){const base=PUBLIC_BASE_URL||'';return base?`${base}/?dialog=${encodeURIComponent(peerId)}#/dialog/${encodeURIComponent(peerId)}`:''}
+function notificationDialogUrl(peerId){const base=PUBLIC_BASE_URL||'';return base?`${base}/#/dialogs/${encodeURIComponent(peerId)}`:''}
 async function runNotificationCheck({session=null,manual=false}={}){
   const store=readNotificationStore(),rules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.enabled&&r.telegramChatId&&r.manager);if(!rules.length)return {ok:true,checked:0,sent:0,message:'Нет активных подключённых правил'};
   const s=session||notificationServiceSession();if(!s)throw Object.assign(new Error('Для фоновой проверки задайте BLUESALES_NOTIFICATION_LOGIN и BLUESALES_NOTIFICATION_PASSWORD в Render'),{status:503,code:'NOTIFICATION_CREDENTIALS'});
@@ -2481,6 +2481,31 @@ async function apiRouter(req, res, url) {
   }
   if (pathname === '/api/notifications/check-now' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;try{return sendJson(res,200,await runNotificationCheck({session:s,manual:true}))}catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/notifications/overview' && req.method === 'GET') {
+    try {
+      const dialogs=await loadUnansweredDialogsForNotifications(s,{maxPages:2});
+      const now=Math.floor(Date.now()/1000);
+      const rows=dialogs.filter(d=>!d.lastMessageOut).map(d=>({
+        peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,
+        manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',
+        snippet:String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),
+        since:Number(d.lastMessageAt||0),waitMinutes:Math.max(0,Math.floor((now-Number(d.lastMessageAt||now))/60))
+      })).sort((a,b)=>b.waitMinutes-a.waitMinutes);
+      return sendJson(res,200,{ok:true,dialogs:rows,checkedAt:Date.now()});
+    } catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/notifications/queue-alert' && req.method === 'POST') {
+    if(!requireCsrf(req,res,s))return;
+    try {
+      const body=await readJson(req),store=readNotificationStore();
+      const names=[s.currentUser?.name,s.currentUser?.login,s.login].map(x=>String(x||'').trim()).filter(Boolean);
+      const rules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.telegramChatId&&names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
+      const who=String(body.peerName||'').trim()||`VK ${Number(body.peerId||0)}`;
+      const text=`🟠 Сообщение стоит в очереди\n\nПолучатель: ${who}\nПричина: ${String(body.error||'сервер временно недоступен').slice(0,250)}\nCRM продолжит повторять отправку.`;
+      for(const r of rules)await sendTelegramText(r.telegramChatId,text,{url:notificationDialogUrl(Number(body.peerId||0))});
+      return sendJson(res,200,{ok:true,sent:rules.length});
+    } catch(err){return handleApiError(res,err)}
   }
 
   if (pathname === '/api/activity' && req.method === 'POST') {
