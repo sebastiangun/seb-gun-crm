@@ -6,6 +6,7 @@ import { useMetaStore } from '../stores/meta'
 import { useUiStore } from '../stores/ui'
 import DialogRow from '../components/DialogRow.vue'
 import MultiFilterSheet from '../components/MultiFilterSheet.vue'
+import { arrayFromQuery, listQuery } from '../utils/navigation'
 
 const dialogs = useDialogsStore()
 const meta = useMetaStore()
@@ -14,6 +15,10 @@ const router = useRouter()
 const route = useRoute()
 const activeSheet = computed(() => String(route.query.sheet || ''))
 let searchTimer
+dialogs.search = String(route.query.q || '')
+dialogs.filter = ['all','unread','unanswered','important','archive'].includes(String(route.query.filter||'all')) ? String(route.query.filter||'all') : 'all'
+dialogs.manager = arrayFromQuery(route.query.manager)
+dialogs.status = arrayFromQuery(route.query.status)
 
 const managerOptions = computed(() => meta.users.map(u => ({ value: u.name || u.login, label: u.name || u.login })))
 const statusOptions = computed(() => meta.statuses.map(s => ({ value: s.name || s, label: s.name || s })))
@@ -22,11 +27,14 @@ const visible = computed(() => dialogs.filteredItems)
 async function reload() {
   try { await dialogs.load({ reset: true, all: true }) } catch (e) { ui.toast(e.message, 'error') }
 }
-function openSheet(name) { router.push({ path: route.path, query: { ...route.query, sheet: name } }) }
+function stateQuery(extra={}) { return listQuery({q:dialogs.search,filter:dialogs.filter,manager:dialogs.manager,status:dialogs.status},extra) }
+function sync(extra={}) { return router.replace({path:'/dialogs',query:stateQuery(extra)}) }
+function openSheet(name) { router.push({ path:'/dialogs', query:stateQuery({sheet:name}) }) }
 function closeSheet() { if (activeSheet.value) router.back() }
-function applyFilter() { closeSheet() }
+function applyFilter() { sync() }
 function onSearch() {
   clearTimeout(searchTimer)
+  sync(activeSheet.value?{sheet:activeSheet.value}:{})
   searchTimer = setTimeout(reload, 320)
 }
 
@@ -35,7 +43,7 @@ onMounted(async () => {
   dialogs.startPolling()
 })
 onBeforeUnmount(() => { dialogs.stopPolling(); clearTimeout(searchTimer) })
-watch(() => dialogs.filter, reload)
+watch(() => dialogs.filter, () => { sync(); reload() })
 </script>
 
 <template>
@@ -61,7 +69,7 @@ watch(() => dialogs.filter, reload)
     <div class="list-status success" v-else-if="dialogs.loadedAll">Загружено {{ dialogs.items.length }} диалогов</div>
 
     <section class="dialog-list">
-      <button v-for="d in visible" :key="d.peerId" type="button" class="dialog-button" @click="router.push(`/dialogs/${d.peerId}`)">
+      <button v-for="d in visible" :key="d.peerId" type="button" class="dialog-button" @click="router.push({path:`/dialogs/${d.peerId}`,query:{from:route.fullPath}})">
         <DialogRow :dialog="d" />
       </button>
       <div v-if="!dialogs.loading && !visible.length" class="empty-state"><b>Диалогов нет</b><span>Измените фильтр или поиск.</span></div>

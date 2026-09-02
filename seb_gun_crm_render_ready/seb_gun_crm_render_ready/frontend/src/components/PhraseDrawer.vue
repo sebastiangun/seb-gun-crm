@@ -42,7 +42,7 @@ watch(() => props.open, async (open) => {
 </script>
 <template>
   <Teleport to="body">
-    <div v-if="open" class="drawer-backdrop" @pointerdown.self="$emit('close')">
+    <div v-if="open" class="drawer-backdrop phrase-drawer-backdrop" @pointerdown.self="$emit('close')">
       <aside class="side-drawer left-drawer">
         <header><div><small>BLUE SALES</small><h3>Быстрые фразы</h3></div><button type="button" @click="$emit('close')">×</button></header>
         <div class="drawer-search"><span>⌕</span><input v-model="phrases.query" placeholder="Название или текст скрипта"></div>

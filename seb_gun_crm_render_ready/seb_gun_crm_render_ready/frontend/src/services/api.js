@@ -96,9 +96,10 @@ export const api = {
   meta: () => request('/api/meta', { timeout: 40000 }),
   dialogs: (params = {}) => request(`/api/vk/dialogs?${query(params)}`, { timeout: 45000, dedupe: false }),
   messages: (peerId, params = {}) => request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages?${query(params)}`, { timeout: 45000, dedupe: false }),
+  dialogText: (peerId) => request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/export-text`, { timeout: 120000, dedupe: false }),
   sendMessage: (peerId, payload) => request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/messages`, { method: 'POST', body: payload, timeout: 50000 }),
   quickPhrases: () => request('/api/quick-phrases', { timeout: 20000 }),
-  clients: (params = {}) => request(`/api/clients?${query(params)}`, { timeout: 45000, dedupe: false }),
+  clients: (params = {}) => request(`/api/clients?${query(params)}`, { timeout: 45000 }),
   client: (id, fresh = false) => request(`/api/clients/${encodeURIComponent(id)}${fresh ? '?fresh=1' : ''}`, { timeout: 35000, dedupe: false }),
   updateClient: (id, payload) => request(`/api/clients/${encodeURIComponent(id)}`, { method: 'PUT', body: payload, timeout: 45000 }),
   createClientFromVk: (peerId, payload = {}) => request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/create-client`, { method: 'POST', body: payload, timeout: 50000 }),
@@ -119,12 +120,9 @@ export const api = {
   pairTelegram: (manager) => request('/api/notifications/pair', { method: 'POST', body: { manager } }),
   testTelegram: (manager) => request('/api/notifications/test', { method: 'POST', body: { manager } }),
   checkNotifications: () => request('/api/notifications/check-now', { method: 'POST', body: '{}', timeout: 65000 }),
-  // Images do not need CORS permission to render. Loading them directly avoids
-  // routing every avatar/photo through a sleeping Render instance and removes
-  // the recurring /api/media 502/424 failures from ordinary chat rendering.
-  imageUrl: (url) => {
-    try { const parsed = new URL(String(url || '')); return parsed.protocol === 'https:' ? parsed.href : '' } catch { return '' }
-  },
+  // The server retries VK CDN and returns a valid placeholder image on a stale
+  // signed URL, so the browser no longer produces 424/timeout errors per row.
+  imageUrl: (url) => url ? `/api/media?${query({ url, kind: 'image' })}` : '',
   mediaUrl: (url) => url ? `/api/media?${query({ url })}` : '',
   voiceUrl: (url) => url ? `/api/voice/audio?${query({ url })}` : '',
   voicePlaybackUrl: (url) => url ? `/api/voice/playback?${query({ url })}` : '',

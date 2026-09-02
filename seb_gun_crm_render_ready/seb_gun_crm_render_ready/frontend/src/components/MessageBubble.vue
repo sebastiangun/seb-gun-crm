@@ -2,16 +2,20 @@
 import { computed, ref } from 'vue'
 import { api } from '../services/api'
 import VoiceMessage from './VoiceMessage.vue'
+import { useUiStore } from '../stores/ui'
+import { copyText, messageText } from '../utils/clipboard'
 
 const props = defineProps({ message: Object, transcriptJob: Object })
 const emit = defineEmits(['reply', 'transcribe'])
+const ui = useUiStore()
 const menu = ref(false)
 const stamp = computed(() => new Date(Number(props.message.date || 0)*1000).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}))
 async function copy() {
-  const parts = [props.message.text || '']
-  for (const a of props.message.attachments || []) if (a.type === 'audio_message' && a.transcript) parts.push(a.transcript)
-  await navigator.clipboard.writeText(parts.filter(Boolean).join('\n'))
-  menu.value = false
+  try {
+    await copyText(messageText(props.message))
+    ui.toast('Сообщение скопировано', 'ok')
+  } catch (e) { ui.toast(`Не удалось скопировать: ${e.message}`, 'error') }
+  finally { menu.value = false }
 }
 function imgStyle(a) { return a.width && a.height ? { aspectRatio: `${a.width}/${a.height}` } : {} }
 function hideBrokenImage(e) { if (e?.currentTarget) e.currentTarget.style.display = 'none' }

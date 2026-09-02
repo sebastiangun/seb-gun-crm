@@ -29,3 +29,39 @@ input,select,textarea{width:100%;min-width:0;max-width:100%;border:1px solid var
 .settings-card{margin-top:10px}.settings-card h3{margin:0 0 2px}.settings-card p{margin:0;color:var(--muted)}.setting-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)}.setting-row span{color:var(--muted)}.toggle-row{display:flex!important;grid-template-columns:auto 1fr;align-items:center;gap:8px!important}.toggle-row input{width:19px;height:19px}.button-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}.toast-stack{position:fixed;right:12px;bottom:88px;z-index:300;display:grid;gap:7px;width:min(380px,calc(100% - 24px))}.toast{border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:12px;box-shadow:var(--shadow);padding:10px 12px;text-align:left}.toast-error{border-color:color-mix(in srgb,var(--danger) 50%,var(--line));background:var(--danger-soft)}.toast-ok{border-color:color-mix(in srgb,var(--accent) 45%,var(--line));background:var(--accent-soft)}
 @media(min-width:800px){.page{padding-left:24px;padding-right:24px}.toolbar-card{display:grid;grid-template-columns:minmax(240px,1.2fr) minmax(300px,1fr);gap:10px;align-items:center}.toolbar-card .filter-buttons{grid-column:1/-1}.bottom-sheet{border-radius:20px;margin-bottom:6vh;border-bottom:1px solid var(--line)}.sheet-backdrop{align-items:center}.side-drawer{width:420px}.bubble{max-width:min(68%,720px)}.edge-handle{display:none}.attachment-shortcuts{display:flex;gap:6px;padding:0 8px 6px}.attachment-shortcuts button{border:0;background:var(--surface-2);border-radius:999px;padding:5px 9px;font-size:10px}}
 @media(max-width:520px){.page{padding:0 10px}.filter-buttons.three{grid-template-columns:1fr}.filter-buttons.three button{height:40px}.reminder-tabs{grid-template-columns:repeat(2,1fr)}.bubble{max-width:86%}.voice-box{min-width:min(280px,72vw)}.chat-header{grid-template-columns:auto auto minmax(0,1fr) auto auto}.form-grid{grid-template-columns:1fr}.sheet-actions{grid-template-columns:1fr 1.2fr}.toast-stack{bottom:82px}.side-drawer{width:94vw}.page-header h1{font-size:20px}}
+
+/* v28.2: the colorful BlueSales workspace behavior from v27 */
+.color-chip{display:inline-flex;align-items:center;width:max-content;max-width:100%;border:0;border-radius:6px;padding:3px 7px;background:var(--chip-bg,#2b638c)!important;color:var(--chip-text,#fff)!important;font-size:10px;font-style:normal;font-weight:800;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dialog-meta{flex-wrap:wrap}.client-side .color-chip{max-width:150px;margin-left:auto}.tags .color-chip{border-radius:6px}
+.load-more-btn{width:100%;min-height:46px;border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--accent);font-weight:800;margin:4px 0 18px}
+.chat-header{grid-template-columns:auto auto minmax(0,1fr) repeat(4,auto)}
+.message-scroller{scrollbar-width:auto;scrollbar-color:color-mix(in srgb,var(--accent) 65%,var(--line)) var(--surface-2)}
+.message-line{content-visibility:auto;contain-intrinsic-size:auto 72px}
+.message-scroller::-webkit-scrollbar,.phrase-scroll::-webkit-scrollbar,.drawer-content::-webkit-scrollbar{width:11px}
+.message-scroller::-webkit-scrollbar-track,.phrase-scroll::-webkit-scrollbar-track,.drawer-content::-webkit-scrollbar-track{background:var(--surface-2)}
+.message-scroller::-webkit-scrollbar-thumb,.phrase-scroll::-webkit-scrollbar-thumb,.drawer-content::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--accent) 62%,var(--line));border:2px solid var(--surface-2);border-radius:99px}
+.side-drawer header em{display:block;margin-top:2px;color:var(--muted);font-size:10px;font-style:normal;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.right-drawer,.right-drawer .drawer-content{background:#f5fbfe}.right-drawer .drawer-tabs{background:#eef8fd}
+.crm-classic-stack{display:grid;gap:8px}.crm-section-card{overflow:hidden;border:1px solid #bcd9e8;border-radius:12px;background:#fff;box-shadow:0 3px 12px rgba(26,103,142,.07)}
+.crm-section-title{display:flex;align-items:center;justify-content:space-between;min-height:34px;padding:7px 9px;background:#eaf6fc;color:#176f9e}.crm-section-title b{font-size:11px}.crm-section-title button{border:0;background:transparent;color:#1674a5;font-size:10px;font-weight:800}
+.crm-field{display:grid;grid-template-columns:39% minmax(0,61%);gap:6px;padding:6px 9px;align-items:start;font-size:11px}.crm-field>span{color:#526a78;font-weight:700}.crm-field>strong{min-width:0;color:#172a36;text-align:left;word-break:break-word}.crm-field a{color:#0879b5}.crm-tags-field{align-items:start}.crm-note{border-top:1px solid #dceaf1;padding:8px 9px;font-size:10px}.crm-note span{color:#526a78;font-weight:700}.crm-note p{margin:5px 0 0;white-space:pre-wrap;color:#172a36}.next-contact-card{padding-bottom:9px}.next-contact-card>strong{display:block;padding:8px 10px;color:#172a36}.quick-dates{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;padding:0 8px}.quick-dates button{min-height:30px;border:1px solid #b9d9e9;border-radius:999px;background:#eef8fd;color:#1674a5;font-size:10px;font-weight:800}.form-action-row{display:grid;grid-template-columns:auto 1fr;gap:8px}.form-action-row .primary-btn:only-child{grid-column:1/-1}
+:root[data-theme="dark"] .right-drawer,:root[data-theme="dark"] .right-drawer .drawer-content,:root[data-theme="dark"] .right-drawer .drawer-tabs{background:var(--surface)}
+:root[data-theme="dark"] .crm-section-card{background:var(--surface-2);border-color:var(--line)}:root[data-theme="dark"] .crm-section-title{background:#17392b;color:#dff5e8}:root[data-theme="dark"] .crm-field>span,:root[data-theme="dark"] .crm-field>strong,:root[data-theme="dark"] .crm-note p,:root[data-theme="dark"] .next-contact-card>strong{color:var(--text)}
+
+@media(min-width:1100px){
+  :root{--workspace-left:clamp(265px,19vw,305px);--workspace-right:clamp(310px,22vw,350px)}
+  body{overflow:hidden;background:var(--bg)}
+  .chat-page{width:calc(100vw - var(--workspace-left) - var(--workspace-right));height:100dvh;margin-left:var(--workspace-left);margin-right:var(--workspace-right);border-left:1px solid var(--line);border-right:1px solid var(--line);box-shadow:0 0 28px rgba(16,28,21,.08)}
+  .chat-page .message-scroller{padding:12px clamp(12px,2vw,30px)}
+  .chat-page .bubble{max-width:min(82%,820px)}
+  .chat-page .phrase-header-btn,.chat-page .crm-header-btn,.chat-page .edge-handle{display:none}
+  .chat-header{grid-template-columns:auto auto minmax(0,1fr) auto auto}
+  .drawer-backdrop{inset:0;background:transparent;pointer-events:none;display:block}
+  .drawer-backdrop .side-drawer{position:fixed;top:0;bottom:0;height:100dvh;border-radius:0;box-shadow:none;pointer-events:auto;z-index:160}
+  .phrase-drawer-backdrop .side-drawer{left:0;width:var(--workspace-left);border-right:1px solid var(--line)}
+  .client-drawer-backdrop .side-drawer{right:0;width:var(--workspace-right);border-left:1px solid var(--line)}
+  .side-drawer .drawer-close{display:none}
+  .attachment-shortcuts{display:none!important}
+  .drawer-content{padding:10px}
+}
+@media(max-width:520px){.chat-link-btn{display:none}.chat-header{grid-template-columns:auto auto minmax(0,1fr) repeat(3,auto);gap:5px}.chat-header .header-action{padding:0 8px;min-width:38px}.chat-header .icon-circle{width:38px;min-height:38px}.chat-avatar{width:39px;height:39px}}

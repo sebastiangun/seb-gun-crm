@@ -93,9 +93,11 @@ export const useChatStore = defineStore('chat', {
         // Do not erase text typed while this request was in flight.
         drafts.clearIfRequestId(this.peerId, clientRequestId)
         this.replyTo = null
-        await this.refreshLatest()
         this.forceBottomToken++
         this.newMessageCount = 0
+        // VK already confirmed the send. Refresh in background so a phrase
+        // containing photo/voice does not keep the composer locked needlessly.
+        this.refreshLatest().catch(() => {})
       } finally { this.sending = false }
     },
     async upload(type, file) {
@@ -125,10 +127,12 @@ export const useChatStore = defineStore('chat', {
           this.transcriptJobs[key] = { status: 'done' }
           return
         }
-        for (let i = 0; i < 35; i++) {
-          await new Promise(r => setTimeout(r, 1800))
+        let lastStatus = 'queued'
+        for (let i = 0; i < 24; i++) {
+          await new Promise(r => setTimeout(r, 3000))
           const st = await api.transcriptStatus(this.peerId, message.conversationMessageId)
-          this.transcriptJobs[key] = { status: st.status, error: st.error || '' }
+          if (st.status !== lastStatus || st.error) this.transcriptJobs[key] = { status: st.status, error: st.error || '' }
+          lastStatus = st.status
           if (st.status === 'done') { voice.transcript = st.transcript || ''; return }
           if (st.status === 'error') throw new Error(st.error || 'Ошибка расшифровки')
         }

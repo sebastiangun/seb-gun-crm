@@ -30,7 +30,7 @@ async function submit() {
         <label>Пароль<input v-model="password" type="password" autocomplete="current-password" required /></label>
         <button class="primary-btn" :disabled="session.loading">{{ session.loading ? 'Подключаем…' : 'Войти' }}</button>
       </form>
-      <small>Новый интерфейс v28.1. Старый интерфейс доступен по <a href="/legacy/">/legacy/</a>.</small>
+      <small>Новый интерфейс v28.2. Старый интерфейс доступен по <a href="/legacy/">/legacy/</a>.</small>
     </section>
   </main>
 </template>

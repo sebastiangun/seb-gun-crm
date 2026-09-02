@@ -22,16 +22,18 @@ export const usePhrasesStore = defineStore('phrases', {
     async load() {
       if (this.loading || this.loaded) return
       this.loading = true
+      let hasCache = false
+      try {
+        const cached = JSON.parse(localStorage.getItem(CACHE_KEY) || '[]')
+        if (Array.isArray(cached) && cached.length) { this.groups = cached; this.loaded = true; hasCache = true }
+      } catch {}
       try {
         const d = await api.quickPhrases()
         this.groups = d.groups || d.quickPhrases || []
         this.loaded = true
         try { localStorage.setItem(CACHE_KEY, JSON.stringify(this.groups)) } catch {}
       } catch (err) {
-        try {
-          const cached = JSON.parse(localStorage.getItem(CACHE_KEY) || '[]')
-          if (Array.isArray(cached) && cached.length) { this.groups = cached; this.loaded = true; return }
-        } catch {}
+        if (hasCache) return
         throw err
       } finally { this.loading = false }
     },

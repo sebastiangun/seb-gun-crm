@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 const props = defineProps({
   open: Boolean,
@@ -11,7 +11,8 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue', 'close', 'apply'])
 const draft = ref([])
 const q = ref('')
-watch(() => props.open, v => { if (v) { draft.value = [...props.modelValue]; q.value = '' } })
+const searchInput = ref(null)
+watch(() => props.open, async v => { if (v) { draft.value = [...props.modelValue]; q.value = '';await nextTick();if(!document.activeElement||document.activeElement===document.body)searchInput.value?.focus() } })
 const shown = computed(() => {
   const query = q.value.trim().toLocaleLowerCase('ru-RU').replace(/ё/g, 'е')
   if (!query) return props.options
@@ -41,7 +42,7 @@ function reset() {
           <div><small>ФИЛЬТР</small><h3>{{ title }}</h3></div>
           <button type="button" class="icon-circle" @click="$emit('close')">×</button>
         </header>
-        <div v-if="searchable" class="sheet-search"><span>⌕</span><input v-model="q" placeholder="Найти…" autofocus></div>
+        <div v-if="searchable" class="sheet-search"><span>⌕</span><input ref="searchInput" v-model="q" placeholder="Найти…"></div>
         <div class="sheet-list">
           <button v-for="o in shown" :key="String(o.value)" type="button" class="sheet-option" @click="toggle(o.value)">
             <span class="check-box" :class="{checked: draft.includes(o.value)}">{{ draft.includes(o.value) ? '✓' : '' }}</span>

@@ -1,15 +1,17 @@
 <script setup>
-import { onMounted, onBeforeUnmount } from 'vue'
+import { onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useSessionStore } from './stores/session'
 import { useUiStore } from './stores/ui'
 import LoginView from './views/LoginView.vue'
 import BottomNav from './components/BottomNav.vue'
+import { rememberListRoute } from './utils/navigation'
 
 const session = useSessionStore()
 const ui = useUiStore()
 const router = useRouter()
 const route = useRoute()
+watch(() => route.fullPath, () => rememberListRoute(route), { immediate: true })
 
 async function authExpired() {
   ui.toast('Сессия BlueSales завершилась. Войдите снова.', 'error', 5000)
