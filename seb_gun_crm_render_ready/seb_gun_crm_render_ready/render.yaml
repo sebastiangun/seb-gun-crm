@@ -56,6 +56,8 @@ services:
         value: "yozhiki_sebastian_bot"
       - key: NOTIFICATION_TIMEZONE
         value: "Europe/Moscow"
+      - key: APP_TIMEZONE
+        value: "Europe/Moscow"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_WEBHOOK_SECRET

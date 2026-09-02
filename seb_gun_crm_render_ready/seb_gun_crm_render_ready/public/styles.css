@@ -1601,3 +1601,15 @@ html.chat-drawer-open{overscroll-behavior:none}
   .multi-filter-options label{min-height:36px}
   .mobile-edge-handle{opacity:.82}
 }
+
+
+/* v26.9: one viewport-safe control system + live CRM clock */
+*,*::before,*::after{box-sizing:border-box}
+html,body,#app,.shell,.content,.bs-classic-filters,.classic-multi-row,.multi-filter,.notification-form,.notification-grid{min-width:0;max-width:100%}
+button,input,select,textarea{max-width:100%;min-width:0;box-sizing:border-box}
+.bs-search-compact,.search-row,.multi-filter-trigger,.notification-form>label,.notification-grid label{min-width:0;max-width:100%}
+.multi-filter-menu{max-width:min(100%,calc(100vw - 24px))!important;overflow-x:hidden!important}
+.multi-filter-options label{min-width:0}.multi-filter-options label span,.multi-filter-trigger span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.crm-clock-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:2px 0 8px;padding:6px 8px;border:1px solid var(--line);border-radius:9px;background:var(--surface-2);font-size:11px;color:var(--ink)}
+.crm-clock-line span{margin-left:auto;color:var(--muted);font-size:10px}
+@media(max-width:700px){.classic-multi-row,.bs-classic-filters.multi,.crm-filter-stack.two,.notification-grid{grid-template-columns:minmax(0,1fr)!important}.classic-multi-row .multi-filter-menu{left:0!important;right:0!important;width:100%!important;max-width:100%!important}.crm-clock-line span{margin-left:0;width:100%}}

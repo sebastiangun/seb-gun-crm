@@ -1,0 +1,10 @@
+seb_gun CRM v26.9
+
+- Unified CRM clock: APP_TIMEZONE (default Europe/Moscow).
+- /api/meta and /api/reminders return the server clock; frontend no longer relies on phone timezone for CRM dates.
+- Reminder buckets now account for current date AND explicit reminder time. Date-only reminders stay in Today until the day ends.
+- Reminder page refreshes itself during polling so Today/Overdue counts move with time.
+- All controls/dropdowns are viewport-safe.
+- Draft text and attachments are snapshotted before any chat rerender and on page hide.
+- Phrase selection is persisted again after drawer/history transition.
+- Initial bottom positioning no longer runs timer corrections for several seconds, reducing chat jumping.

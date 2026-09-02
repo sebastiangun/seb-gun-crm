@@ -55,7 +55,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '26.8';
+const VERSION = '26.9';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -71,6 +71,7 @@ const NOTIFICATION_BS_LOGIN = String(process.env.BLUESALES_NOTIFICATION_LOGIN ||
 const NOTIFICATION_BS_PASSWORD = String(process.env.BLUESALES_NOTIFICATION_PASSWORD || '');
 const NOTIFICATION_STORE = path.join(ROOT, 'data', 'notification-settings.json');
 const NOTIFICATION_DEFAULT_TZ = String(process.env.NOTIFICATION_TIMEZONE || 'Europe/Moscow').trim();
+const APP_TIMEZONE = String(process.env.APP_TIMEZONE || process.env.NOTIFICATION_TIMEZONE || 'Europe/Moscow').trim();
 
 // v26.0: independent local speech-to-text. The source messenger only provides
 // the audio file; recognition is performed by open-source Transformers.js Whisper
@@ -1175,27 +1176,57 @@ function clearAccountCache(login) {
   clearCachePrefix(`${login}:`);
 }
 
-function ymdLocal(date = new Date()) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+const appClockFormatters = new Map();
+function appClockParts(ms = Date.now(), timeZone = APP_TIMEZONE) {
+  const tz = String(timeZone || APP_TIMEZONE);
+  let fmt = appClockFormatters.get(tz);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23' });
+    appClockFormatters.set(tz, fmt);
+  }
+  const out = { year:0, month:0, day:0, hour:0, minute:0, second:0 };
+  for (const p of fmt.formatToParts(new Date(ms))) if (p.type in out) out[p.type] = Number(p.value);
+  out.ymd = `${String(out.year).padStart(4,'0')}-${String(out.month).padStart(2,'0')}-${String(out.day).padStart(2,'0')}`;
+  out.hhmm = `${String(out.hour).padStart(2,'0')}:${String(out.minute).padStart(2,'0')}`;
+  out.minutes = out.hour * 60 + out.minute;
+  return out;
 }
+function addYmd(ymd, days = 0) {
+  const m = String(ymd || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '';
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2])-1, Number(m[3]) + Number(days || 0)));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+}
+function appClockPayload(ms = Date.now()) {
+  const p = appClockParts(ms);
+  return { timezone:APP_TIMEZONE, nowIso:new Date(ms).toISOString(), localDate:p.ymd, localTime:p.hhmm, localDateTime:`${p.ymd} ${p.hhmm}` };
+}
+function ymdLocal(date = new Date()) { return appClockParts(date instanceof Date ? date.getTime() : Number(date) || Date.now()).ymd; }
 
 function parseLooseDate(value) {
   if (!value) return null;
-  const s = String(value).trim();
-  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  m = s.match(/^(\d{2})[.\/-](\d{2})[.\/-](\d{4})/);
-  if (m) return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? null : d;
+  const raw = String(value).trim();
+  if (/T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    const zoned = new Date(raw);
+    if (!Number.isNaN(zoned.getTime())) { const p=appClockParts(zoned.getTime()); return { ymd:p.ymd, hour:p.hour, minute:p.minute, second:p.second, hasTime:true, raw }; }
+  }
+  let m = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (m) return { ymd:`${m[1]}-${m[2]}-${m[3]}`, hour:Number(m[4]||0), minute:Number(m[5]||0), second:Number(m[6]||0), hasTime:Boolean(m[4] != null), raw };
+  m = raw.match(/^(\d{2})[.\/-](\d{2})[.\/-](\d{4})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (m) return { ymd:`${m[3]}-${m[2]}-${m[1]}`, hour:Number(m[4]||0), minute:Number(m[5]||0), second:Number(m[6]||0), hasTime:Boolean(m[4] != null), raw };
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  const p = appClockParts(d.getTime());
+  return { ymd:p.ymd, hour:p.hour, minute:p.minute, second:p.second, hasTime:/[T\s]\d{1,2}:\d{2}/.test(raw), raw };
 }
-
-function dateKey(value) {
-  const d = parseLooseDate(value);
-  return d ? ymdLocal(d) : '';
+function dateKey(value) { const p = parseLooseDate(value); return p ? `${p.ymd} ${String(p.hour).padStart(2,'0')}:${String(p.minute).padStart(2,'0')}` : ''; }
+function reminderBucketFor(value, nowMs = Date.now()) {
+  const r = parseLooseDate(value); if (!r) return '';
+  const n = appClockParts(nowMs), tomorrow = addYmd(n.ymd, 1);
+  if (r.ymd < n.ymd) return 'overdue';
+  if (r.ymd === n.ymd) { if (r.hasTime && (r.hour*60+r.minute) < n.minutes) return 'overdue'; return 'today'; }
+  if (r.ymd === tomorrow) return 'tomorrow';
+  return 'future';
 }
 
 function matchesCustomer(c, q) {
@@ -2324,7 +2355,7 @@ async function apiRouter(req, res, url) {
   const pathname = url.pathname;
 
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:sttReady(), sttMode:STT_PROVIDER==='google-legacy'?'async-google-speechrecognition':(STT_PROVIDER==='speechrecognition'?'async-google-speechrecognition':'async-local-whisper'), sttProvider:STT_PROVIDER, sttModel:STT_PROVIDER==='google-legacy'?'SpeechRecognition/Google':(STT_ENABLED?STT_MODEL:null), sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttAsync:true, telegramConfigured:Boolean(TELEGRAM_BOT_TOKEN), notificationSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET), notificationWorkerCredentials:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD) });
+    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:sttReady(), sttMode:STT_PROVIDER==='google-legacy'?'async-google-speechrecognition':(STT_PROVIDER==='speechrecognition'?'async-google-speechrecognition':'async-local-whisper'), sttProvider:STT_PROVIDER, sttModel:STT_PROVIDER==='google-legacy'?'SpeechRecognition/Google':(STT_ENABLED?STT_MODEL:null), sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttAsync:true, telegramConfigured:Boolean(TELEGRAM_BOT_TOKEN), notificationSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET), notificationWorkerCredentials:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD), clock:appClockPayload() });
   }
 
 
@@ -3021,7 +3052,8 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
           isAdmin: isAdminSession(s),
           capabilities: ui.capabilities || s.uiProfile?.capabilities || {},
           uiSync: { state:s.uiSyncState || 'unknown', source:ui.source || null, message:s.uiSyncMessage || '' },
-          perf: { mode:'fast-meta', customerScan:false }
+          perf: { mode:'fast-meta', customerScan:false },
+          clock: appClockPayload()
         };
       });
       return sendJson(res, 200, { ok: true, ...value });
@@ -3218,35 +3250,32 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       const manager=String(url.searchParams.get('manager')||'').trim();
       const status=String(url.searchParams.get('status')||'').trim();
       const tag=String(url.searchParams.get('tag')||'').trim();
-      const cacheKey=`${s.login}:reminders:v25.0`;
-      let groups=cacheGet(cacheKey);
-      if(!groups){
-        const today=new Date();today.setHours(0,0,0,0);
-        const yesterday=new Date(today);yesterday.setDate(yesterday.getDate()-1);
-        const tomorrow=new Date(today);tomorrow.setDate(tomorrow.getDate()+1);
-        const dayAfter=new Date(today);dayAfter.setDate(dayAfter.getDate()+2);
-        const buckets={
-          today:await getCustomersByNextContactRange(s,ymdLocal(today),ymdLocal(today)),
-          tomorrow:await getCustomersByNextContactRange(s,ymdLocal(tomorrow),ymdLocal(tomorrow)),
-          future:await getCustomersByNextContactRange(s,ymdLocal(dayAfter),null),
-          overdue:await getCustomersByNextContactRange(s,null,ymdLocal(yesterday))
+      const clock=appClockPayload(),today=clock.localDate,yesterday=addYmd(today,-1),tomorrow=addYmd(today,1),dayAfter=addYmd(today,2);
+      // Cache raw date windows, not computed groups: a reminder with today's
+      // explicit time can become overdue as the clock moves without another
+      // expensive full BlueSales scan.
+      const cacheKey=`${s.login}:reminders:raw:v26.9:${today}`;
+      let rawBuckets=cacheGet(cacheKey);
+      if(!rawBuckets){
+        rawBuckets={
+          today:await getCustomersByNextContactRange(s,today,today),
+          tomorrow:await getCustomersByNextContactRange(s,tomorrow,tomorrow),
+          future:await getCustomersByNextContactRange(s,dayAfter,null),
+          previous:await getCustomersByNextContactRange(s,null,yesterday)
         };
-        groups={today:[],tomorrow:[],future:[],overdue:[]};
-        for(const[key,customers]of Object.entries(buckets)){
-          groups[key]=customers.filter(c=>Boolean(c.nextContactDate)).map(c=>({
-            id:c.id,fullName:c.fullName,crmStatus:c.crmStatus,crmStatusColor:c.crmStatusColor,
-            manager:c.manager,managerLogin:c.managerLogin,managerColor:c.managerColor,nextContactDate:c.nextContactDate,
-            tags:c.tags,vkId:c.social?.vkId||''
-          }));
-          groups[key].sort((a,b)=>dateKey(a.nextContactDate).localeCompare(dateKey(b.nextContactDate))||a.fullName.localeCompare(b.fullName,'ru'));
-        }
-        cacheSet(cacheKey,groups,60000);
+        cacheSet(cacheKey,rawBuckets,60000);
       }
-      const filtered={};
-      for(const[key,rows]of Object.entries(groups)){
-        filtered[key]=rows.filter(c=>customerMatchesManager(c,manager)&&customerMatchesStatus(c,status)&&customerHasTag(c,tag));
-      }
-      return sendJson(res,200,{ok:true,source:'customers.get-nextContactDate-range',reminders:filtered,counts:Object.fromEntries(Object.entries(filtered).map(([k,v])=>[k,v.length])),filters:{manager,status,tag}});
+      const groups={today:[],tomorrow:[],future:[],overdue:[]},seen=new Set();
+      const add=(c,fallback)=>{
+        if(!c?.nextContactDate)return;const id=String(c.id||'');const dedupe=`${fallback}:${id}`;if(seen.has(dedupe))return;seen.add(dedupe);
+        const computed=reminderBucketFor(c.nextContactDate)||fallback,bucket=(fallback==='previous'?'overdue':computed);
+        const item={id:c.id,fullName:c.fullName,crmStatus:c.crmStatus,crmStatusColor:c.crmStatusColor,manager:c.manager,managerLogin:c.managerLogin,managerColor:c.managerColor,nextContactDate:c.nextContactDate,tags:c.tags,vkId:c.social?.vkId||'',reminderBucket:bucket};
+        (groups[bucket]||groups[fallback==='previous'?'overdue':fallback]).push(item);
+      };
+      for(const c of rawBuckets.previous||[])add(c,'previous');for(const c of rawBuckets.today||[])add(c,'today');for(const c of rawBuckets.tomorrow||[])add(c,'tomorrow');for(const c of rawBuckets.future||[])add(c,'future');
+      for(const rows of Object.values(groups))rows.sort((a,b)=>dateKey(a.nextContactDate).localeCompare(dateKey(b.nextContactDate))||a.fullName.localeCompare(b.fullName,'ru'));
+      const filtered={};for(const[key,rows]of Object.entries(groups))filtered[key]=rows.filter(c=>customerMatchesManager(c,manager)&&customerMatchesStatus(c,status)&&customerHasTag(c,tag));
+      return sendJson(res,200,{ok:true,source:'customers.get-nextContactDate-range+crm-clock',clock,reminders:filtered,counts:Object.fromEntries(Object.entries(filtered).map(([k,v])=>[k,v.length])),filters:{manager,status,tag}});
     } catch (err) { return handleApiError(res, err); }
   }
 
