@@ -1,0 +1,19 @@
+node_modules/
+.env
+.env.*
+!.env.example
+config.local.json
+data/secrets.json
+*.log
+
+# Runtime-only local mirror/cache files
+data/ui-sync/*.json
+
+# Downloaded during Render build; do not commit a 32 MB model binary.
+models/*.bin
+models/*.part
+
+# v28 generated Vue build
+public/
+frontend/node_modules/
+frontend/package-lock.json

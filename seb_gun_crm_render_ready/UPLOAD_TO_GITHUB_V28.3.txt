@@ -1,0 +1,31 @@
+КАК ПРАВИЛЬНО ЗАГРУЗИТЬ v28.3 В GITHUB
+
+Причина прошлого сбоя:
+в коммит попали package.json, render.yaml и тест v28.3, но папка frontend/src загрузилась не полностью.
+В GitHub отсутствовали новые файлы outbox.js, SingleSelectSheet.vue, ForwardSheet.vue и NotificationsView.vue,
+а ChatView.vue остался от v28.2.
+
+Порядок загрузки:
+
+1. Полностью распакуйте ZIP на компьютере. Не загружайте сам ZIP в репозиторий.
+2. Откройте GitHub-репозиторий sebastiangun/seb-gun-crm.
+3. Нажмите Add file -> Upload files.
+4. Из Проводника перетащите целиком внешнюю папку seb_gun_crm_render_ready из распакованного архива.
+   Нельзя выбирать только файлы, находящиеся рядом с package.json: иначе новые файлы внутри frontend/src снова пропустятся.
+5. Дождитесь, пока GitHub покажет файлы из frontend/src/stores, frontend/src/components и frontend/src/views.
+6. Создайте commit. Render запустит Auto-Deploy.
+
+Перед подтверждением commit проверьте, что в списке загрузки есть:
+
+- seb_gun_crm_render_ready/seb_gun_crm_render_ready/frontend/src/stores/outbox.js
+- seb_gun_crm_render_ready/seb_gun_crm_render_ready/frontend/src/components/SingleSelectSheet.vue
+- seb_gun_crm_render_ready/seb_gun_crm_render_ready/frontend/src/components/ForwardSheet.vue
+- seb_gun_crm_render_ready/seb_gun_crm_render_ready/frontend/src/views/NotificationsView.vue
+- seb_gun_crm_render_ready/seb_gun_crm_render_ready/frontend/src/views/ChatView.vue
+
+Нормальный результат в Render:
+
+- vite build: built;
+- check:runtime: без ошибок;
+- test:v283: v28.3 integration checks: OK;
+- Deploy live.
