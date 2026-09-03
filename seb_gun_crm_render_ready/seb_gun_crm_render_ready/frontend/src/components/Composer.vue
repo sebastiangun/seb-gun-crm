@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useDraftsStore } from '../stores/drafts'
 import { useChatStore } from '../stores/chat'
 import { useUiStore } from '../stores/ui'
@@ -13,9 +13,19 @@ const photoInput = ref(null)
 const docInput = ref(null)
 const videoInput = ref(null)
 const audioInput = ref(null)
+const textInput = ref(null)
 const draft = computed(() => drafts.ensure(props.peerId))
 
-function updateText(e) { drafts.setText(props.peerId, e.target.value) }
+function resizeInput() {
+  const el = textInput.value
+  if (!el) return
+  el.style.height = 'auto'
+  const max = Math.min(220, Math.max(132, Math.round(window.innerHeight * .28)))
+  const height = Math.min(el.scrollHeight, max)
+  el.style.height = `${Math.max(42, height)}px`
+  el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden'
+}
+function updateText(e) { drafts.setText(props.peerId, e.target.value); resizeInput() }
 async function chooseFile(type, e) {
   const file = e.target.files?.[0]
   e.target.value = ''
@@ -23,11 +33,13 @@ async function chooseFile(type, e) {
   try { await chat.upload(type, file); ui.toast('Файл прикреплён', 'ok') } catch (err) { ui.toast(err.message, 'error', 6000) }
 }
 async function send() {
-  try { const row=await chat.send();if(row)ui.toast('Сообщение поставлено в очередь','ok',1800) } catch (err) { ui.toast(err.message, 'error', 6000) }
+  try { const row=await chat.send();if(row){ui.toast('Сообщение поставлено в очередь','ok',1800);await nextTick();resizeInput()} } catch (err) { ui.toast(err.message, 'error', 6000) }
 }
 function keydown(e) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); send() }
 }
+watch(() => [props.peerId, draft.value.text], () => nextTick(resizeInput))
+onMounted(() => nextTick(resizeInput))
 </script>
 <template>
   <div class="composer-area">
@@ -38,7 +50,7 @@ function keydown(e) {
     <form class="composer" @submit.prevent="send">
       <button type="button" class="composer-icon" @click="photoInput.click()">＋</button>
       <button type="button" class="composer-icon bolt" @click="$emit('open-phrases')">⚡</button>
-      <textarea :value="draft.text" placeholder="Напишите сообщение…" rows="1" @input="updateText" @keydown="keydown"></textarea>
+      <textarea ref="textInput" :value="draft.text" placeholder="Напишите сообщение…" rows="1" @input="updateText" @keydown="keydown"></textarea>
       <button class="send-button" :disabled="chat.uploading || (!draft.text.trim() && !draft.attachments.length)">➤</button>
       <input ref="photoInput" class="hidden-input" type="file" accept="image/*" @change="chooseFile('photo',$event)">
       <input ref="videoInput" class="hidden-input" type="file" accept="video/*" @change="chooseFile('video',$event)">

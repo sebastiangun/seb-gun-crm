@@ -42,7 +42,7 @@ onBeforeUnmount(() => window.removeEventListener('crm:auth-expired', authExpired
     <template v-else>
       <MoscowClock />
       <router-view />
-      <BottomNav v-if="!$route.path.startsWith('/dialogs/')" />
+      <BottomNav v-if="!$route.path.startsWith('/dialogs/') && !$route.path.startsWith('/admin')" />
     </template>
 
     <div class="toast-stack" aria-live="polite">

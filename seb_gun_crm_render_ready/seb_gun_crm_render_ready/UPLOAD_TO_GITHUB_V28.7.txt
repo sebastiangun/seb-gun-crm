@@ -1,0 +1,12 @@
+ЗАГРУЗКА v28.7 ЧЕРЕЗ GITHUB DESKTOP
+
+1. Закройте CRM в браузере.
+2. Откройте архив v28.7 и скопируйте папку seb_gun_crm_render_ready в корень локального репозитория C:\Users\Adm\Documents\GitHub\seb-gun-crm с заменой файлов.
+3. Итоговый package.json должен лежать здесь:
+   C:\Users\Adm\Documents\GitHub\seb-gun-crm\seb_gun_crm_render_ready\seb_gun_crm_render_ready\package.json
+4. В GitHub Desktop откройте Changes, в Summary напишите:
+   CRM v28.7 — поле сообщения и админка
+5. Нажмите Commit to main, затем Push origin.
+6. В Render дождитесь статуса Live и строки:
+   v28.7 integration checks: OK (growing composer, admin tabs, dialog 502 recovery)
+7. Откройте CRM с обновлением Ctrl+F5. Администратор найдёт новые вкладки в «Ещё» → «Открыть админку».

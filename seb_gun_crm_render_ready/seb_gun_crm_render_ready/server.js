@@ -56,7 +56,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.6';
+const VERSION = '28.7';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -1653,8 +1653,13 @@ function statusOptions(customers) {
 
 function quickPhrasesPath() { return path.join(ROOT, 'data', 'quick_phrases.json'); }
 function managerColorsPath() { return path.join(ROOT, 'data', 'manager-colors.json'); }
+function statusColorsPath() { return path.join(ROOT, 'data', 'status-colors.json'); }
 function loadManagerColorOverrides() {
   try { const raw=JSON.parse(fs.readFileSync(managerColorsPath(),'utf8')); return raw && typeof raw==='object' && !Array.isArray(raw) ? raw : {}; }
+  catch { return {}; }
+}
+function loadStatusColorOverrides() {
+  try { const raw=JSON.parse(fs.readFileSync(statusColorsPath(),'utf8')); return raw && typeof raw==='object' && !Array.isArray(raw) ? raw : {}; }
   catch { return {}; }
 }
 function uiSyncDir() { return path.join(ROOT, 'data', 'ui-sync'); }
@@ -1829,6 +1834,9 @@ function accountStyleProfile(session, users, customers) {
   Object.assign(managerColors, ui?.managerColors || {});
   Object.assign(tagColors, ui?.tagColors || {});
   Object.assign(tagTextColors, ui?.tagTextColors || {});
+  // Explicit choices from the mobile admin are authoritative over the
+  // periodically refreshed BlueSales UI cache.
+  Object.assign(statusColors, loadStatusColorOverrides());
   return {
     statusColors, managerColors, tagColors, tagTextColors,
     source: ui?.source || 'captured-bluesales-bootstrap+api+manager-overrides'
@@ -2225,7 +2233,7 @@ function movePhraseInStore(store,id,{groupName='',beforeId='',afterId='',index=n
   }else if(afterId){
     const i=target.phrases.findIndex(p=>String(p.id)===String(afterId));
     if(i>=0)targetIndex=i+1;
-  }else if(Number.isFinite(Number(index))){
+  }else if(index!==null&&index!==''&&Number.isFinite(Number(index))){
     targetIndex=Math.max(0,Math.min(target.phrases.length,Number(index)));
   }else if(position==='start'){
     targetIndex=0;
@@ -2952,6 +2960,30 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
     catch(err){return handleApiError(res,err);}
   }
 
+  if (pathname === '/api/admin/statuses' && req.method === 'GET') {
+    if(!requireAdminSession(s,res))return;
+    const seed=loadBlueSalesUiSeed();
+    const names=new Set(statusOptions([]));
+    for(const item of [...(Array.isArray(seed.statuses)?seed.statuses:[]),...(Array.isArray(s.uiProfile?.statuses)?s.uiProfile.statuses:[])]){
+      const name=String(item?.name||item||'').trim();if(name)names.add(name);
+    }
+    const colors=accountStyleProfile(s,[],[]).statusColors||{};
+    return sendJson(res,200,{ok:true,statuses:[...names].map(name=>({name,color:String(colors[name]||'')}))});
+  }
+  const adminStatusMatch=pathname.match(/^\/api\/admin\/statuses\/([^/]+)$/);
+  if(adminStatusMatch && req.method==='PUT'){
+    if(!requireAdminSession(s,res))return;
+    if(!requireCsrf(req,res,s))return;
+    try{
+      const name=decodeURIComponent(adminStatusMatch[1]).trim(),b=await readJson(req),color=String(b?.color||'').trim();
+      if(!name)return sendJson(res,400,{ok:false,message:'Не указан CRM-статус'});
+      if(color&&!/^#[0-9a-f]{6}$/i.test(color))return sendJson(res,400,{ok:false,message:'Цвет должен быть в формате #RRGGBB'});
+      const colors=loadStatusColorOverrides();if(color)colors[name]=color;else delete colors[name];
+      fs.writeFileSync(statusColorsPath(),JSON.stringify(colors,null,2),'utf8');clearAccountCache(s.login);
+      return sendJson(res,200,{ok:true,status:{name,color}});
+    }catch(err){return handleApiError(res,err);}
+  }
+
   const adminUserMatch=pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
   if(adminUserMatch && req.method==='PUT'){
     if(!requireAdminSession(s,res))return;
@@ -2960,8 +2992,13 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       const key=decodeURIComponent(adminUserMatch[1]).toLowerCase();
       const b=await readJson(req);
       const data=loadUserAccess();
-      const rec=(data.users||[]).find(u=>[u.id,u.login,u.email,u.name].some(x=>String(x||'').toLowerCase()===key));
-      if(!rec)return sendJson(res,404,{ok:false,message:'Пользователь не найден'});
+      let rec=(data.users||[]).find(u=>[u.id,u.login,u.email,u.name].some(x=>String(x||'').toLowerCase()===key));
+      if(!rec){
+        const source=(await adminUsersForSession(s)).find(u=>[u.id,u.login,u.email,u.name].some(x=>String(x||'').toLowerCase()===key));
+        if(!source)return sendJson(res,404,{ok:false,message:'Пользователь не найден'});
+        rec={id:source.id||'',name:source.name||source.login||'',email:source.email||source.login||'',login:source.login||source.email||'',role:source.role||'manager',status:source.status||'active',sections:Array.isArray(source.sections)?source.sections:[],color:source.color||''};
+        data.users.push(rec);
+      }
       if(b.color!==undefined){
         const c=String(b.color||'').trim();
         if(c&&!/^#[0-9a-f]{6}$/i.test(c))return sendJson(res,400,{ok:false,message:'Цвет должен быть в формате #RRGGBB'});

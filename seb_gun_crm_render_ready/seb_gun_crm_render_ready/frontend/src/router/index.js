@@ -5,6 +5,7 @@ import ClientsView from '../views/ClientsView.vue'
 import RemindersView from '../views/RemindersView.vue'
 import MoreView from '../views/MoreView.vue'
 import NotificationsView from '../views/NotificationsView.vue'
+import AdminView from '../views/AdminView.vue'
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -16,6 +17,7 @@ export const router = createRouter({
     { path: '/reminders', component: RemindersView },
     { path: '/notifications', component: NotificationsView },
     { path: '/more', component: MoreView },
+    { path: '/admin/:section?', component: AdminView },
     { path: '/:pathMatch(.*)*', redirect: '/dialogs' },
   ],
 })

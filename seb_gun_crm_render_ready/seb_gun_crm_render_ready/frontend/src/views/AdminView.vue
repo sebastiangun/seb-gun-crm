@@ -1,0 +1,66 @@
+<script setup>
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { api } from '../services/api'
+import { useSessionStore } from '../stores/session'
+import { useUiStore } from '../stores/ui'
+
+const route=useRoute(),router=useRouter(),session=useSessionStore(),ui=useUiStore()
+const loading=ref(false),query=ref(''),overview=ref(null),groups=ref([]),users=ref([]),sections=ref([]),statuses=ref([])
+const phraseEditor=ref(false),userEditor=ref(false),saving=ref(false),editingPhrase=ref(null),editingUser=ref(null),moveTarget=ref('')
+const phraseForm=reactive({groupName:'',name:'',text:'',hotkey:'',managers:[],attachmentsText:''})
+const userForm=reactive({role:'manager',status:'active',color:'#2f7d55',sections:[]})
+const section=computed(()=>['phrases','users','statuses'].includes(String(route.params.section))?String(route.params.section):'phrases')
+const groupNames=computed(()=>groups.value.map(g=>g.name))
+const managerNames=computed(()=>users.value.map(u=>u.name||u.login).filter(Boolean))
+const filteredGroups=computed(()=>{const q=query.value.trim().toLowerCase();if(!q)return groups.value;return groups.value.map(g=>({...g,phrases:(g.phrases||[]).filter(p=>`${p.name} ${p.text}`.toLowerCase().includes(q))})).filter(g=>g.phrases.length)})
+
+function tab(path){router.push(`/admin/${path}`)}
+async function load(){
+  if(!session.isAdmin){router.replace('/more');return}
+  loading.value=true
+  try{
+    overview.value=await api.adminOverview()
+    users.value=overview.value.users||[];sections.value=overview.value.sections||[]
+    if(section.value==='phrases'){const d=await api.adminPhrases();groups.value=d.groups||[];users.value=d.users||users.value}
+    if(section.value==='users'){const d=await api.adminUsers();users.value=d.users||[];sections.value=d.sections||sections.value}
+    if(section.value==='statuses'){const d=await api.adminStatuses();statuses.value=d.statuses||[]}
+  }catch(e){ui.toast(e.message,'error',7000)}finally{loading.value=false}
+}
+function openNewPhrase(){editingPhrase.value=null;Object.assign(phraseForm,{groupName:groupNames.value[0]||'Без раздела',name:'',text:'',hotkey:'',managers:[],attachmentsText:''});moveTarget.value=phraseForm.groupName;phraseEditor.value=true}
+function openPhrase(p,g){editingPhrase.value={...p,groupName:g.name,index:(g.phrases||[]).findIndex(x=>x.id===p.id)};Object.assign(phraseForm,{groupName:g.name,name:p.name||'',text:p.text||'',hotkey:p.hotkey||'',managers:[...(p.managers||[])],attachmentsText:(p.attachments||[]).join('\n')});moveTarget.value=g.name;phraseEditor.value=true}
+function phrasePayload(){return {groupName:phraseForm.groupName,name:phraseForm.name,text:phraseForm.text,hotkey:phraseForm.hotkey,managers:[...phraseForm.managers],attachments:phraseForm.attachmentsText.split(/[\s,]+/).map(x=>x.trim()).filter(Boolean)}}
+async function savePhrase(){saving.value=true;try{if(editingPhrase.value)await api.updateAdminPhrase(editingPhrase.value.id,phrasePayload());else await api.createAdminPhrase(phrasePayload());ui.toast('Быстрая фраза сохранена','ok');phraseEditor.value=false;await load()}catch(e){ui.toast(e.message,'error')}finally{saving.value=false}}
+async function movePhrase(id,payload){try{await api.moveAdminPhrase(id,payload);await load()}catch(e){ui.toast(e.message,'error')}}
+async function moveEdited(){if(!editingPhrase.value||!moveTarget.value)return;await movePhrase(editingPhrase.value.id,{groupName:moveTarget.value,position:'end'});phraseEditor.value=false;ui.toast('Фраза перемещена','ok')}
+async function removePhrase(){if(!editingPhrase.value||!confirm('Удалить эту быструю фразу?'))return;saving.value=true;try{await api.deleteAdminPhrase(editingPhrase.value.id);phraseEditor.value=false;await load()}catch(e){ui.toast(e.message,'error')}finally{saving.value=false}}
+function toggleManager(name){const i=phraseForm.managers.indexOf(name);if(i>=0)phraseForm.managers.splice(i,1);else phraseForm.managers.push(name)}
+function openUser(u){editingUser.value=u;Object.assign(userForm,{role:u.role||'manager',status:u.status||'active',color:u.color||'#2f7d55',sections:[...(u.sections||[])]});userEditor.value=true}
+function toggleSection(name){const i=userForm.sections.indexOf(name);if(i>=0)userForm.sections.splice(i,1);else userForm.sections.push(name)}
+async function saveUser(){saving.value=true;try{await api.updateAdminUser(editingUser.value.login||editingUser.value.email||editingUser.value.id,{...userForm,sections:[...userForm.sections]});ui.toast('Права пользователя сохранены','ok');userEditor.value=false;await load()}catch(e){ui.toast(e.message,'error')}finally{saving.value=false}}
+async function saveStatus(row){row.saving=true;try{await api.updateAdminStatus(row.name,row.color);ui.toast(`Цвет «${row.name}» сохранён`,'ok')}catch(e){ui.toast(e.message,'error')}finally{row.saving=false}}
+watch(section,()=>{query.value='';load()})
+onMounted(load)
+</script>
+
+<template>
+  <main class="page page-with-nav admin-page">
+    <header class="page-header sticky-header"><div><small>BLUESALES · АДМИНКА</small><h1>Настройки</h1></div><button class="header-action" @click="router.push('/more')">×</button></header>
+    <nav class="admin-tabs" aria-label="Разделы админки"><button :class="{active:section==='phrases'}" @click="tab('phrases')">⚡ Быстрые фразы</button><button :class="{active:section==='users'}" @click="tab('users')">👥 Пользователи</button><button :class="{active:section==='statuses'}" @click="tab('statuses')">🎨 CRM-статусы</button></nav>
+    <div v-if="loading" class="list-status"><span class="tiny-spinner"></span> Загружаю…</div>
+
+    <template v-if="!loading&&section==='phrases'">
+      <section class="toolbar-card admin-toolbar"><div class="search-control"><span>⌕</span><input v-model="query" placeholder="Название или текст фразы"></div><button class="primary-btn" @click="openNewPhrase">+ Новая фраза</button></section>
+      <p class="admin-summary">{{overview?.phraseCount||0}} фраз · {{overview?.groupCount||0}} разделов</p>
+      <section v-for="g in filteredGroups" :key="g.id||g.name" class="admin-group"><h3>{{g.name}} <b>{{g.phrases.length}}</b></h3><article v-for="(p,i) in g.phrases" :key="p.id" class="admin-phrase-row"><button class="phrase-open" @click="openPhrase(p,g)"><strong>{{p.name}}</strong><span>{{p.text||'Без текста'}}</span><small v-if="p.managers?.length">{{p.managers.join(' · ')}}</small></button><div class="phrase-move"><button title="В начало" :disabled="i===0" @click="movePhrase(p.id,{groupName:g.name,position:'start'})">⇈</button><button title="Выше" :disabled="i===0" @click="movePhrase(p.id,{groupName:g.name,index:i-1})">↑</button><button title="Ниже" :disabled="i===g.phrases.length-1" @click="movePhrase(p.id,{groupName:g.name,index:i+1})">↓</button><button title="В конец" :disabled="i===g.phrases.length-1" @click="movePhrase(p.id,{groupName:g.name,position:'end'})">⇊</button></div></article></section>
+    </template>
+
+    <section v-if="!loading&&section==='users'" class="admin-card-list"><button v-for="u in users" :key="u.id||u.login" class="admin-user-row" @click="openUser(u)"><i :style="{background:u.color||'var(--accent)'}"></i><span><strong>{{u.name||u.login}}</strong><small>{{u.login}}</small></span><b :class="u.status==='blocked'?'blocked':'active-user'">{{u.status==='blocked'?'Заблокирован':'Активен'}}</b><em>{{u.role==='manager'?'Менеджер':'Администратор'}}</em></button></section>
+
+    <section v-if="!loading&&section==='statuses'" class="admin-card-list"><article v-for="row in statuses" :key="row.name" class="status-admin-row"><i :style="{background:row.color||'#809087'}"></i><strong>{{row.name}}</strong><input v-model="row.color" type="color" :aria-label="`Цвет ${row.name}`"><button class="secondary-btn" :disabled="row.saving" @click="saveStatus(row)">{{row.saving?'…':'Сохранить'}}</button></article><p class="settings-hint">CRM-статусы берутся из BlueSales. Здесь можно задать их цвет в CRM.</p></section>
+  </main>
+
+  <Teleport to="body"><div v-if="phraseEditor" class="sheet-backdrop" @click.self="phraseEditor=false"><section class="bottom-sheet admin-editor-sheet"><header class="sheet-head"><div><small>{{editingPhrase?'РЕДАКТИРОВАНИЕ':'НОВАЯ ФРАЗА'}}</small><h3>Быстрая фраза</h3></div><button class="icon-circle" @click="phraseEditor=false">×</button></header><div class="admin-editor-scroll"><label>Раздел<input v-if="!editingPhrase" v-model="phraseForm.groupName" list="phrase-groups" placeholder="Название раздела"><b v-else>{{phraseForm.groupName}}</b></label><datalist id="phrase-groups"><option v-for="g in groupNames" :key="g" :value="g"/></datalist><label>Название<input v-model="phraseForm.name" placeholder="Название фразы"></label><label>Текст<textarea v-model="phraseForm.text" rows="7" placeholder="Текст, который попадёт в черновик"></textarea></label><label>Горячая клавиша<input v-model="phraseForm.hotkey"></label><fieldset><legend>Менеджеры</legend><button v-for="name in managerNames" :key="name" type="button" class="check-row" @click="toggleManager(name)"><span class="check-box" :class="{checked:phraseForm.managers.includes(name)}">{{phraseForm.managers.includes(name)?'✓':''}}</span>{{name}}</button></fieldset><label>VK-вложения<textarea v-model="phraseForm.attachmentsText" rows="3" placeholder="photo-1_2, video-1_3"></textarea></label><div v-if="editingPhrase" class="explicit-move"><b>Переместить в другой раздел</b><select v-model="moveTarget"><option v-for="g in groupNames" :key="g">{{g}}</option></select><button class="secondary-btn" :disabled="moveTarget===phraseForm.groupName" @click="moveEdited">Переместить</button></div><button v-if="editingPhrase" class="danger-btn editor-danger" @click="removePhrase">Удалить фразу</button></div><footer class="sheet-actions"><button class="secondary-btn" @click="phraseEditor=false">Отмена</button><button class="primary-btn" :disabled="saving||!phraseForm.name.trim()" @click="savePhrase">{{saving?'Сохраняю…':'Сохранить'}}</button></footer></section></div></Teleport>
+
+  <Teleport to="body"><div v-if="userEditor" class="sheet-backdrop" @click.self="userEditor=false"><section class="bottom-sheet admin-editor-sheet"><header class="sheet-head"><div><small>ПОЛЬЗОВАТЕЛЬ</small><h3>{{editingUser?.name}}</h3></div><button class="icon-circle" @click="userEditor=false">×</button></header><div class="admin-editor-scroll"><p class="settings-hint">{{editingUser?.login}}</p><label>Роль</label><div class="segmented admin-role"><button :class="{active:userForm.role==='manager'}" @click="userForm.role='manager'">Менеджер</button><button :class="{active:userForm.role==='admin'}" @click="userForm.role='admin'">Админ</button><button :class="{active:userForm.role==='creator_admin'}" @click="userForm.role='creator_admin'">Создатель</button></div><label>Статус</label><div class="segmented two"><button :class="{active:userForm.status==='active'}" @click="userForm.status='active'">Активен</button><button :class="{active:userForm.status==='blocked'}" @click="userForm.status='blocked'">Заблокирован</button></div><label>Цвет менеджера<input v-model="userForm.color" type="color"></label><fieldset><legend>Доступ к разделам</legend><button v-for="name in sections" :key="name" type="button" class="check-row" @click="toggleSection(name)"><span class="check-box" :class="{checked:userForm.sections.includes(name)}">{{userForm.sections.includes(name)?'✓':''}}</span>{{name}}</button></fieldset><a v-if="editingUser?.blueSalesEditUrl" class="secondary-btn link-btn" :href="editingUser.blueSalesEditUrl" target="_blank" rel="noreferrer">Открыть в BlueSales</a></div><footer class="sheet-actions"><button class="secondary-btn" @click="userEditor=false">Отмена</button><button class="primary-btn" :disabled="saving" @click="saveUser">{{saving?'Сохраняю…':'Сохранить'}}</button></footer></section></div></Teleport>
+</template>

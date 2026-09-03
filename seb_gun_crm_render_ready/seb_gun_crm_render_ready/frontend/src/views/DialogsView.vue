@@ -66,6 +66,7 @@ watch(() => dialogs.filter, () => { sync(); reload() })
 
     <div class="list-status" v-if="dialogs.loading"><span class="tiny-spinner"></span> Загружаю диалоги…</div>
     <div class="list-status subtle-loading" v-else-if="dialogs.loadingMore" aria-label="Обновление списка"><span class="tiny-spinner"></span></div>
+    <button v-else-if="dialogs.backgroundError" type="button" class="background-retry" @click="dialogs.resumeRemaining()">Не все диалоги загрузились · Повторить</button>
 
     <section class="dialog-list">
       <button v-for="d in visible" :key="d.peerId" type="button" class="dialog-button" @click="router.push({path:`/dialogs/${d.peerId}`,query:{from:route.fullPath}})">

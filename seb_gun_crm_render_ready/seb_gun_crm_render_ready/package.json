@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.6.0",
+  "version": "28.7.0",
   "private": true,
-  "description": "seb_gun CRM v28.6: visible scrolling everywhere and guided Telegram setup",
+  "description": "seb_gun CRM v28.7: growing composer, restored Vue admin, resilient dialog loading",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -38,7 +38,8 @@
     "test:v283": "node tests/integration-v283.js",
     "test:v284": "node tests/integration-v284.js",
     "test:v285": "node tests/integration-v285.js",
-    "test:v286": "node tests/integration-v286.js"
+    "test:v286": "node tests/integration-v286.js",
+    "test:v287": "node tests/integration-v287.js"
   },
   "engines": {
     "node": ">=18"

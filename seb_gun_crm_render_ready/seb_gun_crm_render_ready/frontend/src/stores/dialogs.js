@@ -11,6 +11,7 @@ export const useDialogsStore = defineStore('dialogs', {
   state: () => ({
     items: [], total: 0, loadedAll: false, loading: false, loadingMore: false,
     filter: 'all', search: '', manager: [], status: [], generation: 0, pollTimer: null,
+    backgroundError: '', nextOffset: 0,
   }),
   getters: {
     filteredItems(state) {
@@ -30,6 +31,8 @@ export const useDialogsStore = defineStore('dialogs', {
         this.items = []
         this.total = 0
         this.loadedAll = false
+        this.backgroundError = ''
+        this.nextOffset = 0
       }
       this.loading = true
       try {
@@ -38,6 +41,7 @@ export const useDialogsStore = defineStore('dialogs', {
         this.items = first.dialogs || []
         this.total = Number(first.count || this.items.length)
         this.loadedAll = !first.hasMore || !!this.search
+        this.nextOffset = this.items.length
         if (all && first.hasMore && !this.search) this.loadRemaining(gen, this.items.length).catch(() => {})
       } finally { if (gen === this.generation) this.loading = false }
     },
@@ -48,16 +52,34 @@ export const useDialogsStore = defineStore('dialogs', {
         let cursor = offset
         let guard = 0
         while (gen === this.generation && guard++ < 40) {
-          const d = await api.dialogs({ count: 200, offset: cursor, filter: this.filter, crm: 1 })
+          let d
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              d = await api.dialogs({ count: 75, offset: cursor, filter: this.filter, crm: 1 })
+              break
+            } catch (err) {
+              if (![0, 502, 503, 504].includes(Number(err?.status || 0)) || attempt === 2) throw err
+              await new Promise(r => setTimeout(r, 700 * (attempt + 1)))
+            }
+          }
           if (gen !== this.generation) return
           const rows = d.dialogs || []
           this.items = mergeDialogRows(this.items, rows)
           this.total = Number(d.count || this.total || this.items.length)
           cursor += rows.length
+          this.nextOffset = cursor
+          this.backgroundError = ''
           if (!d.hasMore || !rows.length) { this.loadedAll = true; break }
-          await new Promise(r => setTimeout(r, 100))
+          await new Promise(r => setTimeout(r, 240))
         }
+      } catch (err) {
+        if (gen === this.generation) this.backgroundError = 'Не все диалоги догрузились'
       } finally { if (gen === this.generation) this.loadingMore = false }
+    },
+    async resumeRemaining() {
+      if (this.loadedAll || this.loadingMore || this.search) return
+      this.backgroundError = ''
+      await this.loadRemaining(this.generation, this.nextOffset || this.items.length)
     },
     async refreshHead() {
       if (this.search) return
