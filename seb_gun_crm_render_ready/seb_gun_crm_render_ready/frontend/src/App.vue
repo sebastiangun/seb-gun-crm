@@ -7,6 +7,7 @@ import LoginView from './views/LoginView.vue'
 import BottomNav from './components/BottomNav.vue'
 import { rememberListRoute } from './utils/navigation'
 import { useOutboxStore } from './stores/outbox'
+import MoscowClock from './components/MoscowClock.vue'
 
 const session = useSessionStore()
 const ui = useUiStore()
@@ -39,6 +40,7 @@ onBeforeUnmount(() => window.removeEventListener('crm:auth-expired', authExpired
     </div>
     <LoginView v-else-if="!session.authenticated" />
     <template v-else>
+      <MoscowClock />
       <router-view />
       <BottomNav v-if="!$route.path.startsWith('/dialogs/')" />
     </template>

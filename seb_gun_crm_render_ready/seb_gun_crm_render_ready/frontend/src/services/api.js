@@ -122,6 +122,7 @@ export const api = {
   testTelegram: (manager) => request('/api/notifications/test', { method: 'POST', body: { manager } }),
   checkNotifications: () => request('/api/notifications/check-now', { method: 'POST', body: '{}', timeout: 65000 }),
   notificationOverview: () => request('/api/notifications/overview', { timeout: 60000, dedupe: false }),
+  outboxEvent: payload => request('/api/notifications/outbox-event', { method: 'POST', body: payload, timeout: 15000 }),
   queueAlert: payload => request('/api/notifications/queue-alert', { method: 'POST', body: payload, timeout: 20000 }),
   // The server retries VK CDN and returns a valid placeholder image on a stale
   // signed URL, so the browser no longer produces 424/timeout errors per row.

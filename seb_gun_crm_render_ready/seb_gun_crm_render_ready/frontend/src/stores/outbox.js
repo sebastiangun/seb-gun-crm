@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { api } from '../services/api'
 
-const PREFIX = 'seb-gun-v283-outbox:'
+const PREFIX = 'seb-gun-v283-outbox:' // keep v28.3 queues during the upgrade
 const RETRY_DELAYS = [0, 3000, 10000, 30000, 60000]
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 const newId = () => crypto.randomUUID?.() || `out-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -27,7 +27,12 @@ export const useOutboxStore = defineStore('outbox', {
       this.prune()
       this.persist()
       window.addEventListener('online', this.process)
+      for (const row of this.active) this.report(row)
       this.process()
+    },
+    report(row, status = row?.status) {
+      if (!row) return
+      api.outboxEvent({ requestId: row.clientRequestId || row.localId, peerId: row.peerId, peerName: row.peerName, text: row.text, status, attempts: row.attempts, error: row.error, createdAt: row.createdAt }).catch(() => {})
     },
     persist() {
       try { localStorage.setItem(storageKey(this.login), JSON.stringify(this.items)) } catch {}
@@ -45,6 +50,7 @@ export const useOutboxStore = defineStore('outbox', {
       }
       this.items.push(row)
       this.persist()
+      this.report(row)
       this.process()
       return row
     },
@@ -55,7 +61,7 @@ export const useOutboxStore = defineStore('outbox', {
         while (true) {
           const row = this.items.find(x => x.status === 'queued' && Number(x.nextAttemptAt || 0) <= Date.now())
           if (!row) break
-          row.status = 'sending'; row.attempts++; row.updatedAt = Date.now(); this.persist()
+          row.status = 'sending'; row.attempts++; row.updatedAt = Date.now(); this.persist(); this.report(row)
           try {
             const attachment = row.attachments.map(a => a.attachment || a).filter(Boolean).join(',')
             const result = await api.sendMessage(row.peerId, {
@@ -63,6 +69,7 @@ export const useOutboxStore = defineStore('outbox', {
               forwardMessageIds: row.forwardMessageIds, clientRequestId: row.clientRequestId,
             })
             row.status = 'sent'; row.messageId = Number(result?.messageId || 0); row.error = ''; row.updatedAt = Date.now()
+            this.report(row)
             window.dispatchEvent(new CustomEvent('crm:outbox-sent', { detail: { ...row } }))
           } catch (error) {
             row.error = publicError(error); row.updatedAt = Date.now()
@@ -71,9 +78,10 @@ export const useOutboxStore = defineStore('outbox', {
               row.status = 'queued'; row.nextAttemptAt = Date.now() + RETRY_DELAYS[row.attempts]
               this.schedule()
             } else row.status = 'error'
+            this.report(row)
             if (!row.alerted && row.attempts >= 2) {
               row.alerted = true
-              api.queueAlert({ peerId: row.peerId, peerName: row.peerName, requestId: row.clientRequestId, error: row.error }).catch(() => {})
+              api.queueAlert({ peerId: row.peerId, peerName: row.peerName, requestId: row.clientRequestId, error: row.error, attempts: row.attempts }).catch(() => {})
             }
           }
           this.persist()
@@ -90,11 +98,12 @@ export const useOutboxStore = defineStore('outbox', {
       const row = this.items.find(x => x.localId === localId)
       if (!row || row.status === 'sending') return
       row.status = 'queued'; row.error = ''; row.nextAttemptAt = 0; row.alerted = false; row.updatedAt = Date.now()
-      this.persist(); this.process()
+      this.persist(); this.report(row); this.process()
     },
     remove(localId) {
       const row = this.items.find(x => x.localId === localId)
       if (!row || row.status === 'sending') return false
+      this.report(row, 'removed')
       this.items = this.items.filter(x => x.localId !== localId)
       this.persist(); return true
     },

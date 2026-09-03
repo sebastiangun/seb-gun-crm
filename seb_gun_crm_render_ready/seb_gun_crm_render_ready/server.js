@@ -56,7 +56,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.3';
+const VERSION = '28.5';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -163,7 +163,7 @@ function isLoopbackHost(hostname='') {
   return h==='localhost'||h==='127.0.0.1'||h==='::1'||h==='0.0.0.0';
 }
 function preferredLanIpv4() {
-  const nets=os.networkInterfaces();
+  let nets={};try{nets=os.networkInterfaces()}catch{return ''}
   const candidates=[];
   for(const [name,entries] of Object.entries(nets)){
     for(const n of entries||[]){
@@ -1618,6 +1618,8 @@ function serveStatic(req, res, pathname) {
     let target = file;
     if (!err && st.isDirectory()) target = path.join(file, 'index.html');
     fs.readFile(target, (err2, data) => {
+      if (err2 && pathname==='/manifest.webmanifest') return sendJson(res,200,{name:'seb_gun CRM',short_name:'seb_gun CRM',start_url:'/#/dialogs',scope:'/',display:'standalone',background_color:'#f4f7f5',theme_color:'#151b17',icons:[{src:'/icon.svg',sizes:'any',type:'image/svg+xml',purpose:'any maskable'}]},{'Cache-Control':'no-cache'});
+      if (err2 && pathname==='/icon.svg') return sendText(res,200,'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="116" fill="#0b966f"/><path fill="#fff" d="M352 143c-24-23-58-35-102-35-66 0-112 32-112 83 0 49 37 69 103 84 55 13 72 24 72 47 0 25-23 40-60 40-42 0-78-16-108-47l-37 43c36 39 84 58 143 58 73 0 121-36 121-91 0-50-34-73-105-90-55-13-70-22-70-43 0-22 21-36 53-36 34 0 62 11 86 33l16-46Z"/></svg>','image/svg+xml');
       if (err2) return sendText(res, 404, 'Not Found');
       res.writeHead(200, {
         'Content-Type': mime[path.extname(target).toLowerCase()] || 'application/octet-stream',
@@ -2248,7 +2250,7 @@ async function adminUsersForSession(session){
 }
 
 
-function notificationDefaultStore(){return {version:1,rules:[],pairCodes:{},notified:{},updatedAt:0}}
+function notificationDefaultStore(){return {version:2,rules:[],pairCodes:{},notified:{},outbox:{},updatedAt:0}}
 function readNotificationStore(){
   try{
     if(!fs.existsSync(NOTIFICATION_STORE))return notificationDefaultStore();
@@ -2261,12 +2263,15 @@ function writeNotificationStore(store){
   catch(err){console.warn('[notifications store write]',err?.message||err);return false}
 }
 function safeNotificationRule(rule={}){
+  const manager=String(rule.manager||'').trim();
   return {
     id:String(rule.id||crypto.randomUUID?.()||randomToken(8)),
-    manager:String(rule.manager||'').trim(),
+    manager,
     enabled:Boolean(rule.enabled),
-    filter:'unanswered',
+    dialogFilter:['unanswered','unread'].includes(String(rule.dialogFilter||rule.filter||''))?String(rule.dialogFilter||rule.filter):'unanswered',
+    managerFilters:multiParamValues(Array.isArray(rule.managerFilters)?rule.managerFilters.join(','):(rule.managerFilters||manager)),
     statuses:multiParamValues(Array.isArray(rule.statuses)?rule.statuses.join(','):rule.statuses),
+    queueAlerts:rule.queueAlerts!==false,
     slaMinutes:Math.min(Math.max(Number(rule.slaMinutes||8),1),240),
     workStart:/^\d{2}:\d{2}$/.test(String(rule.workStart||''))?String(rule.workStart):'10:00',
     workEnd:/^\d{2}:\d{2}$/.test(String(rule.workEnd||''))?String(rule.workEnd):'22:00',
@@ -2285,6 +2290,20 @@ function upsertNotificationRule(store,input={}){
   const manager=String(input.manager||'').trim();if(!manager)throw Object.assign(new Error('Выберите менеджера'),{status:400});
   const existing=findNotificationRule(store,manager)||{};const next=safeNotificationRule({...existing,...input,manager,telegramChatId:existing.telegramChatId||input.telegramChatId||'',telegramUsername:existing.telegramUsername||'',telegramFirstName:existing.telegramFirstName||'',updatedAt:Date.now()});
   const idx=(store.rules||[]).findIndex(r=>notificationRuleKey(r.manager)===notificationRuleKey(manager));if(idx>=0)store.rules[idx]=next;else store.rules.push(next);return next
+}
+function notificationActorNames(session){return [session?.currentUser?.name,session?.currentUser?.login,session?.login].map(x=>String(x||'').trim()).filter(Boolean)}
+function notificationOutboxKey(value=''){return String(value||'').replace(/[^A-Za-z0-9:_-]/g,'').slice(0,160)}
+function upsertNotificationOutbox(store,input={},session){
+  store.outbox=store.outbox&&typeof store.outbox==='object'?store.outbox:{};
+  const requestId=notificationOutboxKey(input.requestId||input.clientRequestId||input.localId);if(!requestId)throw Object.assign(new Error('Не указан идентификатор исходящего сообщения'),{status:400});
+  const current=store.outbox[requestId]||{},status=['queued','sending','error','sent','removed'].includes(String(input.status))?String(input.status):'queued';
+  const row={...current,requestId,peerId:Number(input.peerId||current.peerId||0),peerName:String(input.peerName||current.peerName||'').slice(0,160),snippet:String(input.text||input.snippet||current.snippet||'').trim().replace(/\s+/g,' ').slice(0,240),manager:String(current.manager||notificationActorNames(session)[0]||''),status,attempts:Math.max(0,Number(input.attempts??current.attempts??0)),error:String(input.error||'').slice(0,300),createdAt:Number(current.createdAt||input.createdAt||Date.now()),updatedAt:Date.now(),alerted:Boolean(current.alerted)};
+  store.outbox[requestId]=row;return row
+}
+function notificationOutboxRows(store,session){
+  const names=notificationActorNames(session).map(notificationRuleKey),cutoff=Date.now()-7*24*60*60*1000;store.outbox=store.outbox&&typeof store.outbox==='object'?store.outbox:{};
+  for(const[k,row]of Object.entries(store.outbox))if(Number(row?.updatedAt||0)<cutoff||row?.status==='removed'||(row?.status==='sent'&&Date.now()-Number(row.updatedAt||0)>60*60*1000))delete store.outbox[k];
+  return Object.values(store.outbox).filter(row=>['queued','sending','error'].includes(row.status)&&(!names.length||names.includes(notificationRuleKey(row.manager)))).sort((a,b)=>Number(a.createdAt||0)-Number(b.createdAt||0))
 }
 async function telegramCall(method,payload={}){
   if(!TELEGRAM_BOT_TOKEN)throw Object.assign(new Error('TELEGRAM_BOT_TOKEN не настроен'),{status:503,code:'TELEGRAM_NOT_CONFIGURED'});
@@ -2338,8 +2357,11 @@ async function unansweredSinceForPeer(session,peerId){
   return seenIncoming?earliest:0
 }
 async function loadUnansweredDialogsForNotifications(session,{maxPages=5}={}){
+  return loadDialogsForNotifications(session,{maxPages,filter:'unanswered'});
+}
+async function loadDialogsForNotifications(session,{maxPages=5,filter='unanswered'}={}){
   const all=[];let offset=0;for(let page=0;page<maxPages;page++){
-    const params={count:200,offset,filter:'unanswered',extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;
+    const params={count:200,offset,filter:['unanswered','unread'].includes(filter)?filter:'unanswered',extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;
     const raw=await vkCall(session.vkToken,'messages.getConversations',params),maps=vkIdentityMaps(raw||{}),rows=(raw?.items||[]).map(x=>normalizeVkDialog(x,maps));all.push(...rows);offset+=rows.length;if(!rows.length||offset>=Number(raw?.count||0))break
   }
   const vkIds=all.filter(d=>d.peerType==='user'&&d.peerId>0).map(d=>d.peerId);
@@ -2351,9 +2373,11 @@ async function runNotificationCheck({session=null,manual=false}={}){
   const store=readNotificationStore(),rules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.enabled&&r.telegramChatId&&r.manager);if(!rules.length)return {ok:true,checked:0,sent:0,message:'Нет активных подключённых правил'};
   const s=session||notificationServiceSession();if(!s)throw Object.assign(new Error('Для фоновой проверки задайте BLUESALES_NOTIFICATION_LOGIN и BLUESALES_NOTIFICATION_PASSWORD в Render'),{status:503,code:'NOTIFICATION_CREDENTIALS'});
   const nowMs=Date.now(),activeRules=rules.filter(r=>notificationWorkingNow(nowMs,r));if(!activeRules.length)return {ok:true,checked:0,sent:0,outsideWorkingHours:true};
-  const dialogs=await loadUnansweredDialogsForNotifications(s),relevant=dialogs.filter(d=>activeRules.some(r=>customerMatchesManager(d.crm||{},r.manager)&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(','))));let sent=0,checked=0;
+  const filters=[...new Set(activeRules.map(r=>r.dialogFilter))],dialogs=[];
+  for(const filter of filters){const rows=await loadDialogsForNotifications(s,{filter});for(const row of rows)dialogs.push({...row,notificationFilter:filter})}
+  const relevant=dialogs.filter(d=>activeRules.some(r=>r.dialogFilter===d.notificationFilter&&customerMatchesManager(d.crm||{},(r.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(','))));let sent=0,checked=0;
   for(const d of relevant){
-    const matching=activeRules.filter(r=>customerMatchesManager(d.crm||{},r.manager)&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(',')));if(!matching.length)continue;
+    const matching=activeRules.filter(r=>r.dialogFilter===d.notificationFilter&&customerMatchesManager(d.crm||{},(r.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(',')));if(!matching.length)continue;
     let since=0;try{since=await unansweredSinceForPeer(s,d.peerId)}catch(err){console.warn('[notifications history]',d.peerId,err?.message||err);continue}if(!since)continue;checked++;
     const startMs=since*1000;
     for(const r of matching){
@@ -2367,6 +2391,11 @@ async function runNotificationCheck({session=null,manual=false}={}){
   // Keep the small JSON store bounded on Render's ephemeral filesystem.
   const cutoff=nowMs-14*24*60*60*1000;for(const[k,v]of Object.entries(store.notified||{}))if(Number(v?.sentAt||0)<cutoff)delete store.notified[k];writeNotificationStore(store);
   return {ok:true,checked,sent,dialogs:dialogs.length,manual}
+}
+let notificationCheckRunning=false;
+async function runScheduledNotificationCheck(){
+  if(notificationCheckRunning||!TELEGRAM_BOT_TOKEN||!NOTIFICATION_BS_LOGIN||!NOTIFICATION_BS_PASSWORD||!PRESET_VK_TOKEN)return;
+  notificationCheckRunning=true;try{await runNotificationCheck({manual:false})}catch(err){console.warn('[notifications scheduler]',err?.message||err)}finally{notificationCheckRunning=false}
 }
 async function handleTelegramWebhook(req,res){
   if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'Telegram bot не настроен'});
@@ -2484,26 +2513,35 @@ async function apiRouter(req, res, url) {
   }
   if (pathname === '/api/notifications/overview' && req.method === 'GET') {
     try {
-      const dialogs=await loadUnansweredDialogsForNotifications(s,{maxPages:2});
+      const store=readNotificationStore(),names=notificationActorNames(s),saved=(store.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
+      const rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered'});
+      const dialogs=await loadDialogsForNotifications(s,{maxPages:5,filter:rule.dialogFilter});
       const now=Math.floor(Date.now()/1000);
-      const rows=dialogs.filter(d=>!d.lastMessageOut).map(d=>({
+      const rows=dialogs.filter(d=>!d.lastMessageOut&&customerMatchesManager(d.crm||{},(rule.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(rule.statuses||[]).join(','))).map(d=>({
         peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,
         manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',
         snippet:String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),
-        since:Number(d.lastMessageAt||0),waitMinutes:Math.max(0,Math.floor((now-Number(d.lastMessageAt||now))/60))
-      })).sort((a,b)=>b.waitMinutes-a.waitMinutes);
-      return sendJson(res,200,{ok:true,dialogs:rows,checkedAt:Date.now()});
+        since:Number(d.lastMessageAt||0),waitMinutes:Math.max(0,Math.floor((now-Number(d.lastMessageAt||now))/60)),
+        workingWaitMinutes:workingMinutesUntilThreshold(Number(d.lastMessageAt||now)*1000,Date.now(),rule,rule.slaMinutes)
+      })).filter(d=>d.workingWaitMinutes>=rule.slaMinutes).sort((a,b)=>b.waitMinutes-a.waitMinutes);
+      const outbox=notificationOutboxRows(store,s);writeNotificationStore(store);
+      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,dialogFilter:rule.dialogFilter,filters:{managers:rule.managerFilters,statuses:rule.statuses}});
     } catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/notifications/outbox-event' && req.method === 'POST') {
+    if(!requireCsrf(req,res,s))return;
+    try{const body=await readJson(req),store=readNotificationStore(),row=upsertNotificationOutbox(store,body,s);writeNotificationStore(store);return sendJson(res,200,{ok:true,row})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/queue-alert' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
     try {
-      const body=await readJson(req),store=readNotificationStore();
-      const names=[s.currentUser?.name,s.currentUser?.login,s.login].map(x=>String(x||'').trim()).filter(Boolean);
-      const rules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.telegramChatId&&names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
+      const body=await readJson(req),store=readNotificationStore(),row=upsertNotificationOutbox(store,{...body,status:'error',attempts:body.attempts||2},s);
+      const names=notificationActorNames(s);
+      const rules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.queueAlerts&&r.telegramChatId&&names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
       const who=String(body.peerName||'').trim()||`VK ${Number(body.peerId||0)}`;
       const text=`🟠 Сообщение стоит в очереди\n\nПолучатель: ${who}\nПричина: ${String(body.error||'сервер временно недоступен').slice(0,250)}\nCRM продолжит повторять отправку.`;
       for(const r of rules)await sendTelegramText(r.telegramChatId,text,{url:notificationDialogUrl(Number(body.peerId||0))});
+      row.alerted=true;writeNotificationStore(store);
       return sendJson(res,200,{ok:true,sent:rules.length});
     } catch(err){return handleApiError(res,err)}
   }
@@ -3380,7 +3418,7 @@ server.listen(PORT, HOST, () => {
   console.log('Без расширений. CRM: BlueSales API. Диалоги: VK API сообщества напрямую.');
   console.log('');
   console.log(`PC:    http://localhost:${PORT}/`);
-  const nets = os.networkInterfaces();
+  let nets={};try{nets=os.networkInterfaces()}catch(err){console.warn('[network interfaces]',err?.message||err)}
   for (const [name, entries] of Object.entries(nets)) {
     for (const n of entries || []) {
       if (n.family === 'IPv4' && !n.internal) {
@@ -3401,6 +3439,7 @@ server.listen(PORT, HOST, () => {
   console.log('Не закрывайте это окно во время работы локального сайта.');
   console.log('');
   if(TELEGRAM_BOT_TOKEN&&PUBLIC_BASE_URL)setTimeout(()=>ensureTelegramWebhook().catch(err=>console.warn('[Telegram webhook setup]',err?.message||err)),1200);
+  if(TELEGRAM_BOT_TOKEN&&NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD&&PRESET_VK_TOKEN){setTimeout(runScheduledNotificationCheck,15000);setInterval(runScheduledNotificationCheck,60000)}
 });
 
 process.on('SIGINT', () => server.close(() => process.exit(0)));

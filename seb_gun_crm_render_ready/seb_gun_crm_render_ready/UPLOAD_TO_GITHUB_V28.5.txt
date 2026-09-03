@@ -1,0 +1,15 @@
+ЗАГРУЗКА v28.5 ЧЕРЕЗ GITHUB DESKTOP
+
+1. Распакуйте ZIP.
+2. Скопируйте внешнюю папку seb_gun_crm_render_ready в:
+   C:\Users\Adm\Documents\GitHub\seb-gun-crm
+3. Подтвердите замену файлов.
+4. В GitHub Desktop откройте Changes.
+5. Summary: CRM v28.5 — время МСК и настройка SLA
+6. Нажмите Commit to main, затем Push origin.
+
+Ожидаемая строка Render:
+v28.5 integration checks: OK (configurable SLA, 10:00–22:00 MSK, Telegram toggle, Moscow clock)
+
+После деплоя:
+Ещё → Telegram и уведомления → выберите получателя → включите отправку в Telegram → укажите количество рабочих минут → проверьте график 10:00–22:00 МСК → Сохранить настройки → Подключить Telegram → START → Отправить тест.

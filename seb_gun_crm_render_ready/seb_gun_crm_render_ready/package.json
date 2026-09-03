@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.3.0",
+  "version": "28.5.0",
   "private": true,
-  "description": "seb_gun CRM v28.3: optimistic outbox, notifications and v27-style BlueSales cards",
+  "description": "seb_gun CRM v28.5: configurable Moscow work-time SLA and visible MSK clock",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -35,7 +35,9 @@
     "test:v280": "node tests/integration-v280.js",
     "test:v281": "node tests/integration-v281.js",
     "test:v282": "node tests/integration-v282.js",
-    "test:v283": "node tests/integration-v283.js"
+    "test:v283": "node tests/integration-v283.js",
+    "test:v284": "node tests/integration-v284.js",
+    "test:v285": "node tests/integration-v285.js"
   },
   "engines": {
     "node": ">=18"
