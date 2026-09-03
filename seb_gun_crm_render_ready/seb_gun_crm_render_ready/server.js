@@ -56,7 +56,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.5';
+const VERSION = '28.6';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -66,6 +66,7 @@ const VK_DIRECT_AUTHOR = String(process.env.VK_DIRECT_AUTHOR || 'Дарья А.'
 // v26.5 Telegram SLA notifications. Secrets live only in Render Environment.
 const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TELEGRAM_BOT_USERNAME = String(process.env.TELEGRAM_BOT_USERNAME || 'yozhiki_sebastian_bot').trim().replace(/^@/, '');
+let activeTelegramBotUsername = TELEGRAM_BOT_USERNAME;
 const TELEGRAM_WEBHOOK_SECRET = String(process.env.TELEGRAM_WEBHOOK_SECRET || (TELEGRAM_BOT_TOKEN ? crypto.createHash('sha256').update(TELEGRAM_BOT_TOKEN).digest('hex').slice(0,48) : '')).trim();
 const NOTIFICATION_CHECK_SECRET = String(process.env.NOTIFICATION_CHECK_SECRET || '').trim();
 const NOTIFICATION_BS_LOGIN = String(process.env.BLUESALES_NOTIFICATION_LOGIN || '').trim();
@@ -2317,8 +2318,15 @@ async function sendTelegramText(chatId,text,{url='',button='Открыть ди�
   if(url)payload.reply_markup={inline_keyboard:[[{text:button,url}]]};
   return telegramCall('sendMessage',payload)
 }
+async function refreshTelegramBotIdentity(){
+  if(!TELEGRAM_BOT_TOKEN)return null;
+  const me=await telegramCall('getMe');
+  if(me?.username)activeTelegramBotUsername=String(me.username).replace(/^@/,'');
+  return me
+}
 async function ensureTelegramWebhook(){
   if(!TELEGRAM_BOT_TOKEN||!PUBLIC_BASE_URL)return false;
+  await refreshTelegramBotIdentity();
   const url=`${PUBLIC_BASE_URL}/api/telegram/webhook`;
   await telegramCall('setWebhook',{url,secret_token:TELEGRAM_WEBHOOK_SECRET,allowed_updates:['message']});
   console.log(`[Telegram] webhook ready: ${url}`);return true
@@ -2492,7 +2500,7 @@ async function apiRouter(req, res, url) {
 
   if (pathname === '/api/notifications/settings' && req.method === 'GET') {
     const store=readNotificationStore();
-    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:TELEGRAM_BOT_USERNAME,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),rules:(store.rules||[]).map(notificationRulePublic),filesystemPersistent:false});
+    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:Boolean(TELEGRAM_BOT_TOKEN&&NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD&&PRESET_VK_TOKEN),workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),rules:(store.rules||[]).map(notificationRulePublic),filesystemPersistent:false});
   }
   if (pathname === '/api/notifications/settings' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
@@ -2500,7 +2508,7 @@ async function apiRouter(req, res, url) {
   }
   if (pathname === '/api/notifications/pair' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
-    try{if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'Добавьте новый TELEGRAM_BOT_TOKEN в Render Environment'});const body=await readJson(req),manager=String(body.manager||'').trim();if(!manager)return sendJson(res,400,{ok:false,message:'Выберите менеджера'});const store=readNotificationStore();upsertNotificationRule(store,{manager,...(findNotificationRule(store,manager)||{})});const code=randomToken(12);store.pairCodes=store.pairCodes||{};store.pairCodes[code]={manager,expiresAt:Date.now()+15*60*1000};writeNotificationStore(store);return sendJson(res,200,{ok:true,pairUrl:`https://t.me/${TELEGRAM_BOT_USERNAME}?start=${code}`,expiresMinutes:15})}catch(err){return handleApiError(res,err)}
+    try{if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'В Render → Environment добавьте секрет TELEGRAM_BOT_TOKEN и дождитесь перезапуска сервиса'});await refreshTelegramBotIdentity();const body=await readJson(req),manager=String(body.manager||'').trim();if(!manager)return sendJson(res,400,{ok:false,message:'Выберите менеджера'});const store=readNotificationStore();upsertNotificationRule(store,{manager,...(findNotificationRule(store,manager)||{})});const code=randomToken(12);store.pairCodes=store.pairCodes||{};store.pairCodes[code]={manager,expiresAt:Date.now()+15*60*1000};writeNotificationStore(store);return sendJson(res,200,{ok:true,botUsername:activeTelegramBotUsername,pairUrl:`https://t.me/${activeTelegramBotUsername}?start=${code}`,expiresMinutes:15})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/unpair' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;const body=await readJson(req),store=readNotificationStore(),rule=findNotificationRule(store,body.manager);if(rule){rule.telegramChatId='';rule.telegramUsername='';rule.telegramFirstName='';writeNotificationStore(store)}return sendJson(res,200,{ok:true})

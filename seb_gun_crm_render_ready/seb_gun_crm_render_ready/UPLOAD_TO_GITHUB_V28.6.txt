@@ -1,0 +1,17 @@
+ЗАГРУЗКА v28.6 ЧЕРЕЗ GITHUB DESKTOP
+
+1. Распакуйте ZIP.
+2. Скопируйте внешнюю папку seb_gun_crm_render_ready в C:\Users\Adm\Documents\GitHub\seb-gun-crm.
+3. Подтвердите замену файлов.
+4. В GitHub Desktop: Changes → Summary «CRM v28.6 — прокрутка и Telegram» → Commit to main → Push origin.
+5. Дождитесь строки Render: v28.6 integration checks: OK.
+
+ДЛЯ ПОДКЛЮЧЕНИЯ TELEGRAM
+1. Получите токен своего бота у @BotFather командой /newbot или /mybots → API Token.
+2. Не отправляйте токен в переписку и не добавляйте его в файлы GitHub.
+3. Откройте Render → seb-gun-crm → Environment.
+4. Добавьте Secret: TELEGRAM_BOT_TOKEN = ваш токен от BotFather.
+5. Проверьте BLUESALES_NOTIFICATION_LOGIN и BLUESALES_NOTIFICATION_PASSWORD.
+6. Сохраните изменения и дождитесь перезапуска сервиса.
+7. В CRM откройте Ещё → Telegram и уведомления. Статус «Токен бота» должен стать «Настроен».
+8. Выберите получателя → Подключить Telegram → в Telegram нажмите START → вернитесь в CRM → Отправить тест.
