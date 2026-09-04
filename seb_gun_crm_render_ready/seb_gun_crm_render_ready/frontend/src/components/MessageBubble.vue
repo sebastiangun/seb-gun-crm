@@ -19,6 +19,7 @@ async function copy() {
   finally { menu.value = false }
 }
 function imgStyle(a) { return a.width && a.height ? { aspectRatio: `${a.width}/${a.height}` } : {} }
+function imageSrc(a) { return a?.previewUrl || api.imageUrl(a?.url) }
 function hideBrokenImage(e) { if (e?.currentTarget) e.currentTarget.style.display = 'none' }
 function toggleMenu(e){
   if(menu.value){menu.value=false;return}
@@ -36,7 +37,7 @@ const stateLabel=computed(()=>({queued:'В очереди',sending:'Отправ
       <p v-if="message.text" class="message-text">{{ message.text }}</p>
       <div v-if="message.attachments?.length" class="attachments-grid">
         <template v-for="(a,i) in message.attachments" :key="`${a.type}-${i}`">
-          <img v-if="a.type==='photo'" class="message-photo" :style="imgStyle(a)" :src="api.imageUrl(a.url)" alt="Фото" loading="lazy" @error="hideBrokenImage">
+          <img v-if="a.type==='photo'" class="message-photo" :style="imgStyle(a)" :src="imageSrc(a)" alt="Фото" loading="lazy" @error="hideBrokenImage">
           <a v-else-if="a.type==='video'" class="media-card" :href="a.url" target="_blank" rel="noreferrer"><img v-if="a.preview" :src="api.imageUrl(a.preview)" loading="lazy" @error="hideBrokenImage"><span>▶ {{ a.title || 'Видео' }}</span></a>
           <a v-else-if="a.type==='doc'" class="doc-card" :href="api.mediaUrl(a.url)" target="_blank" rel="noreferrer">📎 <span>{{ a.title || 'Файл' }}</span></a>
           <img v-else-if="a.type==='sticker'" class="sticker" :src="api.imageUrl(a.url)" alt="Стикер" loading="lazy" @error="hideBrokenImage">

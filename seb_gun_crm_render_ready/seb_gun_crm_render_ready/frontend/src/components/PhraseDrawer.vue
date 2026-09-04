@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { usePhrasesStore } from '../stores/phrases'
 import { useDraftsStore } from '../stores/drafts'
 import { useChatStore } from '../stores/chat'
@@ -30,12 +30,15 @@ function selectPhrase(p) {
   emit('close')
 }
 function onScroll() { try { localStorage.setItem(POSITION_KEY, String(scrollEl.value?.scrollTop || 0)) } catch {} }
+function phrasesChanged(){phrases.invalidate();if(props.open)phrases.load(true).catch(e=>ui.toast(e.message,'error'))}
 onMounted(async () => {
+  window.addEventListener('crm:phrases-changed',phrasesChanged)
   try { await phrases.load() } catch (e) { ui.toast(e.message, 'error') }
 })
+onBeforeUnmount(()=>window.removeEventListener('crm:phrases-changed',phrasesChanged))
 watch(() => props.open, async (open) => {
   if (!open) return
-  if (!phrases.loaded) { try { await phrases.load() } catch (e) { ui.toast(e.message, 'error') } }
+  try { await phrases.load(true) } catch (e) { ui.toast(e.message, 'error') }
   await nextTick()
   if (scrollEl.value) scrollEl.value.scrollTop = Number(localStorage.getItem(POSITION_KEY) || 0)
 })
@@ -48,6 +51,7 @@ watch(() => props.open, async (open) => {
         <div class="drawer-search"><span>⌕</span><input v-model="phrases.query" placeholder="Название или текст скрипта"></div>
         <div ref="scrollEl" class="phrase-scroll" @scroll.passive="onScroll">
           <div v-if="phrases.loading" class="drawer-loading">Загружаю скрипты…</div>
+          <div v-else-if="phrases.query && !phrases.filtered.length" class="empty-mini">Ничего не найдено. Попробуйте часть названия или текста.</div>
           <section v-for="g in phrases.filtered" :key="g.id" class="phrase-group">
             <h4>{{ g.name }}</h4>
             <button v-for="p in g.phrases" :key="p.id" type="button" class="phrase-row" :class="{last: p.id===phrases.lastId}" @click="selectPhrase(p)">

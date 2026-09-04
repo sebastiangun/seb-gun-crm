@@ -95,6 +95,7 @@ export const useChatStore = defineStore('chat', {
     async upload(type, file) {
       if (!file || !this.peerId) return
       this.uploading = true
+      const previewUrl = type === 'photo' && typeof URL !== 'undefined' ? URL.createObjectURL(file) : ''
       try {
         const result = await api.uploadFile(this.peerId, type, file)
         useDraftsStore().addAttachment(this.peerId, {
@@ -102,9 +103,13 @@ export const useChatStore = defineStore('chat', {
           kind: result.kind || type,
           name: file.name || type,
           size: file.size || 0,
+          previewUrl,
           fallback: !!result.fallback,
         })
         return result
+      } catch (err) {
+        if (previewUrl) URL.revokeObjectURL(previewUrl)
+        throw err
       } finally { this.uploading = false }
     },
     async transcribe(message) {

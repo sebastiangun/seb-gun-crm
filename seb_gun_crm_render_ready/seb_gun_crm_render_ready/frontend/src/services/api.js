@@ -127,6 +127,7 @@ export const api = {
   updateAdminUser: (key, payload) => request(`/api/admin/users/${encodeURIComponent(key)}`, { method: 'PUT', body: payload, timeout: 45000 }),
   adminPhrases: () => request('/api/admin/phrases', { timeout: 30000, dedupe: false }),
   createAdminPhrase: payload => request('/api/admin/phrases', { method: 'POST', body: payload, timeout: 45000 }),
+  createAdminPhraseGroup: name => request('/api/admin/phrase-groups', { method: 'POST', body: { name }, timeout: 30000 }),
   updateAdminPhrase: (id, payload) => request(`/api/admin/phrases/${encodeURIComponent(id)}`, { method: 'PUT', body: payload, timeout: 45000 }),
   moveAdminPhrase: (id, payload) => request(`/api/admin/phrases/${encodeURIComponent(id)}/move`, { method: 'POST', body: payload, timeout: 45000 }),
   deleteAdminPhrase: id => request(`/api/admin/phrases/${encodeURIComponent(id)}`, { method: 'DELETE', body: '{}', timeout: 45000 }),

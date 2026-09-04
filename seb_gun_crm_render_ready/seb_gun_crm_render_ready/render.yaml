@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
 
-    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install && npm run build && npm run check:runtime && npm run test:v283 && npm run test:v284 && npm run test:v285 && npm run test:v286 && npm run test:v287
+    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install && npm run build && npm run check:runtime && npm run test:v283 && npm run test:v284 && npm run test:v285 && npm run test:v286 && npm run test:v287 && npm run test:v288
     startCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm start
 
     healthCheckPath: /api/health
@@ -68,6 +68,20 @@ services:
         sync: false
       - key: BLUESALES_NOTIFICATION_PASSWORD
         sync: false
+      - key: NOTIFICATION_DEFAULT_CHAT_ID
+        sync: false
+      - key: NOTIFICATION_DEFAULT_MANAGER
+        sync: false
+      - key: NOTIFICATION_DEFAULT_MANAGER_FILTERS
+        sync: false
+      - key: NOTIFICATION_DEFAULT_STATUSES
+        sync: false
+      - key: NOTIFICATION_DEFAULT_SLA_MINUTES
+        value: "8"
+      - key: NOTIFICATION_DEFAULT_WORK_START
+        value: "10:00"
+      - key: NOTIFICATION_DEFAULT_WORK_END
+        value: "22:00"
 
       - key: VK_TOKEN
         sync: false

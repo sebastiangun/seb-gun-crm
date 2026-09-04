@@ -25,7 +25,7 @@ const statusOptions = computed(() => meta.statuses.map(s => ({ value: s.name || 
 const visible = computed(() => dialogs.filteredItems)
 
 async function reload() {
-  try { await dialogs.load({ reset: true, all: true }) } catch (e) { ui.toast(e.message, 'error') }
+  try { await dialogs.load({ reset: true, all: false }) } catch (e) { ui.toast(e.message, 'error') }
 }
 function stateQuery(extra={}) { return listQuery({q:dialogs.search,filter:dialogs.filter,manager:dialogs.manager,status:dialogs.status},extra) }
 function sync(extra={}) { return router.replace({path:'/dialogs',query:stateQuery(extra)}) }
@@ -74,6 +74,8 @@ watch(() => dialogs.filter, () => { sync(); reload() })
       </button>
       <div v-if="!dialogs.loading && !visible.length" class="empty-state"><b>Диалогов нет</b><span>Измените фильтр или поиск.</span></div>
     </section>
+
+    <button v-if="!dialogs.loading&&!dialogs.loadedAll&&!dialogs.search" type="button" class="load-more-btn" :disabled="dialogs.loadingMore" @click="dialogs.resumeRemaining()">{{dialogs.loadingMore?'Загружаю…':'Показать ещё диалоги'}}</button>
 
     <MultiFilterSheet :open="activeSheet==='manager'" title="Менеджеры" :options="managerOptions" v-model="dialogs.manager" @apply="applyFilter" @close="closeSheet" />
     <MultiFilterSheet :open="activeSheet==='status'" title="CRM-статусы" :options="statusOptions" v-model="dialogs.status" @apply="applyFilter" @close="closeSheet" />

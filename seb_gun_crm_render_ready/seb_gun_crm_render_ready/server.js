@@ -56,7 +56,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.7';
+const VERSION = '28.8';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -73,6 +73,13 @@ const NOTIFICATION_BS_LOGIN = String(process.env.BLUESALES_NOTIFICATION_LOGIN ||
 const NOTIFICATION_BS_PASSWORD = String(process.env.BLUESALES_NOTIFICATION_PASSWORD || '');
 const NOTIFICATION_STORE = path.join(ROOT, 'data', 'notification-settings.json');
 const NOTIFICATION_DEFAULT_TZ = String(process.env.NOTIFICATION_TIMEZONE || 'Europe/Moscow').trim();
+const NOTIFICATION_DEFAULT_CHAT_ID = String(process.env.NOTIFICATION_DEFAULT_CHAT_ID || '').trim();
+const NOTIFICATION_DEFAULT_MANAGER = String(process.env.NOTIFICATION_DEFAULT_MANAGER || '').trim();
+const NOTIFICATION_DEFAULT_MANAGER_FILTERS = String(process.env.NOTIFICATION_DEFAULT_MANAGER_FILTERS || '').trim();
+const NOTIFICATION_DEFAULT_STATUSES = String(process.env.NOTIFICATION_DEFAULT_STATUSES || '').trim();
+const NOTIFICATION_DEFAULT_SLA = Math.min(Math.max(Number(process.env.NOTIFICATION_DEFAULT_SLA_MINUTES || 8),1),240);
+const NOTIFICATION_DEFAULT_WORK_START = /^\d{2}:\d{2}$/.test(String(process.env.NOTIFICATION_DEFAULT_WORK_START || '')) ? String(process.env.NOTIFICATION_DEFAULT_WORK_START) : '10:00';
+const NOTIFICATION_DEFAULT_WORK_END = /^\d{2}:\d{2}$/.test(String(process.env.NOTIFICATION_DEFAULT_WORK_END || '')) ? String(process.env.NOTIFICATION_DEFAULT_WORK_END) : '22:00';
 const APP_TIMEZONE = String(process.env.APP_TIMEZONE || process.env.NOTIFICATION_TIMEZONE || 'Europe/Moscow').trim();
 
 // v26.0: independent local speech-to-text. The source messenger only provides
@@ -2260,12 +2267,31 @@ async function adminUsersForSession(session){
 
 
 function notificationDefaultStore(){return {version:2,rules:[],pairCodes:{},notified:{},outbox:{},updatedAt:0}}
+function hydrateNotificationStoreFromEnvironment(input){
+  const store={...notificationDefaultStore(),...(input&&typeof input==='object'?input:{})};
+  store.rules=Array.isArray(store.rules)?store.rules:[];
+  if(!NOTIFICATION_DEFAULT_CHAT_ID||!NOTIFICATION_DEFAULT_MANAGER)return store;
+  const existing=findNotificationRule(store,NOTIFICATION_DEFAULT_MANAGER);
+  const envRule=safeNotificationRule({
+    ...(existing||{}),manager:NOTIFICATION_DEFAULT_MANAGER,enabled:true,
+    telegramChatId:NOTIFICATION_DEFAULT_CHAT_ID,
+    managerFilters:existing?.managerFilters?.length?existing.managerFilters:multiParamValues(NOTIFICATION_DEFAULT_MANAGER_FILTERS),
+    statuses:existing?.statuses?.length?existing.statuses:multiParamValues(NOTIFICATION_DEFAULT_STATUSES),
+    slaMinutes:existing?.slaMinutes||NOTIFICATION_DEFAULT_SLA,
+    workStart:existing?.workStart||NOTIFICATION_DEFAULT_WORK_START,
+    workEnd:existing?.workEnd||NOTIFICATION_DEFAULT_WORK_END,
+    dialogFilter:existing?.dialogFilter||'unanswered',queueAlerts:existing?.queueAlerts!==false
+  });
+  const index=store.rules.findIndex(r=>notificationRuleKey(r.manager)===notificationRuleKey(NOTIFICATION_DEFAULT_MANAGER));
+  if(index>=0)store.rules[index]=envRule;else store.rules.push(envRule);
+  return store;
+}
 function readNotificationStore(){
   try{
-    if(!fs.existsSync(NOTIFICATION_STORE))return notificationDefaultStore();
+    if(!fs.existsSync(NOTIFICATION_STORE))return hydrateNotificationStoreFromEnvironment(notificationDefaultStore());
     const raw=JSON.parse(fs.readFileSync(NOTIFICATION_STORE,'utf8'));
-    return {...notificationDefaultStore(),...(raw&&typeof raw==='object'?raw:{})};
-  }catch(err){console.warn('[notifications store read]',err?.message||err);return notificationDefaultStore()}
+    return hydrateNotificationStoreFromEnvironment(raw);
+  }catch(err){console.warn('[notifications store read]',err?.message||err);return hydrateNotificationStoreFromEnvironment(notificationDefaultStore())}
 }
 function writeNotificationStore(store){
   try{fs.mkdirSync(path.dirname(NOTIFICATION_STORE),{recursive:true});store.updatedAt=Date.now();fs.writeFileSync(NOTIFICATION_STORE,JSON.stringify(store,null,2),'utf8');return true}
@@ -2409,15 +2435,33 @@ async function runNotificationCheck({session=null,manual=false}={}){
   return {ok:true,checked,sent,dialogs:dialogs.length,manual}
 }
 let notificationCheckRunning=false;
+const notificationSchedulerState={lastAt:0,lastSuccessAt:0,lastError:'',checked:0,sent:0,source:''};
+function notificationMissingEnvironment(){
+  const rows=[];
+  if(!TELEGRAM_BOT_TOKEN)rows.push('TELEGRAM_BOT_TOKEN');
+  if(!NOTIFICATION_BS_LOGIN)rows.push('BLUESALES_NOTIFICATION_LOGIN');
+  if(!NOTIFICATION_BS_PASSWORD)rows.push('BLUESALES_NOTIFICATION_PASSWORD');
+  if(!PRESET_VK_TOKEN)rows.push('VK_TOKEN');
+  return rows;
+}
+async function executeNotificationCheck(options,source){
+  notificationSchedulerState.lastAt=Date.now();notificationSchedulerState.source=source;notificationSchedulerState.lastError='';
+  try{
+    const result=await runNotificationCheck(options);
+    notificationSchedulerState.lastSuccessAt=Date.now();notificationSchedulerState.checked=Number(result?.checked||0);notificationSchedulerState.sent=Number(result?.sent||0);
+    return result;
+  }catch(err){notificationSchedulerState.lastError=String(err?.message||err).slice(0,400);throw err}
+}
 async function runScheduledNotificationCheck(){
   if(notificationCheckRunning||!TELEGRAM_BOT_TOKEN||!NOTIFICATION_BS_LOGIN||!NOTIFICATION_BS_PASSWORD||!PRESET_VK_TOKEN)return;
-  notificationCheckRunning=true;try{await runNotificationCheck({manual:false})}catch(err){console.warn('[notifications scheduler]',err?.message||err)}finally{notificationCheckRunning=false}
+  notificationCheckRunning=true;try{await executeNotificationCheck({manual:false},'internal')}catch(err){console.warn('[notifications scheduler]',err?.message||err)}finally{notificationCheckRunning=false}
 }
 async function handleTelegramWebhook(req,res){
   if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'Telegram bot не настроен'});
   if(TELEGRAM_WEBHOOK_SECRET&&String(req.headers['x-telegram-bot-api-secret-token']||'')!==TELEGRAM_WEBHOOK_SECRET)return sendJson(res,403,{ok:false});
   const update=await readJson(req),msg=update?.message;if(!msg?.chat?.id)return sendJson(res,200,{ok:true});
   const text=String(msg.text||'').trim(),chatId=String(msg.chat.id),store=readNotificationStore();
+  if(/^\/id(?:\s|$)/i.test(text)){await sendTelegramText(chatId,`Ваш Telegram chat ID: ${chatId}\n\nДобавьте его в Render Environment как NOTIFICATION_DEFAULT_CHAT_ID, чтобы подключение сохранялось после перезапуска бесплатного сервера.`);return sendJson(res,200,{ok:true})}
   const m=text.match(/^\/start(?:\s+([A-Za-z0-9_-]+))?/i);
   if(m){const code=String(m[1]||'');const pair=store.pairCodes?.[code];if(pair&&Number(pair.expiresAt||0)>Date.now()){
       const rule=findNotificationRule(store,pair.manager)||upsertNotificationRule(store,{manager:pair.manager,enabled:false});rule.telegramChatId=chatId;rule.telegramUsername=String(msg.from?.username||'');rule.telegramFirstName=String(msg.from?.first_name||'');delete store.pairCodes[code];writeNotificationStore(store);await sendTelegramText(chatId,`✅ seb_gun CRM подключена.\nМенеджер: ${rule.manager}\nУведомления: ${rule.enabled?'включены':'пока выключены'}`);return sendJson(res,200,{ok:true})
@@ -2442,7 +2486,7 @@ async function apiRouter(req, res, url) {
 
   if (pathname === '/api/notifications/check' && (req.method === 'POST' || req.method === 'GET')) {
     if(!notificationCheckAuthorized(req,url))return sendJson(res,403,{ok:false,message:'Неверный ключ планировщика'});
-    try{return sendJson(res,200,await runNotificationCheck({manual:false}))}catch(err){return handleApiError(res,err)}
+    try{return sendJson(res,200,await executeNotificationCheck({manual:false},'external'))}catch(err){return handleApiError(res,err)}
   }
 
   if (pathname === '/api/auth/login' && req.method === 'POST') {
@@ -2508,7 +2552,7 @@ async function apiRouter(req, res, url) {
 
   if (pathname === '/api/notifications/settings' && req.method === 'GET') {
     const store=readNotificationStore();
-    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:Boolean(TELEGRAM_BOT_TOKEN&&NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD&&PRESET_VK_TOKEN),workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),rules:(store.rules||[]).map(notificationRulePublic),filesystemPersistent:false});
+    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:notificationMissingEnvironment().length===0,workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),environmentPairingConfigured:Boolean(NOTIFICATION_DEFAULT_CHAT_ID&&NOTIFICATION_DEFAULT_MANAGER),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState},rules:(store.rules||[]).map(notificationRulePublic),filesystemPersistent:false});
   }
   if (pathname === '/api/notifications/settings' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
@@ -2525,7 +2569,7 @@ async function apiRouter(req, res, url) {
     if(!requireCsrf(req,res,s))return;try{const body=await readJson(req),store=readNotificationStore(),rule=findNotificationRule(store,body.manager);if(!rule?.telegramChatId)return sendJson(res,400,{ok:false,message:'Сначала подключите Telegram этого менеджера'});await sendTelegramText(rule.telegramChatId,`✅ Тест seb_gun CRM\nМенеджер: ${rule.manager}\nSLA: ${rule.slaMinutes} рабочих минут\nГрафик: ${rule.workStart}–${rule.workEnd}`);return sendJson(res,200,{ok:true})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/check-now' && req.method === 'POST') {
-    if(!requireCsrf(req,res,s))return;try{return sendJson(res,200,await runNotificationCheck({session:s,manual:true}))}catch(err){return handleApiError(res,err)}
+    if(!requireCsrf(req,res,s))return;try{return sendJson(res,200,await executeNotificationCheck({session:s,manual:true},'manual'))}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/overview' && req.method === 'GET') {
     try {
@@ -2541,7 +2585,7 @@ async function apiRouter(req, res, url) {
         workingWaitMinutes:workingMinutesUntilThreshold(Number(d.lastMessageAt||now)*1000,Date.now(),rule,rule.slaMinutes)
       })).filter(d=>d.workingWaitMinutes>=rule.slaMinutes).sort((a,b)=>b.waitMinutes-a.waitMinutes);
       const outbox=notificationOutboxRows(store,s);writeNotificationStore(store);
-      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,dialogFilter:rule.dialogFilter,filters:{managers:rule.managerFilters,statuses:rule.statuses}});
+      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:Boolean(NOTIFICATION_DEFAULT_CHAT_ID&&NOTIFICATION_DEFAULT_MANAGER),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses}});
     } catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/outbox-event' && req.method === 'POST') {
@@ -3029,6 +3073,18 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       phrase.id=phraseId();g.phrases.push(phrase);savePhraseStore(store);clearAccountCache(s.login);
       return sendJson(res,200,{ok:true,phrase,group:g.name});
     }catch(err){return handleApiError(res,err);}
+  }
+  if (pathname === '/api/admin/phrase-groups' && req.method === 'POST') {
+    if(!requireAdminSession(s,res))return;
+    if(!requireCsrf(req,res,s))return;
+    try{
+      const b=await readJson(req,128*1024),name=String(b.name||'').trim();
+      if(!name)return sendJson(res,400,{ok:false,message:'Введите название раздела'});
+      const store=phraseStore();
+      if((store.groups||[]).some(g=>String(g.name||'').trim().toLocaleLowerCase('ru-RU')===name.toLocaleLowerCase('ru-RU')))return sendJson(res,409,{ok:false,message:'Такой раздел уже существует'});
+      const group=ensurePhraseGroup(store,name);savePhraseStore(store);clearAccountCache(s.login);
+      return sendJson(res,200,{ok:true,group});
+    }catch(err){return handleApiError(res,err)}
   }
   const adminPhraseMatch=pathname.match(/^\/api\/admin\/phrases\/([^/]+)$/);
   if(adminPhraseMatch && req.method==='PUT'){

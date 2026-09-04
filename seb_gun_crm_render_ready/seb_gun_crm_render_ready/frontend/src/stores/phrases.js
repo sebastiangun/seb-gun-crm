@@ -2,6 +2,9 @@ import { defineStore } from 'pinia'
 import { api } from '../services/api'
 
 const CACHE_KEY = 'seb-gun-v28-phrases'
+function searchText(value) {
+  return String(value ?? '').normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+}
 export const usePhrasesStore = defineStore('phrases', {
   state: () => ({ groups: [], loading: false, loaded: false, query: '', lastId: localStorage.getItem('seb-gun-v28-last-phrase') || '' }),
   getters: {
@@ -9,18 +12,18 @@ export const usePhrasesStore = defineStore('phrases', {
       return state.groups.flatMap(g => (g.phrases || []).map(p => ({ ...p, groupName: g.name })))
     },
     filtered() {
-      const q = this.query.normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g, 'е').trim()
+      const q = searchText(this.query)
       if (!q) return this.groups
       const tokens = q.split(/\s+/).filter(Boolean)
       return this.groups.map(g => ({ ...g, phrases: (g.phrases || []).filter(p => {
-        const hay = `${g.name} ${p.name} ${p.text}`.normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g, 'е')
+        const hay = searchText([g.name,p.name,p.title,p.text,p.phrase,p.hotkey,...(p.managers||[]),...(p.attachments||[])].join(' '))
         return tokens.every(t => hay.includes(t))
       }) })).filter(g => g.phrases.length)
     },
   },
   actions: {
-    async load() {
-      if (this.loading || this.loaded) return
+    async load(force = false) {
+      if (this.loading || (this.loaded && !force)) return
       this.loading = true
       let hasCache = false
       try {
@@ -37,6 +40,7 @@ export const usePhrasesStore = defineStore('phrases', {
         throw err
       } finally { this.loading = false }
     },
+    invalidate() { this.loaded = false; try { localStorage.removeItem(CACHE_KEY) } catch {} },
     remember(id) { this.lastId = String(id); localStorage.setItem('seb-gun-v28-last-phrase', this.lastId) },
   },
 })

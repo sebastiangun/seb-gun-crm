@@ -1,0 +1,57 @@
+КАК ЗАГРУЗИТЬ v28.8
+====================
+
+1. Распакуйте архив.
+2. Скопируйте ВСЁ содержимое архива в корень локального репозитория:
+   C:\Users\Adm\Documents\GitHub\seb-gun-crm
+3. В GitHub Desktop должны появиться изменения, включая:
+   .github\workflows\crm-notifications.yml
+   seb_gun_crm_render_ready\seb_gun_crm_render_ready\package.json
+4. Summary: CRM v28.8 — фото, фразы и Telegram SLA
+5. Нажмите Commit to main, затем Push origin.
+
+ПЕРЕМЕННЫЕ RENDER
+=================
+
+В Render -> seb-gun-crm -> Environment должны быть:
+
+TELEGRAM_BOT_TOKEN                 новый токен BotFather
+TELEGRAM_WEBHOOK_SECRET            длинная случайная строка
+NOTIFICATION_CHECK_SECRET          другая длинная случайная строка
+BLUESALES_NOTIFICATION_LOGIN       логин BlueSales фонового менеджера
+BLUESALES_NOTIFICATION_PASSWORD    пароль BlueSales фонового менеджера
+VK_TOKEN                           токен сообщества VK
+VK_COMMUNITY                       ID сообщества VK
+PUBLIC_BASE_URL                    https://seb-gun-crm.onrender.com
+NOTIFICATION_DEFAULT_MANAGER       0.1 Сергей К.
+NOTIFICATION_DEFAULT_CHAT_ID       число, которое ответит бот на /id
+NOTIFICATION_DEFAULT_SLA_MINUTES   8
+NOTIFICATION_DEFAULT_WORK_START    10:00
+NOTIFICATION_DEFAULT_WORK_END      22:00
+NOTIFICATION_TIMEZONE              Europe/Moscow
+
+Чтобы фильтровать фоновые уведомления после перезапуска, необязательно добавьте:
+NOTIFICATION_DEFAULT_MANAGER_FILTERS   менеджеры через запятую
+NOTIFICATION_DEFAULT_STATUSES          CRM-статусы через запятую
+
+ПОДКЛЮЧЕНИЕ TELEGRAM
+====================
+
+1. После успешного деплоя отправьте боту /id.
+2. Скопируйте полученное число в Render как NOTIFICATION_DEFAULT_CHAT_ID.
+3. Сохраните Environment и дождитесь нового деплоя.
+4. Откройте CRM -> Ещё, выберите менеджера, включите уведомления и сохраните.
+5. Нажмите «Отправить тест».
+
+ВНЕШНЯЯ ПРОВЕРКА ДЛЯ БЕСПЛАТНОГО RENDER
+=======================================
+
+1. GitHub -> репозиторий seb-gun-crm -> Settings.
+2. Secrets and variables -> Actions -> New repository secret.
+3. Name: CRM_NOTIFICATION_SECRET
+4. Secret: точно то же значение, что NOTIFICATION_CHECK_SECRET в Render.
+5. GitHub -> Actions -> CRM Telegram SLA -> Run workflow.
+
+Workflow будет вызывать сервер раз в 15 минут в рабочее время 10:00–22:00 МСК. Телефон и компьютер могут быть выключены: запрос идёт из GitHub к Render, а Render отправляет сообщение через Telegram Bot API. На бесплатной схеме уведомление может прийти позже 8 минут; точный SLA требует постоянно работающего сервера.
+
+НИКОГДА не добавляйте токены и пароли в GitHub-файлы и не присылайте их в чат.

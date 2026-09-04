@@ -92,6 +92,12 @@ function submitForward(peerId){
   if(!id)return ui.toast('Это сообщение ещё не отправлено и его нельзя переслать','error')
   outbox.enqueue({peerId,peerName:`VK ${peerId}`,forwardMessageIds:[id]});forwardTarget.value=null;ui.toast('Пересылка поставлена в очередь','ok')
 }
+function outboxSent(e){
+  if(Number(e?.detail?.peerId)!==Number(chat.peerId))return
+  chat.refreshLatest()
+  setTimeout(()=>chat.refreshLatest(),1200)
+  setTimeout(()=>chat.refreshLatest(),3200)
+}
 function onPointerDown(e) {
   if (e.pointerType === 'mouse') return
   const w = window.innerWidth
@@ -114,12 +120,13 @@ watch(() => route.params.peerId, async id => { if (id) { avatarFailed.value=fals
 
 onMounted(async () => {
   window.addEventListener('resize',updateLayout,{passive:true})
+  window.addEventListener('crm:outbox-sent',outboxSent)
   drafts.init(session.loginName)
   outbox.init(session.loginName)
   await chat.open(route.params.peerId)
   scrollBottom(false)
 })
-onBeforeUnmount(() => {window.removeEventListener('resize',updateLayout);chat.close()})
+onBeforeUnmount(() => {window.removeEventListener('resize',updateLayout);window.removeEventListener('crm:outbox-sent',outboxSent);chat.close()})
 </script>
 
 <template>
