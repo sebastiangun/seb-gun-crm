@@ -3,7 +3,7 @@ const fs=require('fs'),path=require('path'),root=path.resolve(__dirname,'..');
 const read=p=>fs.readFileSync(path.join(root,p),'utf8');
 const server=read('server.js'),pkg=JSON.parse(read('package.json')),more=read('frontend/src/views/MoreView.vue'),css=read('frontend/src/assets/base.css');
 function must(value,message){if(!value)throw new Error(message)}
-must(/^28\.(6|7|8|9|10)\.0$/.test(pkg.version)&&/const VERSION = '28\.(6|7|8|9|10)'/.test(server),'version mismatch');
+must(/^28\.(6|7|8|9)\.0$/.test(pkg.version)&&/const VERSION = '28\.(6|7|8|9)'/.test(server),'version mismatch');
 must(css.includes('*::-webkit-scrollbar')&&css.includes('scrollbar-width:auto'),'global visible scrollbar missing');
 must(css.includes('overflow-x:hidden;overflow-y:auto;background:var(--bg)'),'desktop page scrolling is still blocked');
 must(server.includes('refreshTelegramBotIdentity')&&server.includes("telegramCall('getMe')")&&server.includes('activeTelegramBotUsername'),'automatic Telegram bot identity missing');

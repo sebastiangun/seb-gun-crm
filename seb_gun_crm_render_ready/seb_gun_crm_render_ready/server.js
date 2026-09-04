@@ -56,7 +56,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.10';
+const VERSION = '28.9';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -2323,13 +2323,12 @@ function writeNotificationStore(store){
 }
 function safeNotificationRule(rule={}){
   const manager=String(rule.manager||'').trim();
-  const selectedManagers=multiParamValues(Array.isArray(rule.managerFilters)?rule.managerFilters.join(','):rule.managerFilters);
   return {
     id:String(rule.id||crypto.randomUUID?.()||randomToken(8)),
     manager,
     enabled:Boolean(rule.enabled),
     dialogFilter:['unanswered','unread'].includes(String(rule.dialogFilter||rule.filter||''))?String(rule.dialogFilter||rule.filter):'unanswered',
-    managerFilters:selectedManagers.length?selectedManagers:(manager?[manager]:[]),
+    managerFilters:multiParamValues(Array.isArray(rule.managerFilters)?rule.managerFilters.join(','):(rule.managerFilters||manager)),
     statuses:multiParamValues(Array.isArray(rule.statuses)?rule.statuses.join(','):rule.statuses),
     queueAlerts:rule.queueAlerts!==false,
     slaMinutes:Math.min(Math.max(Number(rule.slaMinutes||8),1),240),
@@ -2452,7 +2451,7 @@ async function runNotificationCheck({session=null,manual=false}={}){
       const worked=workingMinutesUntilThreshold(startMs,nowMs,r,r.slaMinutes);if(worked<r.slaMinutes)continue;
       const key=`${r.id}:${d.peerId}:${since}`,prev=store.notified?.[key]||null;
       if(prev){if(!r.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<r.repeatMinutes*60000)continue}
-      const client=d.crm?.fullName||d.name||`VK ${d.peerId}`,leadManager=String(d.crm?.manager||d.crm?.managerLogin||'Не назначен'),crmStatus=String(d.crm?.crmStatus||'Не указан'),snippet=String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),text=`🔴 Просрочен ответ\n\nКлиент: ${client}\nМенеджер лида: ${leadManager}\nCRM-статус: ${crmStatus}\nПолучатель уведомления: ${r.manager}\nБез ответа: больше ${r.slaMinutes} рабочих минут\n${snippet?`\n«${snippet}»`:''}`;
+      const client=d.crm?.fullName||d.name||`VK ${d.peerId}`,snippet=String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),text=`🔴 Просрочен ответ — ${r.manager}\n\n${client}\nБез ответа: больше ${r.slaMinutes} рабочих минут\n${snippet?`\n«${snippet}»`:''}`;
       await sendTelegramText(r.telegramChatId,text,{url:notificationDialogUrl(d.peerId)});store.notified[key]={sentAt:nowMs,manager:r.manager,peerId:d.peerId,since};sent++
     }
   }
@@ -2631,7 +2630,7 @@ async function apiRouter(req, res, url) {
       const names=notificationActorNames(s);
       const rules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.queueAlerts&&r.telegramChatId&&names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
       const who=String(body.peerName||'').trim()||`VK ${Number(body.peerId||0)}`;
-      const text=`🟠 Сообщение стоит в очереди\n\nКлиент: ${who}\nМенеджер: ${row.manager||names[0]||'Не определён'}\nПричина: ${String(body.error||'сервер временно недоступен').slice(0,250)}\nCRM продолжит повторять отправку.`;
+      const text=`🟠 Сообщение стоит в очереди\n\nПолучатель: ${who}\nПричина: ${String(body.error||'сервер временно недоступен').slice(0,250)}\nCRM продолжит повторять отправку.`;
       for(const r of rules)await sendTelegramText(r.telegramChatId,text,{url:notificationDialogUrl(Number(body.peerId||0))});
       row.alerted=true;writeNotificationStore(store);
       return sendJson(res,200,{ok:true,sent:rules.length});
