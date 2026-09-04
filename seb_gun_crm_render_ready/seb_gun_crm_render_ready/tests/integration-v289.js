@@ -3,7 +3,7 @@ const fs=require('fs'),path=require('path'),root=path.join(__dirname,'..');
 const read=p=>fs.readFileSync(path.join(root,p),'utf8');
 const server=read('server.js'),pkg=JSON.parse(read('package.json')),more=read('frontend/src/views/MoreView.vue'),api=read('frontend/src/services/api.js'),env=read('.env.example'),render=read('render.yaml');
 function must(value,message){if(!value)throw new Error(message)}
-must(/^28\.(9|10|11)\.0$/.test(pkg.version)&&/const VERSION = '28\.(9|10|11)'/.test(server),'version mismatch');
+must(/^28\.(9|10)\.0$/.test(pkg.version)&&/const VERSION = '28\.(9|10)'/.test(server),'version mismatch');
 must(server.includes('NOTIFICATION_RULES_JSON')&&server.includes('notificationEnvironmentRuleInputs')&&server.includes('notificationRulesExportValue'),'multi-manager durable rule storage missing');
 must(server.includes("'/api/admin/notification-rules-export'")&&server.includes("key:'NOTIFICATION_RULES_JSON'"),'admin rules export endpoint missing');
 must(api.includes('exportNotificationRules')&&more.includes('Скопировать для Render'),'admin Render export UI missing');

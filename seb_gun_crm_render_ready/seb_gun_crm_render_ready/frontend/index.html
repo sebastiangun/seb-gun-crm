@@ -13,5 +13,9 @@
   <title>seb_gun CRM</title>
 </head>
 <body><div id="app"></div>
+  <script>
+    // v28 deliberately removes the old hand-written Service Worker. Clear legacy registrations/caches once.
+    Promise.resolve().then(async()=>{try{if('serviceWorker'in navigator){for(const r of await navigator.serviceWorker.getRegistrations())await r.unregister()}if('caches'in window){for(const k of await caches.keys())if(k.startsWith('seb-gun-')||k.startsWith('bluesales-'))await caches.delete(k)}}catch(e){console.warn('[v28 cache cleanup]',e)}})
+  </script>
   <script type="module" src="/src/main.js"></script></body>
 </html>

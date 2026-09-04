@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.11.0",
+  "version": "28.10.0",
   "private": true,
-  "description": "seb_gun CRM v28.11: browser background alerts and live case-insensitive phrase suggestions",
+  "description": "seb_gun CRM v28.10: actual lead manager in Telegram and safe own-manager filters",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -42,8 +42,7 @@
     "test:v287": "node tests/integration-v287.js",
     "test:v288": "node tests/integration-v288.js",
     "test:v289": "node tests/integration-v289.js",
-    "test:v2810": "node tests/integration-v2810.js",
-    "test:v2811": "node tests/integration-v2811.js"
+    "test:v2810": "node tests/integration-v2810.js"
   },
   "engines": {
     "node": ">=18"

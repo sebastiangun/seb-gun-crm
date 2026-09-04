@@ -4,7 +4,7 @@ const read=p=>{const file=path.join(root,p);if(!fs.existsSync(file))throw new Er
 const server=read('server.js'),pkg=JSON.parse(read('package.json')),css=read('frontend/src/assets/base.css');
 const chat=read('frontend/src/views/ChatView.vue'),bubble=read('frontend/src/components/MessageBubble.vue'),outbox=read('frontend/src/stores/outbox.js');
 const drawer=read('frontend/src/components/ClientDrawer.vue'),dialogs=read('frontend/src/views/DialogsView.vue'),nav=read('frontend/src/components/BottomNav.vue');
-if(!/const VERSION = '28\.(3|4|5|6|7|8|9|10|11)'/.test(server)||!/^28\.(3|4|5|6|7|8|9|10|11)\.0$/.test(pkg.version))throw new Error('version mismatch');
+if(!/const VERSION = '28\.(3|4|5|6|7|8|9|10)'/.test(server)||!/^28\.(3|4|5|6|7|8|9|10)\.0$/.test(pkg.version))throw new Error('version mismatch');
 if(dialogs.includes('Уже показано')||dialogs.includes('догружаю остальные'))throw new Error('noisy background loading text remains');
 if(!bubble.includes('Переслать')||!bubble.includes('Повторить отправку')||!bubble.includes('Удалить из очереди'))throw new Error('message actions missing');
 if(!outbox.includes('localStorage')||!outbox.includes("status = 'sent'")||!outbox.includes('queueAlert'))throw new Error('persistent optimistic outbox missing');
