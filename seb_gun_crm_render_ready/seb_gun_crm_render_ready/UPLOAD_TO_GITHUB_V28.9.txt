@@ -1,0 +1,38 @@
+ЗАГРУЗКА И НАСТРОЙКА v28.9
+
+1. Загрузите в репозиторий обе папки из архива:
+   - .github
+   - seb_gun_crm_render_ready
+
+2. Дождитесь успешного Deploy в Render.
+
+3. Подключите каждого менеджера:
+   - менеджер входит в CRM под своим аккаунтом;
+   - открывает «Ещё»;
+   - выбирает себя в поле «Получатель уведомлений»;
+   - проверяет, что в «Менеджеры лидов» выбран он сам;
+   - нажимает «Подключить Telegram»;
+   - в Telegram нажимает START;
+   - возвращается в CRM, включает уведомления и нажимает «Сохранить настройки».
+
+4. Когда все менеджеры подключены, администратор открывает «Ещё» и нажимает «Скопировать для Render» в блоке «Сохранить подключения всех менеджеров».
+
+5. В Render откройте сервис → Environment → Add Environment Variable:
+   Key: NOTIFICATION_RULES_JSON
+   Value: вставьте полностью скопированную JSON-строку
+   Затем сохраните изменения и дождитесь нового Deploy.
+
+6. После успешного запуска снова откройте «Ещё». Поле «Постоянных подключений» должно показывать количество правил из Render.
+
+7. Старые переменные NOTIFICATION_DEFAULT_MANAGER и NOTIFICATION_DEFAULT_CHAT_ID можно удалить после проверки NOTIFICATION_RULES_JSON. Остальные секреты (TELEGRAM_BOT_TOKEN, NOTIFICATION_CHECK_SECRET, данные BlueSales) оставьте.
+
+8. Для фоновой проверки на бесплатном Render в GitHub → Settings → Secrets and variables → Actions должны быть:
+   CRM_NOTIFICATION_URL=https://seb-gun-crm.onrender.com
+   CRM_NOTIFICATION_SECRET=то же значение, что NOTIFICATION_CHECK_SECRET в Render
+
+Безопасность
+
+- NOTIFICATION_RULES_JSON содержит Telegram chat ID и настройки фильтров. Не публикуйте его в репозитории.
+- TELEGRAM_BOT_TOKEN никогда не добавляйте в файлы проекта или GitHub. Храните его только в Render Environment.
+- Если токен когда-либо отправлялся в переписке или публиковался, отзовите его через BotFather и используйте новый.
+

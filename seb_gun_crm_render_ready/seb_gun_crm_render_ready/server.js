@@ -56,7 +56,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.8';
+const VERSION = '28.9';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -80,6 +80,7 @@ const NOTIFICATION_DEFAULT_STATUSES = String(process.env.NOTIFICATION_DEFAULT_ST
 const NOTIFICATION_DEFAULT_SLA = Math.min(Math.max(Number(process.env.NOTIFICATION_DEFAULT_SLA_MINUTES || 8),1),240);
 const NOTIFICATION_DEFAULT_WORK_START = /^\d{2}:\d{2}$/.test(String(process.env.NOTIFICATION_DEFAULT_WORK_START || '')) ? String(process.env.NOTIFICATION_DEFAULT_WORK_START) : '10:00';
 const NOTIFICATION_DEFAULT_WORK_END = /^\d{2}:\d{2}$/.test(String(process.env.NOTIFICATION_DEFAULT_WORK_END || '')) ? String(process.env.NOTIFICATION_DEFAULT_WORK_END) : '22:00';
+const NOTIFICATION_RULES_JSON = String(process.env.NOTIFICATION_RULES_JSON || '').trim();
 const APP_TIMEZONE = String(process.env.APP_TIMEZONE || process.env.NOTIFICATION_TIMEZONE || 'Europe/Moscow').trim();
 
 // v26.0: independent local speech-to-text. The source messenger only provides
@@ -2267,24 +2268,47 @@ async function adminUsersForSession(session){
 
 
 function notificationDefaultStore(){return {version:2,rules:[],pairCodes:{},notified:{},outbox:{},updatedAt:0}}
+let parsedNotificationEnvironmentRules;
+function notificationEnvironmentRuleInputs(){
+  if(parsedNotificationEnvironmentRules)return parsedNotificationEnvironmentRules;
+  const rows=[];
+  if(NOTIFICATION_RULES_JSON){
+    try{
+      const parsed=JSON.parse(NOTIFICATION_RULES_JSON),list=Array.isArray(parsed)?parsed:(Array.isArray(parsed?.rules)?parsed.rules:[]);
+      for(const raw of list){
+        const manager=String(raw?.manager||'').trim(),telegramChatId=String(raw?.telegramChatId||raw?.chatId||'').trim();
+        if(!manager||!telegramChatId)continue;
+        rows.push({...raw,manager,telegramChatId,enabled:raw.enabled!==false,dialogFilter:raw.dialogFilter||'unanswered',queueAlerts:raw.queueAlerts!==false,
+          managerFilters:Object.prototype.hasOwnProperty.call(raw,'managerFilters')?raw.managerFilters:[manager],
+          slaMinutes:raw.slaMinutes||8,workStart:raw.workStart||'10:00',workEnd:raw.workEnd||'22:00',timezone:raw.timezone||'Europe/Moscow'});
+      }
+    }catch(err){console.warn('[NOTIFICATION_RULES_JSON]',err?.message||err)}
+  }
+  if(NOTIFICATION_DEFAULT_CHAT_ID&&NOTIFICATION_DEFAULT_MANAGER&&!rows.some(r=>notificationRuleKey(r.manager)===notificationRuleKey(NOTIFICATION_DEFAULT_MANAGER))){
+    rows.push({manager:NOTIFICATION_DEFAULT_MANAGER,telegramChatId:NOTIFICATION_DEFAULT_CHAT_ID,enabled:true,dialogFilter:'unanswered',queueAlerts:true,
+      managerFilters:multiParamValues(NOTIFICATION_DEFAULT_MANAGER_FILTERS),statuses:multiParamValues(NOTIFICATION_DEFAULT_STATUSES),slaMinutes:NOTIFICATION_DEFAULT_SLA,
+      workStart:NOTIFICATION_DEFAULT_WORK_START,workEnd:NOTIFICATION_DEFAULT_WORK_END,timezone:NOTIFICATION_DEFAULT_TZ});
+  }
+  parsedNotificationEnvironmentRules=rows;
+  return rows;
+}
 function hydrateNotificationStoreFromEnvironment(input){
   const store={...notificationDefaultStore(),...(input&&typeof input==='object'?input:{})};
   store.rules=Array.isArray(store.rules)?store.rules:[];
-  if(!NOTIFICATION_DEFAULT_CHAT_ID||!NOTIFICATION_DEFAULT_MANAGER)return store;
-  const existing=findNotificationRule(store,NOTIFICATION_DEFAULT_MANAGER);
-  const envRule=safeNotificationRule({
-    ...(existing||{}),manager:NOTIFICATION_DEFAULT_MANAGER,enabled:true,
-    telegramChatId:NOTIFICATION_DEFAULT_CHAT_ID,
-    managerFilters:existing?.managerFilters?.length?existing.managerFilters:multiParamValues(NOTIFICATION_DEFAULT_MANAGER_FILTERS),
-    statuses:existing?.statuses?.length?existing.statuses:multiParamValues(NOTIFICATION_DEFAULT_STATUSES),
-    slaMinutes:existing?.slaMinutes||NOTIFICATION_DEFAULT_SLA,
-    workStart:existing?.workStart||NOTIFICATION_DEFAULT_WORK_START,
-    workEnd:existing?.workEnd||NOTIFICATION_DEFAULT_WORK_END,
-    dialogFilter:existing?.dialogFilter||'unanswered',queueAlerts:existing?.queueAlerts!==false
-  });
-  const index=store.rules.findIndex(r=>notificationRuleKey(r.manager)===notificationRuleKey(NOTIFICATION_DEFAULT_MANAGER));
-  if(index>=0)store.rules[index]=envRule;else store.rules.push(envRule);
+  for(const raw of notificationEnvironmentRuleInputs()){
+    const existing=findNotificationRule(store,raw.manager),stableId=String(raw.id||`env-${crypto.createHash('sha1').update(notificationRuleKey(raw.manager)).digest('hex').slice(0,12)}`);
+    const envRule=safeNotificationRule({...raw,...(existing||{}),id:existing?.id||stableId,manager:raw.manager,telegramChatId:existing?.telegramChatId||raw.telegramChatId});
+    const index=store.rules.findIndex(r=>notificationRuleKey(r.manager)===notificationRuleKey(raw.manager));
+    if(index>=0)store.rules[index]=envRule;else store.rules.push(envRule);
+  }
   return store;
+}
+function notificationEnvironmentRuleCount(){return notificationEnvironmentRuleInputs().length}
+function notificationRulesExportValue(store){
+  return JSON.stringify((store.rules||[]).map(safeNotificationRule).filter(r=>r.manager&&r.telegramChatId).map(r=>({
+    id:r.id,manager:r.manager,enabled:r.enabled,dialogFilter:r.dialogFilter,managerFilters:r.managerFilters,statuses:r.statuses,queueAlerts:r.queueAlerts,
+    slaMinutes:r.slaMinutes,workStart:r.workStart,workEnd:r.workEnd,timezone:r.timezone,repeatMinutes:r.repeatMinutes,telegramChatId:r.telegramChatId
+  })));
 }
 function readNotificationStore(){
   try{
@@ -2327,6 +2351,7 @@ function upsertNotificationRule(store,input={}){
   const idx=(store.rules||[]).findIndex(r=>notificationRuleKey(r.manager)===notificationRuleKey(manager));if(idx>=0)store.rules[idx]=next;else store.rules.push(next);return next
 }
 function notificationActorNames(session){return [session?.currentUser?.name,session?.currentUser?.login,session?.login].map(x=>String(x||'').trim()).filter(Boolean)}
+function canManageNotificationManager(session,manager){return isAdminSession(session)||notificationActorNames(session).some(n=>notificationRuleKey(n)===notificationRuleKey(manager))}
 function notificationOutboxKey(value=''){return String(value||'').replace(/[^A-Za-z0-9:_-]/g,'').slice(0,160)}
 function upsertNotificationOutbox(store,input={},session){
   store.outbox=store.outbox&&typeof store.outbox==='object'?store.outbox:{};
@@ -2461,7 +2486,7 @@ async function handleTelegramWebhook(req,res){
   if(TELEGRAM_WEBHOOK_SECRET&&String(req.headers['x-telegram-bot-api-secret-token']||'')!==TELEGRAM_WEBHOOK_SECRET)return sendJson(res,403,{ok:false});
   const update=await readJson(req),msg=update?.message;if(!msg?.chat?.id)return sendJson(res,200,{ok:true});
   const text=String(msg.text||'').trim(),chatId=String(msg.chat.id),store=readNotificationStore();
-  if(/^\/id(?:\s|$)/i.test(text)){await sendTelegramText(chatId,`Ваш Telegram chat ID: ${chatId}\n\nДобавьте его в Render Environment как NOTIFICATION_DEFAULT_CHAT_ID, чтобы подключение сохранялось после перезапуска бесплатного сервера.`);return sendJson(res,200,{ok:true})}
+  if(/^\/id(?:\s|$)/i.test(text)){await sendTelegramText(chatId,`Ваш Telegram chat ID: ${chatId}\n\nОбычно достаточно подключиться кнопкой в CRM. После подключения всех менеджеров администратор сохранит их в Render через NOTIFICATION_RULES_JSON.`);return sendJson(res,200,{ok:true})}
   const m=text.match(/^\/start(?:\s+([A-Za-z0-9_-]+))?/i);
   if(m){const code=String(m[1]||'');const pair=store.pairCodes?.[code];if(pair&&Number(pair.expiresAt||0)>Date.now()){
       const rule=findNotificationRule(store,pair.manager)||upsertNotificationRule(store,{manager:pair.manager,enabled:false});rule.telegramChatId=chatId;rule.telegramUsername=String(msg.from?.username||'');rule.telegramFirstName=String(msg.from?.first_name||'');delete store.pairCodes[code];writeNotificationStore(store);await sendTelegramText(chatId,`✅ seb_gun CRM подключена.\nМенеджер: ${rule.manager}\nУведомления: ${rule.enabled?'включены':'пока выключены'}`);return sendJson(res,200,{ok:true})
@@ -2552,21 +2577,27 @@ async function apiRouter(req, res, url) {
 
   if (pathname === '/api/notifications/settings' && req.method === 'GET') {
     const store=readNotificationStore();
-    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:notificationMissingEnvironment().length===0,workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),environmentPairingConfigured:Boolean(NOTIFICATION_DEFAULT_CHAT_ID&&NOTIFICATION_DEFAULT_MANAGER),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState},rules:(store.rules||[]).map(notificationRulePublic),filesystemPersistent:false});
+    const visibleRules=(store.rules||[]).filter(r=>canManageNotificationManager(s,r.manager));
+    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:notificationMissingEnvironment().length===0,workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState},rules:visibleRules.map(notificationRulePublic),filesystemPersistent:false});
   }
   if (pathname === '/api/notifications/settings' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
-    try{const body=await readJson(req),store=readNotificationStore(),rule=upsertNotificationRule(store,body);writeNotificationStore(store);return sendJson(res,200,{ok:true,rule:notificationRulePublic(rule)})}catch(err){return handleApiError(res,err)}
+    try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно настроить только свой Telegram'});const store=readNotificationStore(),rule=upsertNotificationRule(store,body);writeNotificationStore(store);return sendJson(res,200,{ok:true,rule:notificationRulePublic(rule)})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/pair' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
-    try{if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'В Render → Environment добавьте секрет TELEGRAM_BOT_TOKEN и дождитесь перезапуска сервиса'});await refreshTelegramBotIdentity();const body=await readJson(req),manager=String(body.manager||'').trim();if(!manager)return sendJson(res,400,{ok:false,message:'Выберите менеджера'});const store=readNotificationStore();upsertNotificationRule(store,{manager,...(findNotificationRule(store,manager)||{})});const code=randomToken(12);store.pairCodes=store.pairCodes||{};store.pairCodes[code]={manager,expiresAt:Date.now()+15*60*1000};writeNotificationStore(store);return sendJson(res,200,{ok:true,botUsername:activeTelegramBotUsername,pairUrl:`https://t.me/${activeTelegramBotUsername}?start=${code}`,expiresMinutes:15})}catch(err){return handleApiError(res,err)}
+    try{if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'В Render → Environment добавьте секрет TELEGRAM_BOT_TOKEN и дождитесь перезапуска сервиса'});await refreshTelegramBotIdentity();const body=await readJson(req),manager=String(body.manager||'').trim();if(!manager)return sendJson(res,400,{ok:false,message:'Выберите менеджера'});if(!canManageNotificationManager(s,manager))return sendJson(res,403,{ok:false,message:'Можно подключить только свой Telegram'});const store=readNotificationStore();upsertNotificationRule(store,{manager,...(findNotificationRule(store,manager)||{})});const code=randomToken(12);store.pairCodes=store.pairCodes||{};store.pairCodes[code]={manager,expiresAt:Date.now()+15*60*1000};writeNotificationStore(store);return sendJson(res,200,{ok:true,botUsername:activeTelegramBotUsername,pairUrl:`https://t.me/${activeTelegramBotUsername}?start=${code}`,expiresMinutes:15})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/unpair' && req.method === 'POST') {
-    if(!requireCsrf(req,res,s))return;const body=await readJson(req),store=readNotificationStore(),rule=findNotificationRule(store,body.manager);if(rule){rule.telegramChatId='';rule.telegramUsername='';rule.telegramFirstName='';writeNotificationStore(store)}return sendJson(res,200,{ok:true})
+    if(!requireCsrf(req,res,s))return;const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно отключить только свой Telegram'});const store=readNotificationStore(),rule=findNotificationRule(store,body.manager);if(rule){rule.telegramChatId='';rule.telegramUsername='';rule.telegramFirstName='';writeNotificationStore(store)}return sendJson(res,200,{ok:true})
   }
   if (pathname === '/api/notifications/test' && req.method === 'POST') {
-    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req),store=readNotificationStore(),rule=findNotificationRule(store,body.manager);if(!rule?.telegramChatId)return sendJson(res,400,{ok:false,message:'Сначала подключите Telegram этого менеджера'});await sendTelegramText(rule.telegramChatId,`✅ Тест seb_gun CRM\nМенеджер: ${rule.manager}\nSLA: ${rule.slaMinutes} рабочих минут\nГрафик: ${rule.workStart}–${rule.workEnd}`);return sendJson(res,200,{ok:true})}catch(err){return handleApiError(res,err)}
+    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно проверить только свой Telegram'});const store=readNotificationStore(),rule=findNotificationRule(store,body.manager);if(!rule?.telegramChatId)return sendJson(res,400,{ok:false,message:'Сначала подключите Telegram этого менеджера'});await sendTelegramText(rule.telegramChatId,`✅ Тест seb_gun CRM\nМенеджер: ${rule.manager}\nSLA: ${rule.slaMinutes} рабочих минут\nГрафик: ${rule.workStart}–${rule.workEnd}`);return sendJson(res,200,{ok:true})}catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/admin/notification-rules-export' && req.method === 'GET') {
+    if(!requireAdminSession(s,res))return;
+    const store=readNotificationStore(),connected=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager&&r.telegramChatId);
+    return sendJson(res,200,{ok:true,key:'NOTIFICATION_RULES_JSON',value:notificationRulesExportValue(store),count:connected.length});
   }
   if (pathname === '/api/notifications/check-now' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;try{return sendJson(res,200,await executeNotificationCheck({session:s,manual:true},'manual'))}catch(err){return handleApiError(res,err)}
@@ -2585,7 +2616,7 @@ async function apiRouter(req, res, url) {
         workingWaitMinutes:workingMinutesUntilThreshold(Number(d.lastMessageAt||now)*1000,Date.now(),rule,rule.slaMinutes)
       })).filter(d=>d.workingWaitMinutes>=rule.slaMinutes).sort((a,b)=>b.waitMinutes-a.waitMinutes);
       const outbox=notificationOutboxRows(store,s);writeNotificationStore(store);
-      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:Boolean(NOTIFICATION_DEFAULT_CHAT_ID&&NOTIFICATION_DEFAULT_MANAGER),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses}});
+      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses}});
     } catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/outbox-event' && req.method === 'POST') {

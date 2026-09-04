@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
 
-    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install && npm run build && npm run check:runtime && npm run test:v283 && npm run test:v284 && npm run test:v285 && npm run test:v286 && npm run test:v287 && npm run test:v288
+    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install && npm run build && npm run check:runtime && npm run test:v283 && npm run test:v284 && npm run test:v285 && npm run test:v286 && npm run test:v287 && npm run test:v288 && npm run test:v289
     startCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm start
 
     healthCheckPath: /api/health
@@ -68,6 +68,10 @@ services:
         sync: false
       - key: BLUESALES_NOTIFICATION_PASSWORD
         sync: false
+      # v28.9: all per-manager Telegram chat IDs and individual filters in one JSON array.
+      - key: NOTIFICATION_RULES_JSON
+        sync: false
+      # Legacy one-manager fallback; optional when NOTIFICATION_RULES_JSON is configured.
       - key: NOTIFICATION_DEFAULT_CHAT_ID
         sync: false
       - key: NOTIFICATION_DEFAULT_MANAGER

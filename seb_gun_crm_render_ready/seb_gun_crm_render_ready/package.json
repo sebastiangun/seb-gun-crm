@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.8.0",
+  "version": "28.9.0",
   "private": true,
-  "description": "seb_gun CRM v28.8: live media preview, phrase sections/search, durable Telegram SLA",
+  "description": "seb_gun CRM v28.9: individual durable Telegram notifications for every manager",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -40,7 +40,8 @@
     "test:v285": "node tests/integration-v285.js",
     "test:v286": "node tests/integration-v286.js",
     "test:v287": "node tests/integration-v287.js",
-    "test:v288": "node tests/integration-v288.js"
+    "test:v288": "node tests/integration-v288.js",
+    "test:v289": "node tests/integration-v289.js"
   },
   "engines": {
     "node": ">=18"

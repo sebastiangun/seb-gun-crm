@@ -122,6 +122,7 @@ export const api = {
   testTelegram: (manager) => request('/api/notifications/test', { method: 'POST', body: { manager } }),
   checkNotifications: () => request('/api/notifications/check-now', { method: 'POST', body: '{}', timeout: 65000 }),
   notificationOverview: () => request('/api/notifications/overview', { timeout: 60000, dedupe: false }),
+  exportNotificationRules: () => request('/api/admin/notification-rules-export', { timeout: 15000, dedupe: false }),
   adminOverview: () => request('/api/admin/overview', { timeout: 60000, dedupe: false }),
   adminUsers: () => request('/api/admin/users', { timeout: 60000, dedupe: false }),
   updateAdminUser: (key, payload) => request(`/api/admin/users/${encodeURIComponent(key)}`, { method: 'PUT', body: payload, timeout: 45000 }),
