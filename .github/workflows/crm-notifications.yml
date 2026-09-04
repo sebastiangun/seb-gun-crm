@@ -19,9 +19,11 @@ jobs:
       - name: Wake CRM and check notifications
         env:
           CHECK_SECRET: ${{ secrets.CRM_NOTIFICATION_SECRET }}
+          CRM_BASE_URL: ${{ secrets.CRM_NOTIFICATION_URL }}
         run: |
           test -n "$CHECK_SECRET"
+          test -n "$CRM_BASE_URL"
           curl --fail --silent --show-error --max-time 150 --retry 2 --retry-delay 8 \
             --request POST \
             --header "Authorization: Bearer $CHECK_SECRET" \
-            https://seb-gun-crm.onrender.com/api/notifications/check
+            "${CRM_BASE_URL%/}/api/notifications/check"

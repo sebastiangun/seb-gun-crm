@@ -8,13 +8,16 @@ import BottomNav from './components/BottomNav.vue'
 import { rememberListRoute } from './utils/navigation'
 import { useOutboxStore } from './stores/outbox'
 import MoscowClock from './components/MoscowClock.vue'
+import { useBrowserNotificationsStore } from './stores/browserNotifications'
 
 const session = useSessionStore()
 const ui = useUiStore()
 const router = useRouter()
 const route = useRoute()
 const outbox = useOutboxStore()
+const browserNotifications = useBrowserNotificationsStore()
 watch(() => route.fullPath, () => rememberListRoute(route), { immediate: true })
+watch(() => session.authenticated, value => value ? browserNotifications.start() : browserNotifications.stop())
 
 async function authExpired() {
   ui.toast('Сессия BlueSales завершилась. Войдите снова.', 'error', 5000)
@@ -25,10 +28,10 @@ async function authExpired() {
 onMounted(async () => {
   window.addEventListener('crm:auth-expired', authExpired)
   await session.bootstrap()
-  if(session.authenticated)outbox.init(session.loginName)
+  if(session.authenticated){outbox.init(session.loginName);browserNotifications.start()}
   if (session.authenticated && route.path === '/') router.replace('/dialogs')
 })
-onBeforeUnmount(() => window.removeEventListener('crm:auth-expired', authExpired))
+onBeforeUnmount(() => {window.removeEventListener('crm:auth-expired', authExpired);browserNotifications.stop()})
 </script>
 
 <template>
