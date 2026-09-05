@@ -7,7 +7,7 @@ const items = [
   ['/dialogs', '💬', 'Диалоги'],
   ['/clients', '👥', 'Клиенты'],
   ['/reminders', '⏰', 'Напоминания'],
-  ['/notifications', '📋', 'Лиды'],
+  ['/notifications', '🔔', 'Уведомления'],
   ['/more', '☰', 'Ещё'],
 ]
 </script>

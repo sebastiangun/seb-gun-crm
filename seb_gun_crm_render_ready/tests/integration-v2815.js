@@ -3,9 +3,9 @@ const fs=require('fs'),path=require('path'),root=path.join(__dirname,'..');
 const read=p=>fs.readFileSync(path.join(root,p),'utf8');
 const pkg=require('../package.json'),server=read('server.js'),notifications=read('frontend/src/views/NotificationsView.vue'),admin=read('frontend/src/views/AdminView.vue'),render=read('render.yaml');
 function must(value,message){if(!value)throw new Error(message)}
-must(/^28\.(15|16)\.0$/.test(pkg.version)&&/const VERSION = '28\.(15|16)'/.test(server),'version mismatch');
-must(server.includes('findCustomerByVkEverywhere')&&server.includes("bsCall(session, 'customers.add', createPayload)"),'safe BlueSales create path missing');
-must(!server.includes("addMany-object"),'duplicate-producing create fallbacks remain');
+must(pkg.version==='28.15.0'&&server.includes("const VERSION = '28.15'"),'version mismatch');
+must(server.includes('findCustomerByVkEverywhere')&&server.includes("bsCall(session, 'customers.addMany', [createPayload])"),'safe BlueSales create path missing');
+must(!server.includes("command:'customers.add'")&&!server.includes("addMany-object"),'duplicate-producing create fallbacks remain');
 must(server.includes('pendingCustomerCreates')&&server.includes("'CREATE_PENDING'"),'ambiguous create deduplication missing');
 must(server.includes('ingestNotificationJournalMessages')&&server.includes('syncRecentLeadJournal'),'full VK lead-history ingestion missing');
 must(server.includes('responseText')&&server.includes('responseAuthor')&&server.includes('managerHistory'),'response or manager history missing');
