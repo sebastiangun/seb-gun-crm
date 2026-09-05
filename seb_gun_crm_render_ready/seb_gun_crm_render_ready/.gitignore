@@ -13,7 +13,9 @@ data/ui-sync/*.json
 models/*.bin
 models/*.part
 
-# v28 generated Vue build
-public/
+# v28 generated Vue build (only the repository-root build output).
+# Do not ignore frontend/public: it contains the source PWA assets that Vite
+# must copy into the production build, including the v28.11 service worker.
+/public/
 frontend/node_modules/
 frontend/package-lock.json
