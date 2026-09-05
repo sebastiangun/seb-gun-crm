@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.13.0",
+  "version": "28.14.0",
   "private": true,
-  "description": "seb_gun CRM v28.13: working-hours SLA journal with deferred overnight countdown",
+  "description": "seb_gun CRM v28.14: resilient BlueSales client creation and rich VK quick-phrase attachments",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -31,7 +31,7 @@
     "test:v269": "node tests/integration-v269.js",
     "test:v270": "node tests/integration-v270.js",
     "build": "vite build --config frontend/vite.config.js",
-    "check:runtime": "node --check server.js && node --check lib/bluesales-web.js && node --check lib/google-speech-stt.mjs && node --check lib/local-transformers-stt.mjs && node --check lib/transformers-stt-worker.mjs",
+    "check:runtime": "node --check server.js && node --check lib/bluesales-web.js && node --check lib/vk-phrase-attachments.js && node --check lib/google-speech-stt.mjs && node --check lib/local-transformers-stt.mjs && node --check lib/transformers-stt-worker.mjs",
     "test:v280": "node tests/integration-v280.js",
     "test:v281": "node tests/integration-v281.js",
     "test:v282": "node tests/integration-v282.js",
@@ -45,7 +45,8 @@
     "test:v2810": "node tests/integration-v2810.js",
     "test:v2811": "node tests/integration-v2811.js",
     "test:v2812": "node tests/integration-v2812.js",
-    "test:v2813": "node tests/integration-v2813.js"
+    "test:v2813": "node tests/integration-v2813.js",
+    "test:v2814": "node tests/integration-v2814.js"
   },
   "engines": {
     "node": ">=18"

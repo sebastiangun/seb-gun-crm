@@ -12,6 +12,7 @@ const execFileAsync = promisify(execFile);
 const { URL } = require('url');
 const BlueSalesWeb = require('./lib/bluesales-web');
 const WorkingSla = require('./lib/working-sla');
+const VkPhraseAttachments = require('./lib/vk-phrase-attachments');
 
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
@@ -57,7 +58,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.13';
+const VERSION = '28.14';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -2022,8 +2023,14 @@ async function uploadVkMedia(session, { peerId, type, filename, mimeType, dataBa
 async function createCustomerFromDraft(session, draft) {
   const vkId = Number(draft?.vkId || 0);
   if (vkId > 0) {
-    const existing = await getCustomerByVkId(session, vkId);
-    if (existing?.id) return { created:false, client:existing };
+    try {
+      const existing = await getCustomerByVkId(session, vkId);
+      if (existing?.id) return { created:false, client:existing };
+    } catch (lookupErr) {
+      // A temporary read failure must not disable the create action. Every write
+      // attempt below is followed by a delayed VK-id lookup before another write.
+      console.warn('[BlueSales create] initial duplicate check is temporarily unavailable:', lookupErr?.message || lookupErr);
+    }
   }
 
   const fullName = String(draft?.fullName || '').trim() || (vkId ? `VK ${vkId}` : 'Новый клиент');
@@ -2034,57 +2041,55 @@ async function createCustomerFromDraft(session, draft) {
   const createPayload = { fullName };
   if (vkId > 0) createPayload.vk = { id:String(vkId) };
 
-  let raw = null;
-  let createError = null;
-  try {
-    raw = await bsCall(session, 'customers.add', createPayload);
-  } catch (err) {
-    createError = err;
-    // BlueSales can commit the write and still answer with its HTML error page.
-    // Always check by VK id before retrying to avoid duplicate clients.
-    if (vkId > 0) {
+  const candidateFrom = value => {
+    const rows = arrayFromResponse(value, ['customers','Customers','items','result']);
+    const candidate = rows[0] || value?.customer || value?.Customer || value;
+    const normalized = normalizeCustomer(candidate || {});
+    return normalized?.id ? normalized : null;
+  };
+  const findCommitted = async (delays=[0,300,850,1700]) => {
+    if (!(vkId > 0)) return null;
+    for (const delay of delays) {
+      if (delay) await sleep(delay);
       try {
         clearAccountCache(session.login);
         const committed = await getCustomerByVkId(session, vkId);
-        if (committed?.id) return { created:true, client:committed, recoveredFromUpstreamError:true };
+        if (committed?.id) return committed;
       } catch {}
     }
-    if (!['BAD_RESPONSE','HTTP','API'].includes(String(err?.code || ''))) throw err;
-
-    console.warn('[BlueSales customers.add] non-JSON/API failure; trying customers.addMany compatibility fallback');
+    return null;
+  };
+  const recoverableCodes = new Set(['BAD_RESPONSE','HTTP','API','API_BUSY','QUEUE_BUSY','TIMEOUT']);
+  const attempts = [
+    { command:'customers.add', payload:createPayload, label:'add' },
+    { command:'customers.addMany', payload:[createPayload], label:'addMany-array' },
+    // Some BlueSales installations accept the batch operation only in an object.
+    { command:'customers.addMany', payload:{customers:[createPayload]}, label:'addMany-object' }
+  ];
+  const failures = [];
+  let raw = null;
+  let client = null;
+  let recoveredFromUpstreamError = false;
+  for (const attempt of attempts) {
     try {
-      raw = await bsCall(session, 'customers.addMany', [createPayload]);
-      createError = null;
-    } catch (batchErr) {
-      if (vkId > 0) {
-        try {
-          clearAccountCache(session.login);
-          const committed = await getCustomerByVkId(session, vkId);
-          if (committed?.id) return { created:true, client:committed, recoveredFromUpstreamError:true };
-        } catch {}
-      }
-      const details = {
-        add: createError?.details || createError?.message || null,
-        addMany: batchErr?.details || batchErr?.message || null
-      };
-      throw new BlueSalesError(
-        'BlueSales не смог создать карточку через customers.add и customers.addMany. Сервер BlueSales вернул внутреннюю ошибку; повторите через несколько секунд.',
-        batchErr?.code || createError?.code || 'API',
-        details
-      );
+      raw = await bsCall(session, attempt.command, attempt.payload);
+      client = candidateFrom(raw);
+      if (client?.id) break;
+    } catch (err) {
+      failures.push({method:attempt.label,code:String(err?.code||'API'),details:err?.details||err?.message||null});
+      if (!recoverableCodes.has(String(err?.code || ''))) throw err;
     }
+    // A proxy 502 or malformed HTML response can arrive after BlueSales has
+    // committed the record. Wait for its read model before trying another write.
+    client = await findCommitted();
+    if (client?.id) { recoveredFromUpstreamError = failures.length > 0; break; }
   }
 
   clearAccountCache(session.login);
-  let client = null;
-  if (vkId > 0) {
+  if (!client && vkId > 0) {
     try { client = await getCustomerByVkId(session, vkId); } catch {}
   }
-  if (!client) {
-    const candidate = Array.isArray(raw) ? raw[0] : raw?.customer || raw?.Customer || raw;
-    const normalized = normalizeCustomer(candidate || createPayload);
-    if (normalized?.id) client = normalized;
-  }
+  if (!client) client = candidateFrom(raw);
 
   // Apply the optional fields only after creation. A failure here must not make the
   // UI think that the whole create operation failed when the customer already exists.
@@ -2118,9 +2123,13 @@ async function createCustomerFromDraft(session, draft) {
     }
   }
   if (!client?.id) {
-    throw new BlueSalesError('BlueSales принял запрос на создание, но не вернул ID клиента и карточка не находится по VK ID.', 'BAD_RESPONSE', raw);
+    throw new BlueSalesError(
+      'BlueSales не подтвердил создание карточки. Повторите через несколько секунд: приложение проверит VK ID и не создаст дубль.',
+      failures.at(-1)?.code || 'BAD_RESPONSE',
+      {attempts:failures,response:raw}
+    );
   }
-  return { created:true, client };
+  return { created:true, client, recoveredFromUpstreamError };
 }
 
 
@@ -2194,18 +2203,14 @@ function savePhraseStore(store){
 }
 function phraseId(){return 'p-'+crypto.randomBytes(7).toString('hex');}
 function groupId(name){return 'g-'+crypto.createHash('sha1').update(String(name||'Без раздела')).digest('hex').slice(0,10);}
-function cleanPhraseInput(b){
+function cleanPhraseInput(b, existingAttachments=[]){
   const rawText=String(b?.text||'').replace(/\r\n/g,'\n');
-  const attachmentRe=/\[((?:photo|video|doc|audio_message)-?\d+_\d+(?:_[A-Za-z0-9]+)?)\]/gi;
-  const fromText=[];
-  let m;
-  while((m=attachmentRe.exec(rawText))) fromText.push(m[1]);
-  const fromField=(Array.isArray(b?.attachments)?b.attachments:[]).map(x=>String(x||'').trim());
-  const attachments=[...new Set([...fromField,...fromText].filter(x=>/^(?:photo|video|doc|audio_message)-?\d+_\d+(?:_[A-Za-z0-9]+)?$/i.test(x)))];
-  // BlueSales stores VK attachments alongside the phrase. If an admin pastes
-  // [photo...], [video...], [audio_message...] or [doc...] back into the text,
-  // keep it as a real attachment instead of showing the service token to the client.
-  const text=rawText.replace(attachmentRe,'').replace(/\n{3,}/g,'\n\n').trim();
+  const fromText=VkPhraseAttachments.attachmentsFromPhrase(rawText);
+  const supplied=Object.prototype.hasOwnProperty.call(b||{},'attachments');
+  const source=supplied?(Array.isArray(b?.attachments)?b.attachments:[]):existingAttachments;
+  const fromField=source.flatMap(x=>VkPhraseAttachments.extractAttachments(x));
+  const attachments=[...new Set([...fromField,...fromText])];
+  const text=VkPhraseAttachments.cleanPhraseText(rawText);
   return {
     name:String(b?.name||'').trim(),
     text,
@@ -3165,7 +3170,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
     try{
       const id=decodeURIComponent(adminPhraseMatch[1]),b=await readJson(req,2*1024*1024),store=phraseStore(),found=findPhrase(store,id);
       if(!found)return sendJson(res,404,{ok:false,message:'Фраза не найдена'});
-      const phrase={...cleanPhraseInput(b),id};
+      const phrase={...cleanPhraseInput(b,found.phrase.attachments||[]),id};
       if(!phrase.name)return sendJson(res,400,{ok:false,message:'Введите название фразы'});
       // v24.5: normal editing NEVER changes the section or position.
       // Moving is a separate explicit action through /move.

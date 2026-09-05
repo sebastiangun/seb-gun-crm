@@ -102,7 +102,7 @@ export const api = {
   clients: (params = {}) => request(`/api/clients?${query(params)}`, { timeout: 45000 }),
   client: (id, fresh = false) => request(`/api/clients/${encodeURIComponent(id)}${fresh ? '?fresh=1' : ''}`, { timeout: 35000, dedupe: false }),
   updateClient: (id, payload) => request(`/api/clients/${encodeURIComponent(id)}`, { method: 'PUT', body: payload, timeout: 45000 }),
-  createClientFromVk: (peerId, payload = {}) => request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/create-client`, { method: 'POST', body: payload, timeout: 50000 }),
+  createClientFromVk: (peerId, payload = {}) => request(`/api/vk/dialogs/${encodeURIComponent(peerId)}/create-client`, { method: 'POST', body: payload, timeout: 75000 }),
   reminders: (params = {}) => request(`/api/reminders?${query(params)}`, { timeout: 60000, dedupe: false }),
   deleteReminder: (id) => request(`/api/reminders/${encodeURIComponent(id)}`, { method: 'DELETE', body: '{}', timeout: 40000 }),
   services: (params = {}) => request(`/api/services?${query(params)}`, { timeout: 25000 }),
