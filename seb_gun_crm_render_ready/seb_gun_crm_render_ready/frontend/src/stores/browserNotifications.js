@@ -48,7 +48,7 @@ export const useBrowserNotificationsStore=defineStore('browserNotifications',{
       try{
         const data=await api.notificationOverview(),seen=readSeen(),now=Date.now(),cutoff=now-14*24*60*60*1000
         for(const [key,at] of Object.entries(seen))if(Number(at)<cutoff)delete seen[key]
-        for(const row of data.dialogs||[]){
+        for(const row of (data.dialogs||[]).filter(item=>item.status!=='answered')){
           const key=rowKey(row);if(seen[key]&&!force)continue
           const manager=row.manager||'Менеджер не назначен',status=row.crmStatus?` · ${row.crmStatus}`:''
           await this.show(`Нужно ответить: ${row.name}`,`Менеджер лида: ${manager}${status}\nБез ответа: ${row.workingWaitMinutes||row.waitMinutes||0} рабочих минут\n${row.snippet||'Входящее сообщение'}`,{tag:`crm-unanswered-${row.peerId}-${row.since||0}`,url:`/#/dialogs/${row.peerId}`})

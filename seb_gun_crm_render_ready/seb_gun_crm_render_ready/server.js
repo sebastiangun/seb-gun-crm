@@ -56,7 +56,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.11';
+const VERSION = '28.12';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -2267,7 +2267,7 @@ async function adminUsersForSession(session){
 }
 
 
-function notificationDefaultStore(){return {version:2,rules:[],pairCodes:{},notified:{},outbox:{},updatedAt:0}}
+function notificationDefaultStore(){return {version:3,rules:[],pairCodes:{},notified:{},outbox:{},journal:{},deletedJournal:{},updatedAt:0}}
 let parsedNotificationEnvironmentRules;
 function notificationEnvironmentRuleInputs(){
   if(parsedNotificationEnvironmentRules)return parsedNotificationEnvironmentRules;
@@ -2295,6 +2295,8 @@ function notificationEnvironmentRuleInputs(){
 function hydrateNotificationStoreFromEnvironment(input){
   const store={...notificationDefaultStore(),...(input&&typeof input==='object'?input:{})};
   store.rules=Array.isArray(store.rules)?store.rules:[];
+  store.journal=store.journal&&typeof store.journal==='object'&&!Array.isArray(store.journal)?store.journal:{};
+  store.deletedJournal=store.deletedJournal&&typeof store.deletedJournal==='object'&&!Array.isArray(store.deletedJournal)?store.deletedJournal:{};
   for(const raw of notificationEnvironmentRuleInputs()){
     const existing=findNotificationRule(store,raw.manager),stableId=String(raw.id||`env-${crypto.createHash('sha1').update(notificationRuleKey(raw.manager)).digest('hex').slice(0,12)}`);
     const envRule=safeNotificationRule({...raw,...(existing||{}),id:existing?.id||stableId,manager:raw.manager,telegramChatId:existing?.telegramChatId||raw.telegramChatId});
@@ -2365,6 +2367,40 @@ function notificationOutboxRows(store,session){
   const names=notificationActorNames(session).map(notificationRuleKey),cutoff=Date.now()-7*24*60*60*1000;store.outbox=store.outbox&&typeof store.outbox==='object'?store.outbox:{};
   for(const[k,row]of Object.entries(store.outbox))if(Number(row?.updatedAt||0)<cutoff||row?.status==='removed'||(row?.status==='sent'&&Date.now()-Number(row.updatedAt||0)>60*60*1000))delete store.outbox[k];
   return Object.values(store.outbox).filter(row=>['queued','sending','error'].includes(row.status)&&(!names.length||names.includes(notificationRuleKey(row.manager)))).sort((a,b)=>Number(a.createdAt||0)-Number(b.createdAt||0))
+}
+function notificationJournalId(peerId,since){return `lead-${Math.trunc(Number(peerId||0))}-${Math.trunc(Number(since||0))}`}
+function notificationJournalUpsert(store,input={}){
+  store.journal=store.journal&&typeof store.journal==='object'?store.journal:{};
+  store.deletedJournal=store.deletedJournal&&typeof store.deletedJournal==='object'?store.deletedJournal:{};
+  const peerId=Math.trunc(Number(input.peerId||0)),receivedAt=Math.trunc(Number(input.receivedAt||input.since||0));
+  if(!peerId||!receivedAt)return null;
+  const id=notificationJournalId(peerId,receivedAt);if(store.deletedJournal[id])return null;
+  const current=store.journal[id]||{};
+  const row={...current,id,peerId,receivedAt,name:String(input.name||current.name||`VK ${peerId}`).slice(0,180),manager:String(input.manager||current.manager||'').slice(0,180),crmStatus:String(input.crmStatus||current.crmStatus||'').slice(0,180),snippet:String(input.snippet||current.snippet||'').trim().replace(/\s+/g,' ').slice(0,240),status:current.status==='answered'?'answered':'waiting',recordedAt:Number(current.recordedAt||Date.now()),updatedAt:Date.now(),answeredAt:Number(current.answeredAt||0)};
+  store.journal[id]=row;return row
+}
+function notificationJournalRows(store,{rule=null,admin=false}={}){
+  store.journal=store.journal&&typeof store.journal==='object'?store.journal:{};
+  const rows=Object.values(store.journal).filter(row=>admin||(!rule||(customerMatchesManager({manager:row.manager},(rule.managerFilters||[]).join(','))&&customerMatchesStatus({crmStatus:row.crmStatus},(rule.statuses||[]).join(',')))));
+  return rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0))
+}
+async function firstOutgoingReplyAfter(session,peerId,receivedAt){
+  const params={peer_id:Number(peerId),count:200,offset:0,extended:0};if(session.vkGroupId)params.group_id=session.vkGroupId;
+  const raw=await vkCall(session.vkToken,'messages.getHistory',params),items=Array.isArray(raw?.items)?raw.items:[];
+  let repliedAt=0;for(const message of items){const at=Number(message?.date||0);if(Number(message?.out||0)!==1||at<=Number(receivedAt||0))continue;if(!repliedAt||at<repliedAt)repliedAt=at}
+  return repliedAt
+}
+async function resolveNotificationJournalReplies(store,session,activeIds=new Set(),limit=20){
+  const pending=notificationJournalRows(store,{admin:true}).filter(row=>row.status==='waiting'&&!activeIds.has(row.id)).slice(0,Math.max(0,limit));
+  for(const row of pending){try{const answeredAt=await firstOutgoingReplyAfter(session,row.peerId,row.receivedAt);if(answeredAt){row.status='answered';row.answeredAt=answeredAt;row.updatedAt=Date.now()}}catch(err){console.warn('[notification journal reply]',row.peerId,err?.message||err)}}
+  return pending.length
+}
+function deleteNotificationJournalRow(store,id){
+  store.journal=store.journal&&typeof store.journal==='object'?store.journal:{};store.deletedJournal=store.deletedJournal&&typeof store.deletedJournal==='object'?store.deletedJournal:{};
+  if(!store.journal[id])return false;delete store.journal[id];store.deletedJournal[id]=Date.now();return true
+}
+function markNotificationJournalAnswered(store,peerId,answeredAt=Math.floor(Date.now()/1000)){
+  let changed=0;for(const row of notificationJournalRows(store,{admin:true})){if(Number(row.peerId)!==Number(peerId)||row.status==='answered'||Number(answeredAt)<=Number(row.receivedAt||0))continue;row.status='answered';row.answeredAt=Number(answeredAt);row.updatedAt=Date.now();changed++}return changed
 }
 async function telegramCall(method,payload={}){
   if(!TELEGRAM_BOT_TOKEN)throw Object.assign(new Error('TELEGRAM_BOT_TOKEN не настроен'),{status:503,code:'TELEGRAM_NOT_CONFIGURED'});
@@ -2443,19 +2479,21 @@ async function runNotificationCheck({session=null,manual=false}={}){
   const nowMs=Date.now(),activeRules=rules.filter(r=>notificationWorkingNow(nowMs,r));if(!activeRules.length)return {ok:true,checked:0,sent:0,outsideWorkingHours:true};
   const filters=[...new Set(activeRules.map(r=>r.dialogFilter))],dialogs=[];
   for(const filter of filters){const rows=await loadDialogsForNotifications(s,{filter});for(const row of rows)dialogs.push({...row,notificationFilter:filter})}
-  const relevant=dialogs.filter(d=>activeRules.some(r=>r.dialogFilter===d.notificationFilter&&customerMatchesManager(d.crm||{},(r.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(','))));let sent=0,checked=0;
+  const relevant=dialogs.filter(d=>activeRules.some(r=>r.dialogFilter===d.notificationFilter&&customerMatchesManager(d.crm||{},(r.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(','))));let sent=0,checked=0;const activeJournalIds=new Set();
   for(const d of relevant){
     const matching=activeRules.filter(r=>r.dialogFilter===d.notificationFilter&&customerMatchesManager(d.crm||{},(r.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(',')));if(!matching.length)continue;
     let since=0;try{since=await unansweredSinceForPeer(s,d.peerId)}catch(err){console.warn('[notifications history]',d.peerId,err?.message||err);continue}if(!since)continue;checked++;
     const startMs=since*1000;
     for(const r of matching){
       const worked=workingMinutesUntilThreshold(startMs,nowMs,r,r.slaMinutes);if(worked<r.slaMinutes)continue;
+      const journalRow=notificationJournalUpsert(store,{peerId:d.peerId,receivedAt:since,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',snippet:d.lastMessage||''});if(journalRow)activeJournalIds.add(journalRow.id);
       const key=`${r.id}:${d.peerId}:${since}`,prev=store.notified?.[key]||null;
       if(prev){if(!r.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<r.repeatMinutes*60000)continue}
       const client=d.crm?.fullName||d.name||`VK ${d.peerId}`,leadManager=String(d.crm?.manager||d.crm?.managerLogin||'Не назначен'),crmStatus=String(d.crm?.crmStatus||'Не указан'),snippet=String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),text=`🔴 Просрочен ответ\n\nКлиент: ${client}\nМенеджер лида: ${leadManager}\nCRM-статус: ${crmStatus}\nПолучатель уведомления: ${r.manager}\nБез ответа: больше ${r.slaMinutes} рабочих минут\n${snippet?`\n«${snippet}»`:''}`;
       await sendTelegramText(r.telegramChatId,text,{url:notificationDialogUrl(d.peerId)});store.notified[key]={sentAt:nowMs,manager:r.manager,peerId:d.peerId,since};sent++
     }
   }
+  await resolveNotificationJournalReplies(store,s,activeJournalIds,20);
   // Keep the small JSON store bounded on Render's ephemeral filesystem.
   const cutoff=nowMs-14*24*60*60*1000;for(const[k,v]of Object.entries(store.notified||{}))if(Number(v?.sentAt||0)<cutoff)delete store.notified[k];writeNotificationStore(store);
   return {ok:true,checked,sent,dialogs:dialogs.length,manual}
@@ -2609,16 +2647,27 @@ async function apiRouter(req, res, url) {
       const rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered'});
       const dialogs=await loadDialogsForNotifications(s,{maxPages:5,filter:rule.dialogFilter});
       const now=Math.floor(Date.now()/1000);
-      const rows=dialogs.filter(d=>!d.lastMessageOut&&customerMatchesManager(d.crm||{},(rule.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(rule.statuses||[]).join(','))).map(d=>({
+      const activeRows=dialogs.filter(d=>!d.lastMessageOut&&customerMatchesManager(d.crm||{},(rule.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(rule.statuses||[]).join(','))).map(d=>({
         peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,
         manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',
         snippet:String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),
         since:Number(d.lastMessageAt||0),waitMinutes:Math.max(0,Math.floor((now-Number(d.lastMessageAt||now))/60)),
         workingWaitMinutes:workingMinutesUntilThreshold(Number(d.lastMessageAt||now)*1000,Date.now(),rule,rule.slaMinutes)
       })).filter(d=>d.workingWaitMinutes>=rule.slaMinutes).sort((a,b)=>b.waitMinutes-a.waitMinutes);
+      const activeJournalIds=new Set();for(const row of activeRows){const savedRow=notificationJournalUpsert(store,{...row,receivedAt:row.since});if(savedRow)activeJournalIds.add(savedRow.id)}
+      await resolveNotificationJournalReplies(store,s,activeJournalIds,20);
+      const rows=notificationJournalRows(store,{rule}).map(row=>({...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0}));
       const outbox=notificationOutboxRows(store,s);writeNotificationStore(store);
       return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses}});
     } catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/admin/notification-journal' && req.method === 'GET') {
+    if(!requireAdminSession(s,res))return;const store=readNotificationStore();return sendJson(res,200,{ok:true,rows:notificationJournalRows(store,{admin:true})});
+  }
+  const adminNotificationJournalMatch=pathname.match(/^\/api\/admin\/notification-journal\/([^/]+)$/);
+  if(adminNotificationJournalMatch&&req.method==='DELETE'){
+    if(!requireAdminSession(s,res))return;if(!requireCsrf(req,res,s))return;
+    const id=decodeURIComponent(adminNotificationJournalMatch[1]),store=readNotificationStore();if(!deleteNotificationJournalRow(store,id))return sendJson(res,404,{ok:false,message:'Запись уведомления не найдена'});writeNotificationStore(store);return sendJson(res,200,{ok:true,id});
   }
   if (pathname === '/api/notifications/outbox-event' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
@@ -2887,6 +2936,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       try{
         const result=await sendPromise;
         recentMessageSends.set(dedupeKey,{result,expiresAt:Date.now()+dedupeTtl});
+        const notificationStore=readNotificationStore();if(markNotificationJournalAnswered(notificationStore,peerId))writeNotificationStore(notificationStore);
         return sendJson(res,200,result);
       }catch(err){recentMessageSends.delete(dedupeKey);throw err}
     } catch (err) { return handleApiError(res, err); }

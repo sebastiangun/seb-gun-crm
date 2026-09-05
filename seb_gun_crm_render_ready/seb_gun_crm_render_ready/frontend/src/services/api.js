@@ -134,6 +134,8 @@ export const api = {
   deleteAdminPhrase: id => request(`/api/admin/phrases/${encodeURIComponent(id)}`, { method: 'DELETE', body: '{}', timeout: 45000 }),
   adminStatuses: () => request('/api/admin/statuses', { timeout: 30000, dedupe: false }),
   updateAdminStatus: (name, color) => request(`/api/admin/statuses/${encodeURIComponent(name)}`, { method: 'PUT', body: { color }, timeout: 30000 }),
+  adminNotificationJournal: () => request('/api/admin/notification-journal', { timeout: 30000, dedupe: false }),
+  deleteAdminNotificationJournal: id => request(`/api/admin/notification-journal/${encodeURIComponent(id)}`, { method: 'DELETE', body: '{}', timeout: 30000 }),
   outboxEvent: payload => request('/api/notifications/outbox-event', { method: 'POST', body: payload, timeout: 15000 }),
   queueAlert: payload => request('/api/notifications/queue-alert', { method: 'POST', body: payload, timeout: 20000 }),
   // The server retries VK CDN and returns a valid placeholder image on a stale
