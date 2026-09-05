@@ -51,7 +51,7 @@
     "db:migrate": "node scripts/database.js migrate",
     "db:import": "node scripts/database.js import",
     "db:status": "node scripts/database.js status",
-    "test:database": "node tests/postgres-storage.js && node tests/create-safety.js"
+    "test:database": "node tests/postgres-storage.js && node tests/create-safety.js && node tests/phrase-source.js"
   },
   "engines": {
     "node": ">=18"

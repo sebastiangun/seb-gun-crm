@@ -40,7 +40,7 @@ function loadLocalEnv(file) {
 loadLocalEnv(path.join(ROOT, '.env.local'));
 const { Storage } = require('./lib/postgres-storage');
 const storage = new Storage(ROOT);
-function readStoredJson(file) { if(storage.enabled)return storage.readDocument(file);return readStoredJson(file); }
+function readStoredJson(file) { if(storage.enabled)return storage.readDocument(file);return JSON.parse(fs.readFileSync(file,'utf8')); }
 
 const PORT = Number(process.env.PORT || 9050);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -3683,6 +3683,9 @@ const server = http.createServer(async (req, res) => {
 async function startServer(){
 if(storage.enabled&&String(process.env.SESSION_SECRET||'').length<32)throw new Error('SESSION_SECRET must contain at least 32 characters');
 await storage.init();
+await storage.applyPhraseUpdate();
+if(storage.enabled)await storage.refreshDocuments();
+console.log(storage.enabled?'[storage] PostgreSQL подключён; таблицы готовы':'[storage] JSON — PostgreSQL НЕ подключён. Проверьте DATABASE_URL и REQUIRE_DATABASE.');
 server.listen(PORT, HOST, () => {
   console.log('');
   console.log(`seb_gun CRM + VK DIRECT v${VERSION}`);

@@ -40,6 +40,23 @@ class Storage {
   async transaction(fn) {
     const c=await this.pool.connect();try{await c.query('BEGIN');const result=await fn(c);await c.query('COMMIT');return result;}catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
   }
+  async applyPhraseUpdate(){
+    if(!this.enabled)return;
+    const file=path.join(this.root,'data/phrase-update.json');if(!fs.existsSync(file))return;
+    const patch=JSON.parse(fs.readFileSync(file,'utf8'));const marker='phrase-update:'+patch.release;
+    await this.transaction(async c=>{
+      await c.query('SELECT pg_advisory_xact_lock(hashtext($1))',['document:quick_phrases.json']);
+      if((await c.query('SELECT id FROM crm_migrations WHERE id=$1',[marker])).rowCount)return;
+      const found=await c.query("SELECT payload FROM app_documents WHERE key='quick_phrases.json' FOR UPDATE");
+      const doc=found.rows[0]?.payload||{version:4,groups:[]};
+      for(const incoming of patch.groups){let group=doc.groups.find(g=>g.id===incoming.id||g.name===incoming.name);if(!group){group={...incoming,phrases:[]};doc.groups.push(group);}
+        for(const phrase of incoming.phrases){let index=group.phrases.findIndex(p=>p.id===phrase.id);if(index<0&&incoming.phrases.filter(p=>p.name===phrase.name).length===1&&group.phrases.filter(p=>p.name===phrase.name).length===1)index=group.phrases.findIndex(p=>p.name===phrase.name);if(index<0)group.phrases.push(phrase);else group.phrases[index]={...phrase,id:group.phrases[index].id};}
+      }
+      doc.updatedAt=new Date().toISOString();doc.source=patch.release;
+      await c.query("INSERT INTO app_documents(key,payload) VALUES('quick_phrases.json',$1) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,updated_at=now()",[JSON.stringify(doc)]);
+      await c.query('INSERT INTO crm_migrations(id) VALUES($1)',[marker]);
+    });
+  }
   async refreshDocuments(){const {rows}=await this.pool.query('SELECT key,payload FROM app_documents');this.documents=new Map(rows.map(x=>[x.key,x.payload]));return new Map(this.documents);}
   async run(fn){if(!this.enabled)return fn();const docs=await this.refreshDocuments();return this.context.run(docs,fn);}
   readDocument(file){const key=path.relative(path.join(this.root,'data'),file).split(path.sep).join('/');const docs=this.context.getStore()||this.documents;return clone(docs.get(key));}

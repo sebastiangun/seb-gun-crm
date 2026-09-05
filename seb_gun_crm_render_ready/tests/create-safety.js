@@ -1,6 +1,10 @@
 'use strict';
 const assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'../server.js'),'utf8');
+const readFunction=source.match(/function readStoredJson\(file\) \{[^\n]+/)[0];
+const readContext={fs,storage:{enabled:false}};vm.createContext(readContext);vm.runInContext(readFunction,readContext);
+assert.equal(readContext.readStoredJson(path.join(__dirname,'../package.json')).name,'seb-gun-crm-vk');
+readContext.storage={enabled:true,readDocument:()=>({fromDatabase:true})};assert.equal(readContext.readStoredJson('unused').fromDatabase,true);
 const fn=source.slice(source.indexOf('async function createCustomerFromDraft('),source.indexOf('// v22.0: local mirror')).split('// -----------------------------------------------------------------------------')[0];
 class BlueSalesError extends Error{constructor(message,code){super(message);this.code=code;}}
 function scenario({lookupFails=false,timeout=false}={}){
