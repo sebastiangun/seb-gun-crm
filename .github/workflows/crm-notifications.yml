@@ -1,0 +1,29 @@
+name: CRM Telegram SLA
+
+on:
+  schedule:
+    # 10:00–22:00 Moscow (UTC+3), once per 15 minutes.
+    - cron: "*/15 7-18 * * *"
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: crm-telegram-sla
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wake CRM and check notifications
+        env:
+          CHECK_SECRET: ${{ secrets.CRM_NOTIFICATION_SECRET }}
+          CRM_BASE_URL: ${{ secrets.CRM_NOTIFICATION_URL }}
+        run: |
+          test -n "$CHECK_SECRET"
+          test -n "$CRM_BASE_URL"
+          curl --fail --silent --show-error --max-time 150 --retry 2 --retry-delay 8 \
+            --request POST \
+            --header "Authorization: Bearer $CHECK_SECRET" \
+            "${CRM_BASE_URL%/}/api/notifications/check"
