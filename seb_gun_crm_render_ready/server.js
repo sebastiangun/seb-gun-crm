@@ -58,7 +58,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.15';
+const VERSION = '28.16';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -2055,12 +2055,19 @@ async function createCustomerFromDraft(session, draft) {
   }
 
   const fullName = String(draft?.fullName || '').trim() || (vkId ? `VK ${vkId}` : 'Новый клиент');
-  // Keep the create call intentionally small. BlueSales' customers.add endpoint can
-  // return its generic HTML error page when optional fields don't match an
-  // installation's model. Additional CRM fields are applied with customers.update
-  // after the client has a stable BlueSales ID.
+  // A single customer must be created through customers.add. Send the ownership
+  // and funnel status in the same mutation so the card is correct immediately.
   const createPayload = { fullName };
-  if (vkId > 0) createPayload.vk = { id:String(vkId) };
+  if (vkId > 0) createPayload.vk = { id:String(vkId),name:String(draft?.vkName||'') };
+  if(draft?.phone)createPayload.phone=String(draft.phone);
+  if(draft?.email)createPayload.email=String(draft.email);
+  if(draft?.city)createPayload.city={name:String(draft.city)};
+  if(draft?.crmStatus)createPayload.crmStatus={name:String(draft.crmStatus)};
+  if(draft?.managerLogin)createPayload.manager={login:String(draft.managerLogin)};
+  if(draft?.firstContactDate)createPayload.firstContactDate=String(draft.firstContactDate);
+  if(draft?.nextContactDate)createPayload.nextContactDate=String(draft.nextContactDate);
+  if(draft?.shortNotes)createPayload.shortNotes=String(draft.shortNotes);
+  if(draft?.comments)createPayload.comments=String(draft.comments);
 
   const candidateFrom = value => {
     const rows = arrayFromResponse(value, ['customers','Customers','items','result']);
@@ -2091,10 +2098,10 @@ async function createCustomerFromDraft(session, draft) {
   try {
     // One mutation per click. Multiple fallback writes caused duplicates when
     // BlueSales committed a card but returned an HTML/502 response.
-    raw = await bsCall(session, 'customers.addMany', [createPayload]);
+    raw = await bsCall(session, 'customers.add', createPayload);
     client = candidateFrom(raw);
   } catch (err) {
-    failures.push({method:'addMany-array',code:String(err?.code||'API'),details:err?.details||err?.message||null});
+    failures.push({method:'customers.add',code:String(err?.code||'API'),details:err?.details||err?.message||null});
   }
   const lastFailureCode=String(failures.at(-1)?.code||'');
   const ambiguousCreate=!failures.length||['BAD_RESPONSE','HTTP','API_BUSY','QUEUE_BUSY','TIMEOUT','NETWORK'].includes(lastFailureCode);
@@ -2290,7 +2297,18 @@ async function adminUsersForSession(session){
 }
 
 
-function notificationDefaultStore(){return {version:3,rules:[],pairCodes:{},notified:{},outbox:{},journal:{},deletedJournal:{},updatedAt:0}}
+function defaultSlaSettings(){return {workDays:[1,2,3,4,5],workStart:'10:00',workEnd:'22:00',notifyMinutes:8,violationMinutes:20,timezone:'Europe/Moscow',notifyWeb:true,notifyTelegram:true,violationAction:'journal',managerSchedules:{}}}
+function safeWorkDays(value,fallback=[1,2,3,4,5]){const rows=[...new Set((Array.isArray(value)?value:fallback).map(Number).filter(x=>Number.isInteger(x)&&x>=0&&x<=6))].sort((a,b)=>a-b);return rows.length?rows:[...fallback]}
+function safeSlaSettings(value={}){
+  const base=defaultSlaSettings(),managerSchedules={};
+  for(const [key,raw] of Object.entries(value?.managerSchedules&&typeof value.managerSchedules==='object'?value.managerSchedules:{}))managerSchedules[String(key)]={enabled:raw?.enabled!==false,workDays:safeWorkDays(raw?.workDays,base.workDays),workStart:/^\d{2}:\d{2}$/.test(String(raw?.workStart||''))?String(raw.workStart):base.workStart,workEnd:/^\d{2}:\d{2}$/.test(String(raw?.workEnd||''))?String(raw.workEnd):base.workEnd};
+  return {workDays:safeWorkDays(value?.workDays,base.workDays),workStart:/^\d{2}:\d{2}$/.test(String(value?.workStart||''))?String(value.workStart):base.workStart,workEnd:/^\d{2}:\d{2}$/.test(String(value?.workEnd||''))?String(value.workEnd):base.workEnd,notifyMinutes:Math.min(Math.max(Number(value?.notifyMinutes||8),1),240),violationMinutes:Math.min(Math.max(Number(value?.violationMinutes||20),1),1440),timezone:String(value?.timezone||base.timezone),notifyWeb:value?.notifyWeb!==false,notifyTelegram:value?.notifyTelegram!==false,violationAction:['journal','journal_and_admin'].includes(String(value?.violationAction||''))?String(value.violationAction):base.violationAction,managerSchedules};
+}
+function effectiveSlaRule(store,rule={},manager=''){
+  const settings=safeSlaSettings(store?.sla),schedule=settings.managerSchedules[String(manager)]||null;
+  return {...rule,slaMinutes:settings.notifyMinutes,violationMinutes:Math.max(settings.notifyMinutes,settings.violationMinutes),workDays:schedule?.enabled!==false&&schedule? schedule.workDays:settings.workDays,workStart:schedule?.enabled!==false&&schedule?schedule.workStart:settings.workStart,workEnd:schedule?.enabled!==false&&schedule?schedule.workEnd:settings.workEnd,timezone:settings.timezone,notifyWeb:settings.notifyWeb,notifyTelegram:settings.notifyTelegram};
+}
+function notificationDefaultStore(){return {version:4,sla:defaultSlaSettings(),rules:[],pairCodes:{},notified:{},outbox:{},journal:{},deletedJournal:{},clientHistory:{},updatedAt:0}}
 let parsedNotificationEnvironmentRules;
 function notificationEnvironmentRuleInputs(){
   if(parsedNotificationEnvironmentRules)return parsedNotificationEnvironmentRules;
@@ -2320,6 +2338,8 @@ function hydrateNotificationStoreFromEnvironment(input){
   store.rules=Array.isArray(store.rules)?store.rules:[];
   store.journal=store.journal&&typeof store.journal==='object'&&!Array.isArray(store.journal)?store.journal:{};
   store.deletedJournal=store.deletedJournal&&typeof store.deletedJournal==='object'&&!Array.isArray(store.deletedJournal)?store.deletedJournal:{};
+  store.clientHistory=store.clientHistory&&typeof store.clientHistory==='object'&&!Array.isArray(store.clientHistory)?store.clientHistory:{};
+  store.sla=safeSlaSettings(store.sla);
   for(const raw of notificationEnvironmentRuleInputs()){
     const existing=findNotificationRule(store,raw.manager),stableId=String(raw.id||`env-${crypto.createHash('sha1').update(notificationRuleKey(raw.manager)).digest('hex').slice(0,12)}`);
     const envRule=safeNotificationRule({...raw,...(existing||{}),id:existing?.id||stableId,manager:raw.manager,telegramChatId:existing?.telegramChatId||raw.telegramChatId});
@@ -2392,6 +2412,10 @@ function notificationOutboxRows(store,session){
   return Object.values(store.outbox).filter(row=>['queued','sending','error'].includes(row.status)&&(!names.length||names.includes(notificationRuleKey(row.manager)))).sort((a,b)=>Number(a.createdAt||0)-Number(b.createdAt||0))
 }
 function notificationJournalId(peerId,since){return `lead-${Math.trunc(Number(peerId||0))}-${Math.trunc(Number(since||0))}`}
+function appendClientHistory(store,clientId,event={}){
+  const key=String(clientId||event.peerId||'');if(!key)return null;store.clientHistory=store.clientHistory&&typeof store.clientHistory==='object'?store.clientHistory:{};const rows=Array.isArray(store.clientHistory[key])?store.clientHistory[key]:[];
+  const row={id:String(event.id||crypto.randomUUID?.()||randomToken(10)),type:String(event.type||'note'),at:Number(event.at||Date.now()),actor:String(event.actor||''),peerId:Number(event.peerId||0),clientId:String(clientId||''),text:String(event.text||'').slice(0,2000),from:String(event.from||''),to:String(event.to||''),meta:event.meta&&typeof event.meta==='object'?event.meta:{}};rows.push(row);store.clientHistory[key]=rows.slice(-500);return row
+}
 function notificationJournalUpsert(store,input={}){
   store.journal=store.journal&&typeof store.journal==='object'?store.journal:{};
   store.deletedJournal=store.deletedJournal&&typeof store.deletedJournal==='object'?store.deletedJournal:{};
@@ -2410,7 +2434,7 @@ function notificationJournalUpsert(store,input={}){
   const incomingTexts=[...(Array.isArray(current.incomingTexts)?current.incomingTexts:[])];
   for(const value of (Array.isArray(input.incomingTexts)?input.incomingTexts:[])){const text=String(value||'').trim();if(text&&!incomingTexts.includes(text))incomingTexts.push(text.slice(0,1000))}
   const answeredAt=Number(input.answeredAt||current.answeredAt||0);
-  const row={...current,id,peerId,receivedAt,name:String(input.name||current.name||`VK ${peerId}`).slice(0,180),manager:manager||previousManager,managerAtReceipt:String(current.managerAtReceipt??input.managerAtReceipt??manager??''),currentManager:manager||previousManager,managerHistory,crmStatus:crmStatus||previousStatus,statusAtReceipt:String(current.statusAtReceipt??input.statusAtReceipt??crmStatus??''),currentCrmStatus:crmStatus||previousStatus,statusHistory,incomingTexts,snippet:String(input.snippet||current.snippet||incomingTexts.join(' · ')).trim().replace(/\s+/g,' ').slice(0,500),status:(current.status==='answered'||answeredAt)?'answered':'waiting',recordedAt:Number(current.recordedAt||Date.now()),updatedAt:Date.now(),answeredAt,responseText:String(input.responseText??current.responseText??'').trim().slice(0,2000),responseAuthor:String(input.responseAuthor??current.responseAuthor??'').trim().slice(0,180),responseMessageId:String(input.responseMessageId??current.responseMessageId??''),responseStartAt:Number(input.responseStartAt||current.responseStartAt||receivedAt),dueAt:Number(input.dueAt||current.dueAt||0),outsideHoursAtReceipt:Boolean(input.outsideHoursAtReceipt??current.outsideHoursAtReceipt),slaMinutes:Number(input.slaMinutes||current.slaMinutes||8),workStart:String(input.workStart||current.workStart||'10:00'),workEnd:String(input.workEnd||current.workEnd||'22:00'),timezone:String(input.timezone||current.timezone||'Europe/Moscow')};
+  const row={...current,id,peerId,clientId:String(input.clientId??current.clientId??''),receivedAt,name:String(input.name||current.name||`VK ${peerId}`).slice(0,180),manager:manager||previousManager,managerAtReceipt:String(current.managerAtReceipt??input.managerAtReceipt??manager??''),currentManager:manager||previousManager,managerHistory,crmStatus:crmStatus||previousStatus,statusAtReceipt:String(current.statusAtReceipt??input.statusAtReceipt??crmStatus??''),currentCrmStatus:crmStatus||previousStatus,statusHistory,incomingTexts,snippet:String(input.snippet||current.snippet||incomingTexts.join(' · ')).trim().replace(/\s+/g,' ').slice(0,500),status:(current.status==='answered'||answeredAt)?'answered':'waiting',recordedAt:Number(current.recordedAt||Date.now()),updatedAt:Date.now(),answeredAt,responseText:String(input.responseText??current.responseText??'').trim().slice(0,2000),responseAuthor:String(input.responseAuthor??current.responseAuthor??'').trim().slice(0,180),responseMessageId:String(input.responseMessageId??current.responseMessageId??''),responseStartAt:Number(input.responseStartAt||current.responseStartAt||receivedAt),dueAt:Number(input.dueAt||current.dueAt||0),violationDueAt:Number(input.violationDueAt||current.violationDueAt||0),outsideHoursAtReceipt:Boolean(input.outsideHoursAtReceipt??current.outsideHoursAtReceipt),slaMinutes:Number(input.slaMinutes||current.slaMinutes||8),violationMinutes:Number(input.violationMinutes||current.violationMinutes||20),workDays:safeWorkDays(input.workDays||current.workDays,[1,2,3,4,5]),workStart:String(input.workStart||current.workStart||'10:00'),workEnd:String(input.workEnd||current.workEnd||'22:00'),timezone:String(input.timezone||current.timezone||'Europe/Moscow')};
   store.journal[id]=row;return row
 }
 function notificationJournalRows(store,{rule=null,admin=false}={}){
@@ -2421,12 +2445,12 @@ function notificationJournalRows(store,{rule=null,admin=false}={}){
 async function firstOutgoingReplyAfter(session,peerId,receivedAt){
   const params={peer_id:Number(peerId),count:200,offset:0,extended:0};if(session.vkGroupId)params.group_id=session.vkGroupId;
   const raw=await vkCall(session.vkToken,'messages.getHistory',params),items=Array.isArray(raw?.items)?raw.items:[];
-  let repliedAt=0;for(const message of items){const at=Number(message?.date||0);if(Number(message?.out||0)!==1||at<=Number(receivedAt||0))continue;if(!repliedAt||at<repliedAt)repliedAt=at}
-  return repliedAt
+  let reply=null;for(const message of items){const at=Number(message?.date||0);if(Number(message?.out||0)!==1||at<=Number(receivedAt||0))continue;if(!reply||at<reply.answeredAt)reply={answeredAt:at,responseText:journalMessageText(message),responseMessageId:String(message?.id||message?.conversation_message_id||'')}}
+  return reply
 }
 async function resolveNotificationJournalReplies(store,session,activeIds=new Set(),limit=20){
   const pending=notificationJournalRows(store,{admin:true}).filter(row=>row.status==='waiting'&&!activeIds.has(row.id)).slice(0,Math.max(0,limit));
-  for(const row of pending){try{const answeredAt=await firstOutgoingReplyAfter(session,row.peerId,row.receivedAt);if(answeredAt){row.status='answered';row.answeredAt=answeredAt;row.updatedAt=Date.now()}}catch(err){console.warn('[notification journal reply]',row.peerId,err?.message||err)}}
+  for(const row of pending){try{const reply=await firstOutgoingReplyAfter(session,row.peerId,row.receivedAt);if(reply?.answeredAt){row.status='answered';row.answeredAt=reply.answeredAt;row.responseText=String(reply.responseText||row.responseText||'').slice(0,2000);row.responseAuthor=String(row.currentManager||row.manager||row.responseAuthor||'Менеджер').slice(0,180);row.responseMessageId=String(reply.responseMessageId||row.responseMessageId||'');row.updatedAt=Date.now()}}catch(err){console.warn('[notification journal reply]',row.peerId,err?.message||err)}}
   return pending.length
 }
 function deleteNotificationJournalRow(store,id){
@@ -2441,13 +2465,13 @@ function journalMessageText(message){
   const text=String(message?.text||'').trim(),attachments=(message?.attachments||[]).map(a=>`[${a?.title||a?.type||'Вложение'}]`);
   return [text,...attachments].filter(Boolean).join(' ').trim()||'[Сообщение без текста]';
 }
-function ingestNotificationJournalMessages(store,{peerId,name,manager='',crmStatus='',messages=[],rule={}}={}){
+function ingestNotificationJournalMessages(store,{peerId,clientId='',name,manager='',crmStatus='',messages=[],rule={}}={}){
   const ordered=[...(messages||[])].filter(m=>Number(m?.date||0)>0).sort((a,b)=>Number(a.date)-Number(b.date)||Number(a.id||0)-Number(b.id||0));
   let open=null,changed=0;
   for(const message of ordered){
     if(!message.out){
       if(!open){
-        const window=WorkingSla.responseWindow(Number(message.date)*1000,rule),row=notificationJournalUpsert(store,{peerId,receivedAt:Number(message.date),name,manager,crmStatus,incomingTexts:[journalMessageText(message)],snippet:journalMessageText(message),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone});
+        const window=WorkingSla.responseWindow(Number(message.date)*1000,rule),violationDueAt=WorkingSla.workingDeadline(Number(message.date)*1000,rule,rule.violationMinutes||20),row=notificationJournalUpsert(store,{peerId,clientId,receivedAt:Number(message.date),name,manager,crmStatus,incomingTexts:[journalMessageText(message)],snippet:journalMessageText(message),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),violationDueAt:Math.floor(violationDueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,slaMinutes:rule.slaMinutes,violationMinutes:rule.violationMinutes||20,workDays:rule.workDays,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone});
         if(row){open=row;changed++}
       }else{
         open=notificationJournalUpsert(store,{...open,manager,crmStatus,incomingTexts:[journalMessageText(message)],snippet:[...(open.incomingTexts||[]),journalMessageText(message)].join(' · ')});changed++;
@@ -2463,7 +2487,7 @@ async function syncRecentLeadJournal(session,store,dialogs,rule,{limit=40}={}){
   const selected=(dialogs||[]).filter(d=>Number(d.peerId)>0&&Number(d.peerId)<2000000000).slice(0,Math.max(1,Number(limit)||40));let synced=0;
   for(let i=0;i<selected.length;i+=5){
     const batch=selected.slice(i,i+5);
-    const counts=await Promise.all(batch.map(async d=>{try{const params={peer_id:Number(d.peerId),count:100,offset:0,extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;const raw=await vkCall(session.vkToken,'messages.getHistory',params),maps=vkIdentityMaps(raw||{}),messages=(raw?.items||[]).map(m=>normalizeVkMessage(m,maps));return ingestNotificationJournalMessages(store,{peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule})}catch(err){console.warn('[lead journal sync]',d.peerId,err?.message||err);return 0}}));
+    const counts=await Promise.all(batch.map(async d=>{try{const params={peer_id:Number(d.peerId),count:100,offset:0,extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;const raw=await vkCall(session.vkToken,'messages.getHistory',params),maps=vkIdentityMaps(raw||{}),messages=(raw?.items||[]).map(m=>normalizeVkMessage(m,maps)),manager=d.crm?.manager||d.crm?.managerLogin||'',leadRule=effectiveSlaRule(store,rule,manager);return ingestNotificationJournalMessages(store,{peerId:d.peerId,clientId:d.crm?.clientId||'',name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager,crmStatus:d.crm?.crmStatus||'',messages,rule:leadRule})}catch(err){console.warn('[lead journal sync]',d.peerId,err?.message||err);return 0}}));
     synced+=counts.reduce((n,x)=>n+x,0);if(i+5<selected.length)await sleep(180);
   }
   return synced;
@@ -2530,7 +2554,7 @@ function notificationDialogUrl(peerId){const base=PUBLIC_BASE_URL||'';return bas
 async function runNotificationCheck({session=null,manual=false}={}){
   const store=readNotificationStore(),configuredRules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager),fallbackRule=safeNotificationRule({manager:'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered',workStart:'10:00',workEnd:'22:00',timezone:'Europe/Moscow'});
   const s=session||notificationServiceSession();if(!s)throw Object.assign(new Error('Для фоновой проверки задайте BLUESALES_NOTIFICATION_LOGIN и BLUESALES_NOTIFICATION_PASSWORD в Render'),{status:503,code:'NOTIFICATION_CREDENTIALS'});
-  const nowMs=Date.now(),activeRules=configuredRules.filter(r=>notificationWorkingNow(nowMs,r)),fallbackActive=notificationWorkingNow(nowMs,fallbackRule);if(!activeRules.length&&!fallbackActive)return {ok:true,checked:0,sent:0,outsideWorkingHours:true};
+  const nowMs=Date.now(),activeRules=configuredRules,fallbackActive=true;
   const filters=[...new Set([...activeRules.map(r=>r.dialogFilter),fallbackRule.dialogFilter])],dialogs=[];
   for(const filter of filters){const rows=await loadDialogsForNotifications(s,{filter});for(const row of rows)dialogs.push({...row,notificationFilter:filter})}
   let sent=0,checked=0;const activeJournalIds=new Set();
@@ -2538,14 +2562,14 @@ async function runNotificationCheck({session=null,manual=false}={}){
     const configuredMatching=activeRules.filter(r=>r.dialogFilter===d.notificationFilter&&customerMatchesManager(d.crm||{},(r.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(','))),matching=configuredMatching.length?configuredMatching:(fallbackActive&&fallbackRule.dialogFilter===d.notificationFilter?[fallbackRule]:[]);if(!matching.length)continue;
     let since=0;try{since=await unansweredSinceForPeer(s,d.peerId)}catch(err){console.warn('[notifications history]',d.peerId,err?.message||err);continue}if(!since)continue;checked++;
     const startMs=since*1000;
-    for(const r of matching){
-      const worked=workingMinutesUntilThreshold(startMs,nowMs,r,r.slaMinutes);if(worked<r.slaMinutes)continue;
-      const responseWindow=WorkingSla.responseWindow(startMs,r),journalRow=notificationJournalUpsert(store,{peerId:d.peerId,receivedAt:since,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',snippet:d.lastMessage||'',responseStartAt:Math.floor(responseWindow.responseStartAt/1000),dueAt:Math.floor(responseWindow.dueAt/1000),outsideHoursAtReceipt:responseWindow.outsideHoursAtReceipt,slaMinutes:r.slaMinutes,workStart:r.workStart,workEnd:r.workEnd,timezone:r.timezone});if(journalRow)activeJournalIds.add(journalRow.id);
-      if(!r.enabled||!r.telegramChatId)continue;
-      const key=`${r.id}:${d.peerId}:${since}`,prev=store.notified?.[key]||null;
-      if(prev){if(!r.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<r.repeatMinutes*60000)continue}
-      const client=d.crm?.fullName||d.name||`VK ${d.peerId}`,leadManager=String(d.crm?.manager||d.crm?.managerLogin||'Не назначен'),crmStatus=String(d.crm?.crmStatus||'Не указан'),snippet=String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),text=`🔴 Просрочен ответ\n\nКлиент: ${client}\nМенеджер лида: ${leadManager}\nCRM-статус: ${crmStatus}\nПолучатель уведомления: ${r.manager}\nБез ответа: больше ${r.slaMinutes} рабочих минут\n${snippet?`\n«${snippet}»`:''}`;
-      await sendTelegramText(r.telegramChatId,text,{url:notificationDialogUrl(d.peerId)});store.notified[key]={sentAt:nowMs,manager:r.manager,peerId:d.peerId,since};sent++
+    for(const baseRule of matching){
+      const leadManager=d.crm?.manager||d.crm?.managerLogin||'',r=effectiveSlaRule(store,baseRule,leadManager),worked=workingMinutesUntilThreshold(startMs,nowMs,r,r.slaMinutes);if(worked<r.slaMinutes)continue;
+      const responseWindow=WorkingSla.responseWindow(startMs,r),violationDueAt=WorkingSla.workingDeadline(startMs,r,r.violationMinutes),journalRow=notificationJournalUpsert(store,{peerId:d.peerId,clientId:d.crm?.clientId||'',receivedAt:since,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:leadManager,crmStatus:d.crm?.crmStatus||'',snippet:d.lastMessage||'',responseStartAt:Math.floor(responseWindow.responseStartAt/1000),dueAt:Math.floor(responseWindow.dueAt/1000),violationDueAt:Math.floor(violationDueAt/1000),outsideHoursAtReceipt:responseWindow.outsideHoursAtReceipt,slaMinutes:r.slaMinutes,violationMinutes:r.violationMinutes,workDays:r.workDays,workStart:r.workStart,workEnd:r.workEnd,timezone:r.timezone});if(journalRow)activeJournalIds.add(journalRow.id);
+      if(!notificationWorkingNow(nowMs,r)||!r.notifyTelegram||!baseRule.enabled||!baseRule.telegramChatId)continue;
+      const key=`${baseRule.id}:${d.peerId}:${since}`,prev=store.notified?.[key]||null;
+      if(prev){if(!baseRule.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<baseRule.repeatMinutes*60000)continue}
+      const client=d.crm?.fullName||d.name||`VK ${d.peerId}`,leadManagerLabel=String(leadManager||'Не назначен'),crmStatus=String(d.crm?.crmStatus||'Не указан'),snippet=String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),text=`🔴 Просрочен ответ\n\nКлиент: ${client}\nМенеджер лида: ${leadManagerLabel}\nCRM-статус: ${crmStatus}\nПолучатель уведомления: ${baseRule.manager}\nБез ответа: больше ${r.slaMinutes} рабочих минут\n${snippet?`\n«${snippet}»`:''}`;
+      await sendTelegramText(baseRule.telegramChatId,text,{url:notificationDialogUrl(d.peerId)});store.notified[key]={sentAt:nowMs,manager:baseRule.manager,peerId:d.peerId,since};sent++
     }
   }
   await resolveNotificationJournalReplies(store,s,activeJournalIds,20);
@@ -2672,7 +2696,7 @@ async function apiRouter(req, res, url) {
   if (pathname === '/api/notifications/settings' && req.method === 'GET') {
     const store=readNotificationStore();
     const visibleRules=(store.rules||[]).filter(r=>canManageNotificationManager(s,r.manager));
-    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:notificationMissingEnvironment().length===0,workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState},rules:visibleRules.map(notificationRulePublic),filesystemPersistent:false});
+    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:notificationMissingEnvironment().length===0,workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState},slaSettings:safeSlaSettings(store.sla),rules:visibleRules.map(notificationRulePublic),filesystemPersistent:false});
   }
   if (pathname === '/api/notifications/settings' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
@@ -2704,22 +2728,22 @@ async function apiRouter(req, res, url) {
       await syncRecentLeadJournal(s,store,allDialogs,rule,{limit:40});
       const dialogs=allDialogs.filter(d=>!d.lastMessageOut);
       const now=Math.floor(Date.now()/1000);
-      const activeRows=dialogs.filter(d=>!d.lastMessageOut).map(d=>{const since=Number(d.lastMessageAt||0),window=WorkingSla.responseWindow(since*1000,rule);return{
-        peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,
-        manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',
+      const activeRows=dialogs.filter(d=>!d.lastMessageOut).map(d=>{const since=Number(d.lastMessageAt||0),manager=d.crm?.manager||d.crm?.managerLogin||'',leadRule=effectiveSlaRule(store,rule,manager),window=WorkingSla.responseWindow(since*1000,leadRule),violationDueAt=WorkingSla.workingDeadline(since*1000,leadRule,leadRule.violationMinutes);return{
+        peerId:d.peerId,clientId:d.crm?.clientId||'',name:d.crm?.fullName||d.name||`VK ${d.peerId}`,
+        manager,crmStatus:d.crm?.crmStatus||'',
         snippet:String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),
         since,waitMinutes:Math.max(0,Math.floor((now-Number(since||now))/60)),
-        workingWaitMinutes:workingMinutesUntilThreshold(Number(since||now)*1000,Date.now(),rule,rule.slaMinutes),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone
-      }}).filter(d=>d.workingWaitMinutes>=rule.slaMinutes).sort((a,b)=>b.workingWaitMinutes-a.workingWaitMinutes);
-      const activeJournalIds=new Set();for(const row of activeRows){const savedRow=notificationJournalUpsert(store,{...row,receivedAt:row.since});if(savedRow)activeJournalIds.add(savedRow.id)}
+        workingWaitMinutes:workingMinutesUntilThreshold(Number(since||now)*1000,Date.now(),leadRule,leadRule.slaMinutes),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),violationDueAt:Math.floor(violationDueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,slaMinutes:leadRule.slaMinutes,violationMinutes:leadRule.violationMinutes,workDays:leadRule.workDays,workStart:leadRule.workStart,workEnd:leadRule.workEnd,timezone:leadRule.timezone
+      }}).sort((a,b)=>b.workingWaitMinutes-a.workingWaitMinutes);
+      const activeJournalIds=new Set();for(const row of activeRows){const existing=notificationJournalRows(store,{admin:true}).find(x=>Number(x.peerId)===Number(row.peerId)&&x.status!=='answered'),savedRow=notificationJournalUpsert(store,{...(existing||{}),...row,receivedAt:existing?.receivedAt||row.since});if(savedRow)activeJournalIds.add(savedRow.id)}
       await resolveNotificationJournalReplies(store,s,activeJournalIds,20);
-      const rows=notificationJournalRows(store,{admin:true}).map(row=>({...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0,workingWaitMinutes:row.status==='waiting'?workingMinutesUntilThreshold(row.receivedAt*1000,Date.now(),row,row.slaMinutes):workingMinutesUntilThreshold(row.receivedAt*1000,(row.answeredAt||row.receivedAt)*1000,row,row.slaMinutes)}));
+      const rows=notificationJournalRows(store,{admin:true}).map(row=>{const workingWaitMinutes=row.status==='waiting'?workingMinutesUntilThreshold(row.receivedAt*1000,Date.now(),row,row.slaMinutes):workingMinutesUntilThreshold(row.receivedAt*1000,(row.answeredAt||row.receivedAt)*1000,row,row.slaMinutes),violationMinutes=Number(row.violationMinutes||store.sla?.violationMinutes||20);return{...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0,workingWaitMinutes,notificationDue:store.sla.notifyWeb!==false&&row.status!=='answered'&&workingWaitMinutes>=Number(row.slaMinutes||store.sla?.notifyMinutes||8),violation:workingWaitMinutes>violationMinutes,violationMinutes}});
       const outbox=notificationOutboxRows(store,s);writeNotificationStore(store);
-      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses},historySync:{dialogs:Math.min(40,allDialogs.length),mode:'recent-vk-history'}});
+      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:store.sla.notifyMinutes,violationMinutes:store.sla.violationMinutes,workDays:store.sla.workDays,workStart:store.sla.workStart,workEnd:store.sla.workEnd,timezone:store.sla.timezone,dialogFilter:rule.dialogFilter,slaSettings:store.sla,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses},historySync:{dialogs:Math.min(40,allDialogs.length),mode:'recent-vk-history'}});
     } catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/admin/notification-journal' && req.method === 'GET') {
-    if(!requireAdminSession(s,res))return;const store=readNotificationStore();return sendJson(res,200,{ok:true,rows:notificationJournalRows(store,{admin:true})});
+    if(!requireAdminSession(s,res))return;const store=readNotificationStore(),rows=notificationJournalRows(store,{admin:true}).map(row=>{const end=row.status==='answered'?(row.answeredAt||row.receivedAt)*1000:Date.now(),workingWaitMinutes=workingMinutesUntilThreshold(row.receivedAt*1000,end,row,row.slaMinutes),violationMinutes=Number(row.violationMinutes||store.sla.violationMinutes||20);return{...row,workingWaitMinutes,violation:workingWaitMinutes>violationMinutes,violationMinutes}});return sendJson(res,200,{ok:true,rows});
   }
   const adminNotificationJournalMatch=pathname.match(/^\/api\/admin\/notification-journal\/([^/]+)$/);
   if(adminNotificationJournalMatch&&req.method==='DELETE'){
@@ -3040,9 +3064,12 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
         vkId,
         vkName: String(profile?.screen_name || b?.vkName || ''),
         fullName: String(b?.fullName || (profile ? `${profile.first_name || ''} ${profile.last_name || ''}`.trim() : `VK ${vkId}`)),
-        city: String(b?.city || profile?.city?.title || '')
+        city: String(b?.city || profile?.city?.title || ''),
+        managerLogin:String(s.currentUser?.login||s.login||''),
+        crmStatus:'Запустил воронку'
       });
-      return sendJson(res, 200, {ok:true,...result});
+      const notificationStore=readNotificationStore();appendClientHistory(notificationStore,result.client?.id,{type:result.created?'created':'linked',actor:s.currentUser?.name||s.login,peerId:vkId,text:result.created?'Клиент создан из диалога VK':'Найдена существующая карточка BlueSales',meta:{managerLogin:String(s.currentUser?.login||s.login||''),crmStatus:'Запустил воронку',vkId,photo:String(profile?.photo_100||'')}});writeNotificationStore(notificationStore);
+      return sendJson(res, 200, {ok:true,...result,vkProfile:profile?{id:vkId,name:`${profile.first_name||''} ${profile.last_name||''}`.trim(),screenName:String(profile.screen_name||''),photo:String(profile.photo_100||''),city:String(profile.city?.title||'')}:null,defaults:{managerLogin:String(s.currentUser?.login||s.login||''),managerName:String(s.currentUser?.name||s.login||''),crmStatus:'Запустил воронку'}});
     } catch (err) { return handleApiError(res, err); }
   }
 
@@ -3139,6 +3166,16 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       const phraseCount=(store.groups||[]).reduce((n,g)=>n+(g.phrases||[]).length,0);
       return sendJson(res,200,{ok:true,isAdmin:true,currentUser:decorateUserAccess(s.currentUser||{login:s.login}),users,sections:ADMIN_SECTION_KEYS,phraseCount,groupCount:(store.groups||[]).length});
     }catch(err){return handleApiError(res,err);}
+  }
+
+  if (pathname === '/api/admin/sla-settings' && req.method === 'GET') {
+    if(!requireAdminSession(s,res))return;
+    const store=readNotificationStore();
+    return sendJson(res,200,{ok:true,settings:safeSlaSettings(store.sla),users:await adminUsersForSession(s)});
+  }
+  if (pathname === '/api/admin/sla-settings' && req.method === 'PUT') {
+    if(!requireAdminSession(s,res))return;if(!requireCsrf(req,res,s))return;
+    try{const body=await readJson(req,512*1024),store=readNotificationStore();store.sla=safeSlaSettings(body);writeNotificationStore(store);return sendJson(res,200,{ok:true,settings:store.sla,message:'Регламент SLA сохранён и применяется к журналу и уведомлениям'})}catch(err){return handleApiError(res,err)}
   }
 
   if (pathname === '/api/admin/users' && req.method === 'GET') {
@@ -3459,6 +3496,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       const id = Number(decodeURIComponent(clientMatch[1]));
       if (!Number.isFinite(id)) return sendJson(res, 400, { ok: false, message: 'Некорректный id клиента' });
       const b = await readJson(req);
+      const before=await getCustomerById(s,id).catch(()=>null);
       const payload = { id };
       if ('fullName' in b) payload.fullName = String(b.fullName || '');
       if ('phone' in b) payload.mobilePhone = String(b.phone || '');
@@ -3472,8 +3510,19 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       await bsCall(s, 'customers.update', payload);
       clearAccountCache(s.login);
       const client = await getCustomerById(s, id);
+      const historyStore=readNotificationStore(),actor=s.currentUser?.name||s.login,peerId=Number(client?.social?.vkId||before?.social?.vkId||0);
+      if('nextContactDate'in b&&String(before?.nextContactDate||'')!==String(b.nextContactDate||''))appendClientHistory(historyStore,id,{type:'next_contact_changed',actor,peerId,from:before?.nextContactDate||'',to:b.nextContactDate||'',text:String(b.historyNote||'Дата следующего контакта изменена')});
+      if('managerLogin'in b&&b.managerLogin&&String(before?.managerLogin||'')!==String(b.managerLogin))appendClientHistory(historyStore,id,{type:'manager_changed',actor,peerId,from:before?.manager||before?.managerLogin||'',to:b.managerLogin,text:'Лид передан другому менеджеру'});
+      if('crmStatus'in b&&String(before?.crmStatus||'')!==String(b.crmStatus||''))appendClientHistory(historyStore,id,{type:'status_changed',actor,peerId,from:before?.crmStatus||'',to:b.crmStatus||'',text:'CRM-статус изменён'});
+      writeNotificationStore(historyStore);
       return sendJson(res, 200, { ok: true, client: client || normalizeCustomer(payload) });
     } catch (err) { return handleApiError(res, err); }
+  }
+
+  const clientHistoryMatch=pathname.match(/^\/api\/clients\/([^/]+)\/history$/);
+  if(clientHistoryMatch&&req.method==='GET'){
+    const id=String(decodeURIComponent(clientHistoryMatch[1])),store=readNotificationStore(),client=await getCustomerById(s,Number(id)).catch(()=>null),peerId=Number(client?.social?.vkId||0),journal=notificationJournalRows(store,{admin:true}).filter(row=>String(row.clientId)===id||(peerId&&Number(row.peerId)===peerId));
+    return sendJson(res,200,{ok:true,clientId:id,events:[...(store.clientHistory?.[id]||[])].sort((a,b)=>Number(b.at)-Number(a.at)),journal});
   }
 
   if (pathname === '/api/services' && req.method === 'GET') {
@@ -3570,17 +3619,25 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
     } catch (err) { return handleApiError(res, err); }
   }
 
+  const reminderRescheduleMatch=pathname.match(/^\/api\/reminders\/([^/]+)\/reschedule$/);
+  if(reminderRescheduleMatch&&req.method==='PUT'){
+    if(!requireCsrf(req,res,s))return;
+    try{const id=Number(decodeURIComponent(reminderRescheduleMatch[1])),body=await readJson(req);if(!Number.isFinite(id)||!String(body.nextContactDate||'').trim())return sendJson(res,400,{ok:false,message:'Укажите дату и время следующего контакта'});const before=await getCustomerById(s,id),next=String(body.nextContactDate).trim();await bsCall(s,'customers.update',{id,nextContactDate:next});clearAccountCache(s.login);const store=readNotificationStore();appendClientHistory(store,id,{type:'next_contact_rescheduled',actor:s.currentUser?.name||s.login,peerId:Number(before?.social?.vkId||0),from:before?.nextContactDate||'',to:next,text:String(body.note||'Следующий контакт перенесён'),meta:{lastReply:String(body.lastReply||'')}});writeNotificationStore(store);return sendJson(res,200,{ok:true,id,nextContactDate:next})}catch(err){return handleApiError(res,err)}
+  }
+
   const reminderDeleteMatch=pathname.match(/^\/api\/reminders\/([^/]+)$/);
   if(reminderDeleteMatch && req.method==='DELETE'){
     if(!requireCsrf(req,res,s))return;
     try{
       const id=Number(decodeURIComponent(reminderDeleteMatch[1]));
       if(!Number.isFinite(id))return sendJson(res,400,{ok:false,message:'Некорректный id клиента'});
+      const before=await getCustomerById(s,id).catch(()=>null);
       // BlueSales installations differ in how they clear the next-contact date.
       // Try null first, then the empty-string form used by customers.update UI flows.
       try{await bsCall(s,'customers.update',{id,nextContactDate:null});}
       catch(firstErr){await bsCall(s,'customers.update',{id,nextContactDate:''});}
       clearAccountCache(s.login);
+      const store=readNotificationStore();appendClientHistory(store,id,{type:'next_contact_removed',actor:s.currentUser?.name||s.login,peerId:Number(before?.social?.vkId||0),from:before?.nextContactDate||'',to:'',text:'Напоминание удалено'});writeNotificationStore(store);
       return sendJson(res,200,{ok:true,id});
     }catch(err){return handleApiError(res,err);}
   }

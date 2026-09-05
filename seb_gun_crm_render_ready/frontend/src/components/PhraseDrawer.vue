@@ -12,6 +12,9 @@ const drafts = useDraftsStore()
 const chat = useChatStore()
 const ui = useUiStore()
 const scrollEl = ref(null)
+const selectedGroup=ref('')
+const groupsOpen=ref(false)
+const visibleGroups=computed(()=>selectedGroup.value?phrases.filtered.filter(g=>g.name===selectedGroup.value):phrases.filtered)
 const POSITION_KEY = 'seb-gun-v28-phrase-scroll'
 
 function firstName() { return String(chat.crm?.fullName || chat.peer?.name || '').trim().split(/\s+/)[0] || '' }
@@ -30,6 +33,7 @@ function selectPhrase(p) {
   emit('close')
 }
 function onScroll() { try { localStorage.setItem(POSITION_KEY, String(scrollEl.value?.scrollTop || 0)) } catch {} }
+function chooseGroup(name=''){selectedGroup.value=name;groupsOpen.value=false;if(scrollEl.value)scrollEl.value.scrollTop=0}
 function phrasesChanged(){phrases.invalidate();if(props.open)phrases.load(true).catch(e=>ui.toast(e.message,'error'))}
 onMounted(async () => {
   window.addEventListener('crm:phrases-changed',phrasesChanged)
@@ -48,11 +52,11 @@ watch(() => props.open, async (open) => {
     <div v-if="open" class="drawer-backdrop phrase-drawer-backdrop" @pointerdown.self="$emit('close')">
       <aside class="side-drawer left-drawer">
         <header><div><small>BLUE SALES</small><h3>Быстрые фразы</h3></div><button type="button" @click="$emit('close')">×</button></header>
-        <div class="drawer-search"><span>⌕</span><input v-model="phrases.query" placeholder="Название или текст скрипта"></div>
+        <div class="drawer-search"><span>⌕</span><input v-model="phrases.query" placeholder="Название или текст скрипта"></div><details class="phrase-section-dropdown" :open="groupsOpen" @toggle="groupsOpen=$event.target.open"><summary>{{selectedGroup||'Все разделы'}} <b>▾</b></summary><div><button type="button" :class="{active:!selectedGroup}" @click.prevent="chooseGroup('')">Все разделы</button><button v-for="g in phrases.groups" :key="g.id||g.name" type="button" :class="{active:selectedGroup===g.name}" @click.prevent="chooseGroup(g.name)">{{g.name}}</button></div></details>
         <div ref="scrollEl" class="phrase-scroll" @scroll.passive="onScroll">
           <div v-if="phrases.loading" class="drawer-loading">Загружаю скрипты…</div>
-          <div v-else-if="phrases.query && !phrases.filtered.length" class="empty-mini">Ничего не найдено. Попробуйте часть названия или текста.</div>
-          <section v-for="g in phrases.filtered" :key="g.id" class="phrase-group">
+          <div v-else-if="!visibleGroups.length" class="empty-mini">Ничего не найдено. Выберите «Все разделы» или измените поиск.</div>
+          <section v-for="g in visibleGroups" :key="g.id" class="phrase-group">
             <h4>{{ g.name }}</h4>
             <button v-for="p in g.phrases" :key="p.id" type="button" class="phrase-row" :class="{last: p.id===phrases.lastId}" @click="selectPhrase(p)">
               <span>{{ p.name }}</span><small v-if="p.attachments?.length">📎 {{ p.attachments.length }}</small>

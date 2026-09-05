@@ -1,0 +1,28 @@
+'use strict';
+const fs=require('fs'),path=require('path'),root=path.join(__dirname,'..');
+const read=p=>fs.readFileSync(path.join(root,p),'utf8');
+const pkg=require('../package.json');
+const server=read('server.js'),sla=read('lib/working-sla.js'),admin=read('frontend/src/views/AdminView.vue');
+const journal=read('frontend/src/views/NotificationsView.vue'),drawer=read('frontend/src/components/ClientDrawer.vue');
+const phrases=read('frontend/src/components/PhraseDrawer.vue'),calendar=read('frontend/src/views/RemindersView.vue');
+const browser=read('frontend/src/stores/browserNotifications.js'),api=read('frontend/src/services/api.js'),render=read('render.yaml');
+const workingSla=require('../lib/working-sla');
+function must(value,message){if(!value)throw new Error(message)}
+must(pkg.version==='28.16.0'&&server.includes("const VERSION = '28.16'"),'version mismatch');
+must(server.includes("bsCall(session, 'customers.add', createPayload)")&&!server.includes("bsCall(session, 'customers.addMany', [createPayload])"),'single-customer BlueSales mutation missing');
+must(server.includes("managerLogin:String(s.currentUser?.login||s.login||'')")&&server.includes("crmStatus:'Запустил воронку'"),'creator manager or funnel status missing');
+must(server.includes("fields:'photo_100,city,screen_name'")&&server.includes('vkProfile'),'VK profile preload missing');
+must(server.includes("'/api/admin/sla-settings'")&&server.includes('managerSchedules')&&server.includes('notifyMinutes:8')&&server.includes('violationMinutes:20'),'SLA settings API missing');
+must(sla.includes("weekday:'short'")&&sla.includes('workDays.includes(parts.weekday)'),'working weekdays missing');
+const weekdayRule={slaMinutes:8,workDays:[1,2,3,4,5],workStart:'10:00',workEnd:'22:00',timezone:'Europe/Moscow'};
+must(workingSla.responseWindow(Date.UTC(2026,8,4,18,58),weekdayRule).dueAt===Date.UTC(2026,8,7,7,6),'weekend must not count toward SLA');
+must(server.includes('managerHistory')&&server.includes('statusHistory')&&server.includes("type:'manager_changed'")&&server.includes('responseText'),'lead and transfer history missing');
+must(server.includes('clientHistoryMatch')&&server.includes('notificationJournalRows')&&api.includes('clientHistory'),'client history endpoint missing');
+must(admin.includes('Регламент SLA')&&admin.includes('Рабочий день менеджеров')&&admin.includes('manager-schedule'),'SLA admin UI missing');
+must(journal.includes('Нарушения')&&journal.includes('violationCount')&&journal.includes('managerFilter')&&journal.includes('statusFilter')&&journal.includes('Открыть лид'),'lead journal filters or links missing');
+must(browser.includes("item.status!=='answered'&&item.notificationDue"),'web notification threshold missing');
+must(calendar.includes('Календарь')&&calendar.includes('rescheduleReminder')&&calendar.includes('Что пообещали клиенту'),'calendar reschedule history missing');
+must(drawer.includes("'Запустил воронку'")&&drawer.includes("tab==='history'")&&drawer.includes('vk-create-preview'),'client creation defaults/history missing');
+must(phrases.includes("selectedGroup||'Все разделы'")&&phrases.includes('phrase-section-dropdown'),'section dropdown missing');
+must(render.includes('npm run test:v2816'),'release test wiring missing');
+console.log('v28.16 integration checks: OK (VK create, configurable SLA, violations, history, calendar, accordions)');
