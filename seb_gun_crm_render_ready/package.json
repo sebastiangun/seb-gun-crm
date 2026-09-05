@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.14.0",
+  "version": "28.15.0",
   "private": true,
-  "description": "seb_gun CRM v28.14: resilient BlueSales client creation and rich VK quick-phrase attachments",
+  "description": "seb_gun CRM v28.15: safe client creation and complete lead journal history",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -46,7 +46,8 @@
     "test:v2811": "node tests/integration-v2811.js",
     "test:v2812": "node tests/integration-v2812.js",
     "test:v2813": "node tests/integration-v2813.js",
-    "test:v2814": "node tests/integration-v2814.js"
+    "test:v2814": "node tests/integration-v2814.js",
+    "test:v2815": "node tests/integration-v2815.js"
   },
   "engines": {
     "node": ">=18"

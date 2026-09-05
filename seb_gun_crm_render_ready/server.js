@@ -58,7 +58,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.14';
+const VERSION = '28.15';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -1174,7 +1174,9 @@ async function getCustomerByVkId(session, vkId) {
   const key = `${session.login}:customer-vk:${vkId}`;
   return cachedLoad(key, 60000, async () => {
     const page = await getCustomersPage(session, { count: 10, vkIds: [vkId] });
-    return page.customers.find(c => Number(c.social?.vkId) === Number(vkId)) || page.customers[0] || null;
+    // Never accept an unrelated first row as a VK match. Some BlueSales
+    // installations silently ignore vkIds when the API is busy.
+    return page.customers.find(c => Number(c.social?.vkId) === Number(vkId)) || null;
   });
 }
 
@@ -2020,11 +2022,30 @@ async function uploadVkMedia(session, { peerId, type, filename, mimeType, dataBa
   return uploadVkMediaBuffer(session,{peerId,type,filename,mimeType,buffer});
 }
 
+const pendingCustomerCreates = new Map();
+
+async function findCustomerByVkEverywhere(session, vkId) {
+  if (!(Number(vkId) > 0)) return null;
+  clearAccountCache(session.login);
+  try {
+    const exact = await getCustomerByVkId(session, vkId);
+    if (exact?.id) return exact;
+  } catch {}
+  // The vkIds filter is not reliable in every BlueSales account. A complete
+  // paged scan is slower, but it is only used after create and prevents both a
+  // false 502 and a duplicate write.
+  try {
+    clearAccountCache(session.login);
+    const all = await getAllCustomersComplete(session);
+    return all.find(c => Number(c.social?.vkId) === Number(vkId)) || null;
+  } catch { return null; }
+}
+
 async function createCustomerFromDraft(session, draft) {
   const vkId = Number(draft?.vkId || 0);
   if (vkId > 0) {
     try {
-      const existing = await getCustomerByVkId(session, vkId);
+      const existing = await findCustomerByVkEverywhere(session, vkId);
       if (existing?.id) return { created:false, client:existing };
     } catch (lookupErr) {
       // A temporary read failure must not disable the create action. Every write
@@ -2047,47 +2068,42 @@ async function createCustomerFromDraft(session, draft) {
     const normalized = normalizeCustomer(candidate || {});
     return normalized?.id ? normalized : null;
   };
-  const findCommitted = async (delays=[0,300,850,1700]) => {
+  const findCommitted = async (delays=[0,500,1200,2500,4500]) => {
     if (!(vkId > 0)) return null;
     for (const delay of delays) {
       if (delay) await sleep(delay);
-      try {
-        clearAccountCache(session.login);
-        const committed = await getCustomerByVkId(session, vkId);
-        if (committed?.id) return committed;
-      } catch {}
+      const committed = await findCustomerByVkEverywhere(session, vkId);
+      if (committed?.id) return committed;
     }
     return null;
   };
-  const recoverableCodes = new Set(['BAD_RESPONSE','HTTP','API','API_BUSY','QUEUE_BUSY','TIMEOUT']);
-  const attempts = [
-    { command:'customers.add', payload:createPayload, label:'add' },
-    { command:'customers.addMany', payload:[createPayload], label:'addMany-array' },
-    // Some BlueSales installations accept the batch operation only in an object.
-    { command:'customers.addMany', payload:{customers:[createPayload]}, label:'addMany-object' }
-  ];
   const failures = [];
   let raw = null;
   let client = null;
   let recoveredFromUpstreamError = false;
-  for (const attempt of attempts) {
-    try {
-      raw = await bsCall(session, attempt.command, attempt.payload);
-      client = candidateFrom(raw);
-      if (client?.id) break;
-    } catch (err) {
-      failures.push({method:attempt.label,code:String(err?.code||'API'),details:err?.details||err?.message||null});
-      if (!recoverableCodes.has(String(err?.code || ''))) throw err;
-    }
-    // A proxy 502 or malformed HTML response can arrive after BlueSales has
-    // committed the record. Wait for its read model before trying another write.
-    client = await findCommitted();
-    if (client?.id) { recoveredFromUpstreamError = failures.length > 0; break; }
+  const createKey=vkId>0?`${session.login}:${vkId}`:'';
+  const pending=createKey?pendingCustomerCreates.get(createKey):null;
+  if(pending&&pending.expiresAt>Date.now()){
+    client=await findCommitted([0,800,1800]);
+    if(client?.id)return{created:true,client,recoveredFromUpstreamError:true,deduplicated:true};
+    throw new BlueSalesError('BlueSales ещё обрабатывает предыдущий запрос создания. Карточка не отправлялась повторно, чтобы не сделать дубль. Повторите проверку через несколько секунд.','CREATE_PENDING',{vkId});
   }
+  try {
+    // One mutation per click. Multiple fallback writes caused duplicates when
+    // BlueSales committed a card but returned an HTML/502 response.
+    raw = await bsCall(session, 'customers.addMany', [createPayload]);
+    client = candidateFrom(raw);
+  } catch (err) {
+    failures.push({method:'addMany-array',code:String(err?.code||'API'),details:err?.details||err?.message||null});
+  }
+  const lastFailureCode=String(failures.at(-1)?.code||'');
+  const ambiguousCreate=!failures.length||['BAD_RESPONSE','HTTP','API_BUSY','QUEUE_BUSY','TIMEOUT','NETWORK'].includes(lastFailureCode);
+  if(createKey&&ambiguousCreate)pendingCustomerCreates.set(createKey,{expiresAt:Date.now()+10*60*1000});
+  if(!client?.id){client=await findCommitted();recoveredFromUpstreamError=Boolean(client?.id&&failures.length)}
 
   clearAccountCache(session.login);
   if (!client && vkId > 0) {
-    try { client = await getCustomerByVkId(session, vkId); } catch {}
+    try { client = await findCustomerByVkEverywhere(session, vkId); } catch {}
   }
   if (!client) client = candidateFrom(raw);
 
@@ -2119,7 +2135,7 @@ async function createCustomerFromDraft(session, draft) {
   if (!client) {
     // Last verification for installations whose add endpoint returns an unusual body.
     if (vkId > 0) {
-      try { client = await getCustomerByVkId(session, vkId); } catch {}
+      try { client = await findCustomerByVkEverywhere(session, vkId); } catch {}
     }
   }
   if (!client?.id) {
@@ -2129,6 +2145,7 @@ async function createCustomerFromDraft(session, draft) {
       {attempts:failures,response:raw}
     );
   }
+  if(createKey)pendingCustomerCreates.delete(createKey);
   return { created:true, client, recoveredFromUpstreamError };
 }
 
@@ -2381,13 +2398,24 @@ function notificationJournalUpsert(store,input={}){
   const peerId=Math.trunc(Number(input.peerId||0)),receivedAt=Math.trunc(Number(input.receivedAt||input.since||0));
   if(!peerId||!receivedAt)return null;
   const id=notificationJournalId(peerId,receivedAt);if(store.deletedJournal[id])return null;
-  const current=store.journal[id]||{};
-  const row={...current,id,peerId,receivedAt,name:String(input.name||current.name||`VK ${peerId}`).slice(0,180),manager:String(input.manager||current.manager||'').slice(0,180),crmStatus:String(input.crmStatus||current.crmStatus||'').slice(0,180),snippet:String(input.snippet||current.snippet||'').trim().replace(/\s+/g,' ').slice(0,240),status:current.status==='answered'?'answered':'waiting',recordedAt:Number(current.recordedAt||Date.now()),updatedAt:Date.now(),answeredAt:Number(current.answeredAt||0),responseStartAt:Number(input.responseStartAt||current.responseStartAt||receivedAt),dueAt:Number(input.dueAt||current.dueAt||0),outsideHoursAtReceipt:Boolean(input.outsideHoursAtReceipt??current.outsideHoursAtReceipt),slaMinutes:Number(input.slaMinutes||current.slaMinutes||8),workStart:String(input.workStart||current.workStart||'10:00'),workEnd:String(input.workEnd||current.workEnd||'22:00'),timezone:String(input.timezone||current.timezone||'Europe/Moscow')};
+  const current=store.journal[id]||{},manager=String(input.manager??current.currentManager??current.manager??'').slice(0,180),crmStatus=String(input.crmStatus??current.currentCrmStatus??current.crmStatus??'').slice(0,180);
+  const managerHistory=Array.isArray(current.managerHistory)?[...current.managerHistory]:[];
+  const previousManager=String(current.currentManager??current.manager??'');
+  if(!managerHistory.length&&previousManager)managerHistory.push({manager:previousManager,fromAt:Number(current.receivedAt||receivedAt),detectedAt:Number(current.recordedAt||Date.now())});
+  if(manager&&manager!==previousManager)managerHistory.push({manager,fromManager:previousManager,toManager:manager,fromAt:Math.trunc(Number(input.managerChangedAt||Date.now()/1000)),detectedAt:Date.now()});
+  const statusHistory=Array.isArray(current.statusHistory)?[...current.statusHistory]:[];
+  const previousStatus=String(current.currentCrmStatus??current.crmStatus??'');
+  if(!statusHistory.length&&previousStatus)statusHistory.push({status:previousStatus,fromAt:Number(current.receivedAt||receivedAt),detectedAt:Number(current.recordedAt||Date.now())});
+  if(crmStatus&&crmStatus!==previousStatus)statusHistory.push({status:crmStatus,fromStatus:previousStatus,toStatus:crmStatus,fromAt:Math.trunc(Number(input.statusChangedAt||Date.now()/1000)),detectedAt:Date.now()});
+  const incomingTexts=[...(Array.isArray(current.incomingTexts)?current.incomingTexts:[])];
+  for(const value of (Array.isArray(input.incomingTexts)?input.incomingTexts:[])){const text=String(value||'').trim();if(text&&!incomingTexts.includes(text))incomingTexts.push(text.slice(0,1000))}
+  const answeredAt=Number(input.answeredAt||current.answeredAt||0);
+  const row={...current,id,peerId,receivedAt,name:String(input.name||current.name||`VK ${peerId}`).slice(0,180),manager:manager||previousManager,managerAtReceipt:String(current.managerAtReceipt??input.managerAtReceipt??manager??''),currentManager:manager||previousManager,managerHistory,crmStatus:crmStatus||previousStatus,statusAtReceipt:String(current.statusAtReceipt??input.statusAtReceipt??crmStatus??''),currentCrmStatus:crmStatus||previousStatus,statusHistory,incomingTexts,snippet:String(input.snippet||current.snippet||incomingTexts.join(' · ')).trim().replace(/\s+/g,' ').slice(0,500),status:(current.status==='answered'||answeredAt)?'answered':'waiting',recordedAt:Number(current.recordedAt||Date.now()),updatedAt:Date.now(),answeredAt,responseText:String(input.responseText??current.responseText??'').trim().slice(0,2000),responseAuthor:String(input.responseAuthor??current.responseAuthor??'').trim().slice(0,180),responseMessageId:String(input.responseMessageId??current.responseMessageId??''),responseStartAt:Number(input.responseStartAt||current.responseStartAt||receivedAt),dueAt:Number(input.dueAt||current.dueAt||0),outsideHoursAtReceipt:Boolean(input.outsideHoursAtReceipt??current.outsideHoursAtReceipt),slaMinutes:Number(input.slaMinutes||current.slaMinutes||8),workStart:String(input.workStart||current.workStart||'10:00'),workEnd:String(input.workEnd||current.workEnd||'22:00'),timezone:String(input.timezone||current.timezone||'Europe/Moscow')};
   store.journal[id]=row;return row
 }
 function notificationJournalRows(store,{rule=null,admin=false}={}){
   store.journal=store.journal&&typeof store.journal==='object'?store.journal:{};
-  const rows=Object.values(store.journal).filter(row=>admin||(!rule||(customerMatchesManager({manager:row.manager},(rule.managerFilters||[]).join(','))&&customerMatchesStatus({crmStatus:row.crmStatus},(rule.statuses||[]).join(',')))));
+  const rows=Object.values(store.journal).filter(row=>admin||(!rule||((!(rule.managerFilters||[]).length||(rule.managerFilters||[]).some(value=>[row.manager,row.currentManager,row.managerAtReceipt,...(row.managerHistory||[]).flatMap(x=>[x.manager,x.fromManager,x.toManager])].some(name=>sameText(name,value))))&&(!(rule.statuses||[]).length||(rule.statuses||[]).some(value=>[row.crmStatus,row.currentCrmStatus,row.statusAtReceipt,...(row.statusHistory||[]).flatMap(x=>[x.status,x.fromStatus,x.toStatus])].some(name=>sameText(name,value)))))));
   return rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0))
 }
 async function firstOutgoingReplyAfter(session,peerId,receivedAt){
@@ -2405,8 +2433,40 @@ function deleteNotificationJournalRow(store,id){
   store.journal=store.journal&&typeof store.journal==='object'?store.journal:{};store.deletedJournal=store.deletedJournal&&typeof store.deletedJournal==='object'?store.deletedJournal:{};
   if(!store.journal[id])return false;delete store.journal[id];store.deletedJournal[id]=Date.now();return true
 }
-function markNotificationJournalAnswered(store,peerId,answeredAt=Math.floor(Date.now()/1000)){
-  let changed=0;for(const row of notificationJournalRows(store,{admin:true})){if(Number(row.peerId)!==Number(peerId)||row.status==='answered'||Number(answeredAt)<=Number(row.receivedAt||0))continue;row.status='answered';row.answeredAt=Number(answeredAt);row.updatedAt=Date.now();changed++}return changed
+function markNotificationJournalAnswered(store,peerId,answeredAt=Math.floor(Date.now()/1000),details={}){
+  let changed=0;for(const row of notificationJournalRows(store,{admin:true})){if(Number(row.peerId)!==Number(peerId)||row.status==='answered'||Number(answeredAt)<=Number(row.receivedAt||0))continue;row.status='answered';row.answeredAt=Number(answeredAt);row.responseText=String(details.responseText||row.responseText||'').slice(0,2000);row.responseAuthor=String(details.responseAuthor||row.responseAuthor||'').slice(0,180);row.responseMessageId=String(details.responseMessageId||row.responseMessageId||'');row.updatedAt=Date.now();changed++}return changed
+}
+
+function journalMessageText(message){
+  const text=String(message?.text||'').trim(),attachments=(message?.attachments||[]).map(a=>`[${a?.title||a?.type||'Вложение'}]`);
+  return [text,...attachments].filter(Boolean).join(' ').trim()||'[Сообщение без текста]';
+}
+function ingestNotificationJournalMessages(store,{peerId,name,manager='',crmStatus='',messages=[],rule={}}={}){
+  const ordered=[...(messages||[])].filter(m=>Number(m?.date||0)>0).sort((a,b)=>Number(a.date)-Number(b.date)||Number(a.id||0)-Number(b.id||0));
+  let open=null,changed=0;
+  for(const message of ordered){
+    if(!message.out){
+      if(!open){
+        const window=WorkingSla.responseWindow(Number(message.date)*1000,rule),row=notificationJournalUpsert(store,{peerId,receivedAt:Number(message.date),name,manager,crmStatus,incomingTexts:[journalMessageText(message)],snippet:journalMessageText(message),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone});
+        if(row){open=row;changed++}
+      }else{
+        open=notificationJournalUpsert(store,{...open,manager,crmStatus,incomingTexts:[journalMessageText(message)],snippet:[...(open.incomingTexts||[]),journalMessageText(message)].join(' · ')});changed++;
+      }
+    }else if(open&&Number(message.date)>Number(open.receivedAt)){
+      open=notificationJournalUpsert(store,{...open,manager,crmStatus,answeredAt:Number(message.date),responseText:journalMessageText(message),responseAuthor:message.displayAuthor||message.crmAuthor||message.author||VK_DIRECT_AUTHOR,responseMessageId:message.id||message.conversationMessageId});changed++;open=null;
+    }
+  }
+  return changed;
+}
+
+async function syncRecentLeadJournal(session,store,dialogs,rule,{limit=40}={}){
+  const selected=(dialogs||[]).filter(d=>Number(d.peerId)>0&&Number(d.peerId)<2000000000).slice(0,Math.max(1,Number(limit)||40));let synced=0;
+  for(let i=0;i<selected.length;i+=5){
+    const batch=selected.slice(i,i+5);
+    const counts=await Promise.all(batch.map(async d=>{try{const params={peer_id:Number(d.peerId),count:100,offset:0,extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;const raw=await vkCall(session.vkToken,'messages.getHistory',params),maps=vkIdentityMaps(raw||{}),messages=(raw?.items||[]).map(m=>normalizeVkMessage(m,maps));return ingestNotificationJournalMessages(store,{peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule})}catch(err){console.warn('[lead journal sync]',d.peerId,err?.message||err);return 0}}));
+    synced+=counts.reduce((n,x)=>n+x,0);if(i+5<selected.length)await sleep(180);
+  }
+  return synced;
 }
 async function telegramCall(method,payload={}){
   if(!TELEGRAM_BOT_TOKEN)throw Object.assign(new Error('TELEGRAM_BOT_TOKEN не настроен'),{status:503,code:'TELEGRAM_NOT_CONFIGURED'});
@@ -2459,7 +2519,7 @@ async function loadUnansweredDialogsForNotifications(session,{maxPages=5}={}){
 }
 async function loadDialogsForNotifications(session,{maxPages=5,filter='unanswered'}={}){
   const all=[];let offset=0;for(let page=0;page<maxPages;page++){
-    const params={count:200,offset,filter:['unanswered','unread'].includes(filter)?filter:'unanswered',extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;
+    const params={count:200,offset,filter:['all','unanswered','unread'].includes(filter)?filter:'unanswered',extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;
     const raw=await vkCall(session.vkToken,'messages.getConversations',params),maps=vkIdentityMaps(raw||{}),rows=(raw?.items||[]).map(x=>normalizeVkDialog(x,maps));all.push(...rows);offset+=rows.length;if(!rows.length||offset>=Number(raw?.count||0))break
   }
   const vkIds=all.filter(d=>d.peerType==='user'&&d.peerId>0).map(d=>d.peerId);
@@ -2640,7 +2700,9 @@ async function apiRouter(req, res, url) {
     try {
       const store=readNotificationStore(),names=notificationActorNames(s),saved=(store.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
       const rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered'});
-      const dialogs=await loadDialogsForNotifications(s,{maxPages:5,filter:'unanswered'});
+      const allDialogs=await loadDialogsForNotifications(s,{maxPages:2,filter:'all'});
+      await syncRecentLeadJournal(s,store,allDialogs,rule,{limit:40});
+      const dialogs=allDialogs.filter(d=>!d.lastMessageOut);
       const now=Math.floor(Date.now()/1000);
       const activeRows=dialogs.filter(d=>!d.lastMessageOut).map(d=>{const since=Number(d.lastMessageAt||0),window=WorkingSla.responseWindow(since*1000,rule);return{
         peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,
@@ -2653,7 +2715,7 @@ async function apiRouter(req, res, url) {
       await resolveNotificationJournalReplies(store,s,activeJournalIds,20);
       const rows=notificationJournalRows(store,{admin:true}).map(row=>({...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0,workingWaitMinutes:row.status==='waiting'?workingMinutesUntilThreshold(row.receivedAt*1000,Date.now(),row,row.slaMinutes):workingMinutesUntilThreshold(row.receivedAt*1000,(row.answeredAt||row.receivedAt)*1000,row,row.slaMinutes)}));
       const outbox=notificationOutboxRows(store,s);writeNotificationStore(store);
-      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses}});
+      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses},historySync:{dialogs:Math.min(40,allDialogs.length),mode:'recent-vk-history'}});
     } catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/admin/notification-journal' && req.method === 'GET') {
@@ -2865,6 +2927,10 @@ async function apiRouter(req, res, url) {
       }
       if (!peer.name && crm?.fullName) peer.name = crm.fullName;
       if (!peer.name) peer.name = peer.peerType === 'chat' ? `Беседа ${peerId}` : `VK ${peerId}`;
+      if(peer.peerType==='user'){
+        const notificationStore=readNotificationStore(),names=notificationActorNames(s),saved=(notificationStore.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager))),rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[]});
+        if(ingestNotificationJournalMessages(notificationStore,{peerId,name:crm?.fullName||peer.name,manager:crm?.manager||crm?.managerLogin||'',crmStatus:crm?.crmStatus||'',messages,rule}))writeNotificationStore(notificationStore);
+      }
       return sendJson(res, 200, { ok: true, peerId, peer, messages, total: Number(raw?.count || messages.length), crm });
     } catch (err) { return handleApiError(res, err); }
   }
@@ -2931,7 +2997,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       try{
         const result=await sendPromise;
         recentMessageSends.set(dedupeKey,{result,expiresAt:Date.now()+dedupeTtl});
-        const notificationStore=readNotificationStore();if(markNotificationJournalAnswered(notificationStore,peerId))writeNotificationStore(notificationStore);
+        const notificationStore=readNotificationStore();if(markNotificationJournalAnswered(notificationStore,peerId,Math.floor(Date.now()/1000),{responseText:[message,attachment?'[Вложение]':'',stickerId?'[Стикер]':'',forwardMessageIds.length?'[Пересланные сообщения]':''].filter(Boolean).join(' '),responseAuthor:s.currentUser?.name||s.login,responseMessageId:result.messageId}))writeNotificationStore(notificationStore);
         return sendJson(res,200,result);
       }catch(err){recentMessageSends.delete(dedupeKey);throw err}
     } catch (err) { return handleApiError(res, err); }
