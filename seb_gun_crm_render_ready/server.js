@@ -38,6 +38,9 @@ function loadLocalEnv(file) {
   }
 }
 loadLocalEnv(path.join(ROOT, '.env.local'));
+const { Storage } = require('./lib/postgres-storage');
+const storage = new Storage(ROOT);
+function readStoredJson(file) { if(storage.enabled)return storage.readDocument(file);return readStoredJson(file); }
 
 const PORT = Number(process.env.PORT || 9050);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -58,7 +61,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.15';
+const VERSION = '28.16';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -218,15 +221,17 @@ function parseCookies(req) {
   return out;
 }
 
-function getSession(req) {
+async function getSession(req) {
   const sid = parseCookies(req)[COOKIE_NAME];
   if (!sid) return null;
+  const durable = storage.enabled ? await storage.loadSession(sid) : null;
+  if(storage.enabled&&!durable){sessions.delete(sid);return null;}
   let s = sessions.get(sid);
   if (!s) {
     // v27: the cookie contains an encrypted API-session snapshot. Render Free may
     // restart the Node process and wipe the in-memory Map; we can restore the
     // BlueSales API password hash without storing the plaintext password.
-    s = unsealSessionSnapshot(sid);
+    s = unsealSessionSnapshot(durable||sid);
     if (s) sessions.set(sid,s);
   }
   if (!s) return null;
@@ -236,7 +241,7 @@ function getSession(req) {
   }
   // In-memory sessions remain sliding. A restored sealed cookie keeps its fixed
   // 12h lifetime; a new login creates a new sealed cookie.
-  if (!s.restoredFromCookie) s.expiresAt = now() + SESSION_TTL_MS;
+  if (!storage.enabled && !s.restoredFromCookie) s.expiresAt = now() + SESSION_TTL_MS;
   return s;
 }
 
@@ -376,6 +381,7 @@ function blueSalesHttpPost(url, data) {
 }
 
 async function bsCallDirect(session, command, data = null, attempt = 0) {
+  const safeToRetry = /\.get$/.test(command);
   const url = new URL(BS_BASE);
   url.searchParams.set('login', session.login);
   url.searchParams.set('password', session.passwordHash);
@@ -388,7 +394,7 @@ async function bsCallDirect(session, command, data = null, attempt = 0) {
     response = await blueSalesHttpPost(url, data);
   } catch (err) {
     if (err && (err.code === 'ETIMEDOUT' || /timeout/i.test(err.message || ''))) {
-      if (attempt < MAX_BUSY_RETRIES) {
+      if (safeToRetry && attempt < MAX_BUSY_RETRIES) {
         const waitMs = 1200 + attempt * 900;
         console.warn(`[BlueSales ${command}] timeout; повтор ${attempt + 1}/${MAX_BUSY_RETRIES} через ${waitMs} мс`);
         await sleep(waitMs);
@@ -406,12 +412,12 @@ async function bsCallDirect(session, command, data = null, attempt = 0) {
   if (parsed && typeof parsed === 'object' && parsed.isValid === false) {
     const errText = parsed.error || 'BlueSales отклонил запрос';
     const busySeconds = extractBusySeconds(errText);
-    if (busySeconds != null && attempt < MAX_BUSY_RETRIES) {
+    if (safeToRetry && busySeconds != null && attempt < MAX_BUSY_RETRIES) {
       await sleep((Math.min(Math.max(busySeconds, 1), 60) + 1) * 1000);
       return bsCallDirect(session, command, data, attempt + 1);
     }
     if (isBlueSalesOrganizationBusy(errText)) {
-      if (attempt < BS_ORG_BUSY_RETRIES) {
+      if (safeToRetry && attempt < BS_ORG_BUSY_RETRIES) {
         const waitMs = Math.min(900 + attempt * 650, 4200);
         console.warn(`[BlueSales ${command}] API занят другим обращением; повтор ${attempt + 1}/${BS_ORG_BUSY_RETRIES} через ${waitMs} мс`);
         await sleep(waitMs);
@@ -1024,7 +1030,7 @@ function normalizeOrder(o) {
 function servicesFilePath(){return path.join(ROOT,'data','services.json')}
 function loadServiceCatalog(){
   try{
-    const raw=JSON.parse(fs.readFileSync(servicesFilePath(),'utf8'));
+    const raw=readStoredJson(servicesFilePath());
     const rows=Array.isArray(raw)?raw:(Array.isArray(raw.services)?raw.services:[]);
     return rows.map((x,i)=>({
       id:String(x.id??x.marking??`service-${i+1}`),
@@ -1075,6 +1081,7 @@ async function getCustomersPage(session, { count = 100, offset = 0, ids, vkIds, 
   const raw = await bsCall(session, 'customers.get', payload);
   const source = arrayFromResponse(raw, ['customers', 'Customers']);
   const customers = source.map(normalizeCustomer);
+  await storage.observeClients(String(session.login).toLowerCase(),customers);
   return { raw, customers, ...customerPageMeta(raw, customers) };
 }
 
@@ -1594,8 +1601,8 @@ async function proxyVkMedia(req, res, rawUrl) {
   }
 }
 
-function requireAuth(req, res) {
-  const s = getSession(req);
+async function requireAuth(req, res) {
+  const s = await getSession(req);
   if (!s) { sendJson(res, 401, { ok: false, error: 'AUTH_REQUIRED', message: 'Войдите в BlueSales' }); return null; }
   return s;
 }
@@ -1647,7 +1654,7 @@ function serveStatic(req, res, pathname) {
 function blueSalesUiSeedPath(){ return path.join(ROOT,'data','bluesales-ui-seed.json'); }
 function loadBlueSalesUiSeed(){
   try{
-    const raw=JSON.parse(fs.readFileSync(blueSalesUiSeedPath(),'utf8'));
+    const raw=readStoredJson(blueSalesUiSeedPath());
     return raw&&typeof raw==='object'?raw:{};
   }catch{return{};}
 }
@@ -1667,11 +1674,11 @@ function quickPhrasesPath() { return path.join(ROOT, 'data', 'quick_phrases.json
 function managerColorsPath() { return path.join(ROOT, 'data', 'manager-colors.json'); }
 function statusColorsPath() { return path.join(ROOT, 'data', 'status-colors.json'); }
 function loadManagerColorOverrides() {
-  try { const raw=JSON.parse(fs.readFileSync(managerColorsPath(),'utf8')); return raw && typeof raw==='object' && !Array.isArray(raw) ? raw : {}; }
+  try { const raw=readStoredJson(managerColorsPath()); return raw && typeof raw==='object' && !Array.isArray(raw) ? raw : {}; }
   catch { return {}; }
 }
 function loadStatusColorOverrides() {
-  try { const raw=JSON.parse(fs.readFileSync(statusColorsPath(),'utf8')); return raw && typeof raw==='object' && !Array.isArray(raw) ? raw : {}; }
+  try { const raw=readStoredJson(statusColorsPath()); return raw && typeof raw==='object' && !Array.isArray(raw) ? raw : {}; }
   catch { return {}; }
 }
 function uiSyncDir() { return path.join(ROOT, 'data', 'ui-sync'); }
@@ -1681,7 +1688,7 @@ function uiSyncFile(login) {
 }
 function loadQuickPhrases() {
   try {
-    const raw = JSON.parse(fs.readFileSync(quickPhrasesPath(), 'utf8'));
+    const raw = readStoredJson(quickPhrasesPath());
     return Array.isArray(raw?.groups) ? raw.groups : [];
   } catch (err) {
     console.warn('[Quick phrases]', err?.message || err);
@@ -1691,12 +1698,12 @@ function loadQuickPhrases() {
 function readUiSync(login) {
   try {
     const file = uiSyncFile(login);
-    if (!fs.existsSync(file)) return null;
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!storage.enabled && !fs.existsSync(file)) return null;
+    const raw = readStoredJson(file);
     return raw && typeof raw === 'object' ? raw : null;
   } catch { return null; }
 }
-function writeUiSync(login, profile) {
+async function writeUiSync(login, profile) {
   try {
     fs.mkdirSync(uiSyncDir(), { recursive: true });
     const safe = {
@@ -1711,8 +1718,8 @@ function writeUiSync(login, profile) {
       selectedManagerId: profile.selectedManagerId || '',
       capabilities: profile.capabilities || {}, discovered: profile.discovered || {}
     };
-    fs.writeFileSync(uiSyncFile(login), JSON.stringify(safe, null, 2), 'utf8');
-  } catch (err) { console.warn('[BlueSales UI sync cache]', err?.message || err); }
+    await storage.writeDocument(uiSyncFile(login), safe);
+  } catch (err) { if(storage.enabled)throw err;console.warn('[BlueSales UI sync cache]', err?.message || err); }
 }
 function currentUserFrom(users, login) {
   const needle = String(login || '').trim().toLowerCase();
@@ -1804,7 +1811,7 @@ async function syncBlueSalesUi(session, password, users, {force=false}={}) {
       session.uiSyncState = 'ready';
       session.uiSyncMessage = '';
       session.uiProfile = { ...profile, savedAt: new Date().toISOString() };
-      writeUiSync(session.login, session.uiProfile);
+      await writeUiSync(session.login, session.uiProfile);
       console.log(`[BlueSales UI sync] ${session.login}: phrases=${profile.phraseCount || 0}, statuses=${(profile.statuses||[]).length}, tags=${(profile.tags||[]).length}, managers=${(profile.managers||[]).length}, managerColors=${Object.keys(profile.managerColors || {}).length}`);
       return profile;
     } catch (err) {
@@ -2050,7 +2057,7 @@ async function createCustomerFromDraft(session, draft) {
     } catch (lookupErr) {
       // A temporary read failure must not disable the create action. Every write
       // attempt below is followed by a delayed VK-id lookup before another write.
-      console.warn('[BlueSales create] initial duplicate check is temporarily unavailable:', lookupErr?.message || lookupErr);
+      throw new BlueSalesError('Не удалось проверить наличие клиента. Создание не отправлено. Повторите проверку позже.','LOOKUP_UNAVAILABLE');
     }
   }
 
@@ -2059,7 +2066,7 @@ async function createCustomerFromDraft(session, draft) {
   // return its generic HTML error page when optional fields don't match an
   // installation's model. Additional CRM fields are applied with customers.update
   // after the client has a stable BlueSales ID.
-  const createPayload = { fullName };
+  const createPayload = { fullName, manager:{login:String(session.login)}, crmStatus:{name:'Запустил воронку'} };
   if (vkId > 0) createPayload.vk = { id:String(vkId) };
 
   const candidateFrom = value => {
@@ -2081,24 +2088,28 @@ async function createCustomerFromDraft(session, draft) {
   let raw = null;
   let client = null;
   let recoveredFromUpstreamError = false;
-  const createKey=vkId>0?`${session.login}:${vkId}`:'';
+  const createKey=vkId>0?`vk:${vkId}`:'';
   const pending=createKey?pendingCustomerCreates.get(createKey):null;
   if(pending&&pending.expiresAt>Date.now()){
     client=await findCommitted([0,800,1800]);
     if(client?.id)return{created:true,client,recoveredFromUpstreamError:true,deduplicated:true};
     throw new BlueSalesError('BlueSales ещё обрабатывает предыдущий запрос создания. Карточка не отправлялась повторно, чтобы не сделать дубль. Повторите проверку через несколько секунд.','CREATE_PENDING',{vkId});
   }
+  if(createKey){
+    if(!(await storage.claimCreate(createKey)))throw new BlueSalesError('Предыдущая попытка сохранена. Клиент пока не найден: повторная запись заблокирована до проверки администратором.','CREATE_PENDING');
+    pendingCustomerCreates.set(createKey,{expiresAt:Number.MAX_SAFE_INTEGER});
+  }
   try {
     // One mutation per click. Multiple fallback writes caused duplicates when
     // BlueSales committed a card but returned an HTML/502 response.
-    raw = await bsCall(session, 'customers.addMany', [createPayload]);
+    raw = await bsCall(session, 'customers.add', createPayload);
     client = candidateFrom(raw);
   } catch (err) {
-    failures.push({method:'addMany-array',code:String(err?.code||'API'),details:err?.details||err?.message||null});
+    failures.push({method:'customers.add',code:String(err?.code||'API'),details:err?.details||err?.message||null});
   }
   const lastFailureCode=String(failures.at(-1)?.code||'');
   const ambiguousCreate=!failures.length||['BAD_RESPONSE','HTTP','API_BUSY','QUEUE_BUSY','TIMEOUT','NETWORK'].includes(lastFailureCode);
-  if(createKey&&ambiguousCreate)pendingCustomerCreates.set(createKey,{expiresAt:Date.now()+10*60*1000});
+  if(createKey&&ambiguousCreate)pendingCustomerCreates.set(createKey,{expiresAt:Number.MAX_SAFE_INTEGER});
   if(!client?.id){client=await findCommitted();recoveredFromUpstreamError=Boolean(client?.id&&failures.length)}
 
   clearAccountCache(session.login);
@@ -2112,12 +2123,12 @@ async function createCustomerFromDraft(session, draft) {
   if (client?.id) {
     const update = { id:Number(client.id) };
     if (draft?.city) update.city = { name:String(draft.city) };
-    if (draft?.crmStatus) update.crmStatus = { name:String(draft.crmStatus) };
+    update.crmStatus = { name:'Запустил воронку' };
     if (draft?.firstContactDate) update.firstContactDate = String(draft.firstContactDate);
     if (draft?.nextContactDate) update.nextContactDate = String(draft.nextContactDate);
     if (draft?.phone) update.mobilePhone = String(draft.phone);
     if (draft?.email) update.email = String(draft.email);
-    if (draft?.managerLogin) update.manager = { login:String(draft.managerLogin) };
+    update.manager = { login:String(session.login) };
     if (draft?.shortNotes) update.shortNotes = String(draft.shortNotes);
     if (draft?.comments) update.comments = String(draft.comments);
     if (Object.keys(update).length > 1) {
@@ -2145,7 +2156,7 @@ async function createCustomerFromDraft(session, draft) {
       {attempts:failures,response:raw}
     );
   }
-  if(createKey)pendingCustomerCreates.delete(createKey);
+  if(createKey){await storage.confirmCreate(createKey,client.id);pendingCustomerCreates.delete(createKey);}
   return { created:true, client, recoveredFromUpstreamError };
 }
 
@@ -2167,13 +2178,13 @@ const ADMIN_SECTION_KEYS = [
 function userAccessPath(){ return path.join(ROOT,'data','user-access.json'); }
 function loadUserAccess(){
   try{
-    const raw=JSON.parse(fs.readFileSync(userAccessPath(),'utf8'));
+    const raw=readStoredJson(userAccessPath());
     return Array.isArray(raw?.users)?raw:{version:1,users:[]};
   }catch{return {version:1,users:[]};}
 }
-function saveUserAccess(raw){
+async function saveUserAccess(raw){
   const out={version:Number(raw?.version||1),source:raw?.source||'mobile-admin',updatedAt:new Date().toISOString(),users:Array.isArray(raw?.users)?raw.users:[]};
-  fs.writeFileSync(userAccessPath(),JSON.stringify(out,null,2),'utf8');
+  await storage.writeDocument(userAccessPath(),out);
   return out;
 }
 function accessRecordFor(value){
@@ -2208,14 +2219,14 @@ function requireAdminSession(session,res){
 }
 function phraseStore(){
   try{
-    const raw=JSON.parse(fs.readFileSync(quickPhrasesPath(),'utf8'));
+    const raw=readStoredJson(quickPhrasesPath());
     if(raw&&Array.isArray(raw.groups))return raw;
   }catch{}
   return {version:4,source:'mobile-admin',groups:[]};
 }
-function savePhraseStore(store){
+async function savePhraseStore(store){
   const safe={...(store||{}),version:Math.max(Number(store?.version||4),4),source:store?.source||'mobile-admin',updatedAt:new Date().toISOString(),groups:Array.isArray(store?.groups)?store.groups:[]};
-  fs.writeFileSync(quickPhrasesPath(),JSON.stringify(safe,null,2),'utf8');
+  await storage.writeDocument(quickPhrasesPath(),safe);
   return safe;
 }
 function phraseId(){return 'p-'+crypto.randomBytes(7).toString('hex');}
@@ -2335,16 +2346,12 @@ function notificationRulesExportValue(store){
     slaMinutes:r.slaMinutes,workStart:r.workStart,workEnd:r.workEnd,timezone:r.timezone,repeatMinutes:r.repeatMinutes,telegramChatId:r.telegramChatId
   })));
 }
-function readNotificationStore(){
-  try{
-    if(!fs.existsSync(NOTIFICATION_STORE))return hydrateNotificationStoreFromEnvironment(notificationDefaultStore());
-    const raw=JSON.parse(fs.readFileSync(NOTIFICATION_STORE,'utf8'));
-    return hydrateNotificationStoreFromEnvironment(raw);
-  }catch(err){console.warn('[notifications store read]',err?.message||err);return hydrateNotificationStoreFromEnvironment(notificationDefaultStore())}
+async function readNotificationStore(){
+  const raw=await storage.readNotifications(notificationDefaultStore());
+  return storage.trackNotifications(raw,hydrateNotificationStoreFromEnvironment(raw));
 }
-function writeNotificationStore(store){
-  try{fs.mkdirSync(path.dirname(NOTIFICATION_STORE),{recursive:true});store.updatedAt=Date.now();fs.writeFileSync(NOTIFICATION_STORE,JSON.stringify(store,null,2),'utf8');return true}
-  catch(err){console.warn('[notifications store write]',err?.message||err);return false}
+async function writeNotificationStore(store){
+  store.updatedAt=Date.now();await storage.writeNotifications(store);return true;
 }
 function safeNotificationRule(rule={}){
   const manager=String(rule.manager||'').trim();
@@ -2358,6 +2365,8 @@ function safeNotificationRule(rule={}){
     statuses:multiParamValues(Array.isArray(rule.statuses)?rule.statuses.join(','):rule.statuses),
     queueAlerts:rule.queueAlerts!==false,
     slaMinutes:Math.min(Math.max(Number(rule.slaMinutes||8),1),240),
+    violationMinutes:Math.min(Math.max(Number(rule.violationMinutes||20),1),1440),
+    workDays:Array.isArray(rule.workDays)&&rule.workDays.length?[...new Set(rule.workDays.map(Number).filter(d=>d>=1&&d<=7))]:[1,2,3,4,5,6,7],
     workStart:/^\d{2}:\d{2}$/.test(String(rule.workStart||''))?String(rule.workStart):'10:00',
     workEnd:/^\d{2}:\d{2}$/.test(String(rule.workEnd||''))?String(rule.workEnd):'22:00',
     timezone:String(rule.timezone||NOTIFICATION_DEFAULT_TZ||'Europe/Moscow').trim(),
@@ -2410,7 +2419,7 @@ function notificationJournalUpsert(store,input={}){
   const incomingTexts=[...(Array.isArray(current.incomingTexts)?current.incomingTexts:[])];
   for(const value of (Array.isArray(input.incomingTexts)?input.incomingTexts:[])){const text=String(value||'').trim();if(text&&!incomingTexts.includes(text))incomingTexts.push(text.slice(0,1000))}
   const answeredAt=Number(input.answeredAt||current.answeredAt||0);
-  const row={...current,id,peerId,receivedAt,name:String(input.name||current.name||`VK ${peerId}`).slice(0,180),manager:manager||previousManager,managerAtReceipt:String(current.managerAtReceipt??input.managerAtReceipt??manager??''),currentManager:manager||previousManager,managerHistory,crmStatus:crmStatus||previousStatus,statusAtReceipt:String(current.statusAtReceipt??input.statusAtReceipt??crmStatus??''),currentCrmStatus:crmStatus||previousStatus,statusHistory,incomingTexts,snippet:String(input.snippet||current.snippet||incomingTexts.join(' · ')).trim().replace(/\s+/g,' ').slice(0,500),status:(current.status==='answered'||answeredAt)?'answered':'waiting',recordedAt:Number(current.recordedAt||Date.now()),updatedAt:Date.now(),answeredAt,responseText:String(input.responseText??current.responseText??'').trim().slice(0,2000),responseAuthor:String(input.responseAuthor??current.responseAuthor??'').trim().slice(0,180),responseMessageId:String(input.responseMessageId??current.responseMessageId??''),responseStartAt:Number(input.responseStartAt||current.responseStartAt||receivedAt),dueAt:Number(input.dueAt||current.dueAt||0),outsideHoursAtReceipt:Boolean(input.outsideHoursAtReceipt??current.outsideHoursAtReceipt),slaMinutes:Number(input.slaMinutes||current.slaMinutes||8),workStart:String(input.workStart||current.workStart||'10:00'),workEnd:String(input.workEnd||current.workEnd||'22:00'),timezone:String(input.timezone||current.timezone||'Europe/Moscow')};
+  const row={...current,id,peerId,receivedAt,name:String(input.name||current.name||`VK ${peerId}`).slice(0,180),manager:manager||previousManager,managerAtReceipt:String(current.managerAtReceipt??input.managerAtReceipt??manager??''),currentManager:manager||previousManager,managerHistory,crmStatus:crmStatus||previousStatus,statusAtReceipt:String(current.statusAtReceipt??input.statusAtReceipt??crmStatus??''),currentCrmStatus:crmStatus||previousStatus,statusHistory,incomingTexts,snippet:String(input.snippet||current.snippet||incomingTexts.join(' · ')).trim().replace(/\s+/g,' ').slice(0,500),status:(current.status==='answered'||answeredAt)?'answered':'waiting',recordedAt:Number(current.recordedAt||Date.now()),updatedAt:Date.now(),answeredAt,responseText:String(input.responseText??current.responseText??'').trim().slice(0,2000),responseAuthor:String(input.responseAuthor??current.responseAuthor??'').trim().slice(0,180),responseMessageId:String(input.responseMessageId??current.responseMessageId??''),responseStartAt:Number(input.responseStartAt||current.responseStartAt||receivedAt),dueAt:Number(input.dueAt||current.dueAt||0),outsideHoursAtReceipt:Boolean(input.outsideHoursAtReceipt??current.outsideHoursAtReceipt),violationMinutes:Number(current.violationMinutes||input.violationMinutes||20),workDays:current.workDays||input.workDays||[1,2,3,4,5,6,7],slaMinutes:Number(input.slaMinutes||current.slaMinutes||8),workStart:String(input.workStart||current.workStart||'10:00'),workEnd:String(input.workEnd||current.workEnd||'22:00'),timezone:String(input.timezone||current.timezone||'Europe/Moscow')};
   store.journal[id]=row;return row
 }
 function notificationJournalRows(store,{rule=null,admin=false}={}){
@@ -2447,7 +2456,7 @@ function ingestNotificationJournalMessages(store,{peerId,name,manager='',crmStat
   for(const message of ordered){
     if(!message.out){
       if(!open){
-        const window=WorkingSla.responseWindow(Number(message.date)*1000,rule),row=notificationJournalUpsert(store,{peerId,receivedAt:Number(message.date),name,manager,crmStatus,incomingTexts:[journalMessageText(message)],snippet:journalMessageText(message),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone});
+        const window=WorkingSla.responseWindow(Number(message.date)*1000,rule),row=notificationJournalUpsert(store,{peerId,receivedAt:Number(message.date),name,manager,crmStatus,incomingTexts:[journalMessageText(message)],snippet:journalMessageText(message),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,violationMinutes:rule.violationMinutes,workDays:rule.workDays,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone});
         if(row){open=row;changed++}
       }else{
         open=notificationJournalUpsert(store,{...open,manager,crmStatus,incomingTexts:[journalMessageText(message)],snippet:[...(open.incomingTexts||[]),journalMessageText(message)].join(' · ')});changed++;
@@ -2528,7 +2537,7 @@ async function loadDialogsForNotifications(session,{maxPages=5,filter='unanswere
 }
 function notificationDialogUrl(peerId){const base=PUBLIC_BASE_URL||'';return base?`${base}/#/dialogs/${encodeURIComponent(peerId)}`:''}
 async function runNotificationCheck({session=null,manual=false}={}){
-  const store=readNotificationStore(),configuredRules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager),fallbackRule=safeNotificationRule({manager:'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered',workStart:'10:00',workEnd:'22:00',timezone:'Europe/Moscow'});
+  const store=await readNotificationStore(),configuredRules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager),fallbackRule=safeNotificationRule({manager:'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered',workStart:'10:00',workEnd:'22:00',timezone:'Europe/Moscow'});
   const s=session||notificationServiceSession();if(!s)throw Object.assign(new Error('Для фоновой проверки задайте BLUESALES_NOTIFICATION_LOGIN и BLUESALES_NOTIFICATION_PASSWORD в Render'),{status:503,code:'NOTIFICATION_CREDENTIALS'});
   const nowMs=Date.now(),activeRules=configuredRules.filter(r=>notificationWorkingNow(nowMs,r)),fallbackActive=notificationWorkingNow(nowMs,fallbackRule);if(!activeRules.length&&!fallbackActive)return {ok:true,checked:0,sent:0,outsideWorkingHours:true};
   const filters=[...new Set([...activeRules.map(r=>r.dialogFilter),fallbackRule.dialogFilter])],dialogs=[];
@@ -2550,7 +2559,7 @@ async function runNotificationCheck({session=null,manual=false}={}){
   }
   await resolveNotificationJournalReplies(store,s,activeJournalIds,20);
   // Keep the small JSON store bounded on Render's ephemeral filesystem.
-  const cutoff=nowMs-14*24*60*60*1000;for(const[k,v]of Object.entries(store.notified||{}))if(Number(v?.sentAt||0)<cutoff)delete store.notified[k];writeNotificationStore(store);
+  const cutoff=nowMs-14*24*60*60*1000;for(const[k,v]of Object.entries(store.notified||{}))if(Number(v?.sentAt||0)<cutoff)delete store.notified[k];await writeNotificationStore(store);
   return {ok:true,checked,sent,dialogs:dialogs.length,manual}
 }
 let notificationCheckRunning=false;
@@ -2579,11 +2588,11 @@ async function handleTelegramWebhook(req,res){
   if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'Telegram bot не настроен'});
   if(TELEGRAM_WEBHOOK_SECRET&&String(req.headers['x-telegram-bot-api-secret-token']||'')!==TELEGRAM_WEBHOOK_SECRET)return sendJson(res,403,{ok:false});
   const update=await readJson(req),msg=update?.message;if(!msg?.chat?.id)return sendJson(res,200,{ok:true});
-  const text=String(msg.text||'').trim(),chatId=String(msg.chat.id),store=readNotificationStore();
+  const text=String(msg.text||'').trim(),chatId=String(msg.chat.id),store=await readNotificationStore();
   if(/^\/id(?:\s|$)/i.test(text)){await sendTelegramText(chatId,`Ваш Telegram chat ID: ${chatId}\n\nОбычно достаточно подключиться кнопкой в CRM. После подключения всех менеджеров администратор сохранит их в Render через NOTIFICATION_RULES_JSON.`);return sendJson(res,200,{ok:true})}
   const m=text.match(/^\/start(?:\s+([A-Za-z0-9_-]+))?/i);
   if(m){const code=String(m[1]||'');const pair=store.pairCodes?.[code];if(pair&&Number(pair.expiresAt||0)>Date.now()){
-      const rule=findNotificationRule(store,pair.manager)||upsertNotificationRule(store,{manager:pair.manager,enabled:false});rule.telegramChatId=chatId;rule.telegramUsername=String(msg.from?.username||'');rule.telegramFirstName=String(msg.from?.first_name||'');delete store.pairCodes[code];writeNotificationStore(store);await sendTelegramText(chatId,`✅ seb_gun CRM подключена.\nМенеджер: ${rule.manager}\nУведомления: ${rule.enabled?'включены':'пока выключены'}`);return sendJson(res,200,{ok:true})
+      const rule=findNotificationRule(store,pair.manager)||upsertNotificationRule(store,{manager:pair.manager,enabled:false});rule.telegramChatId=chatId;rule.telegramUsername=String(msg.from?.username||'');rule.telegramFirstName=String(msg.from?.first_name||'');delete store.pairCodes[code];await writeNotificationStore(store);await sendTelegramText(chatId,`✅ seb_gun CRM подключена.\nМенеджер: ${rule.manager}\nУведомления: ${rule.enabled?'включены':'пока выключены'}`);return sendJson(res,200,{ok:true})
     }
     await sendTelegramText(chatId,'Откройте «CRM → Ещё → Telegram-уведомления» и нажмите «Подключить Telegram».');return sendJson(res,200,{ok:true})
   }
@@ -2593,14 +2602,26 @@ async function handleTelegramWebhook(req,res){
 
 async function apiRouter(req, res, url) {
   const pathname = url.pathname;
+  if(pathname==='/api/admin/database' && req.method==='GET'){
+    const actor=await requireAuth(req,res);if(!actor||!requireAdminSession(actor,res))return;
+    return sendJson(res,200,{ok:true,database:await storage.health()});
+  }
+  if(pathname==='/api/admin/database/sync' && req.method==='POST'){
+    const actor=await requireAuth(req,res);if(!actor||!requireAdminSession(actor,res)||!requireCsrf(req,res,actor))return;
+    if(!storage.enabled)return sendJson(res,503,{ok:false,message:'PostgreSQL не подключён'});
+    const rows=await getAllCustomersComplete(actor);
+    await storage.observeClients(String(actor.login).toLowerCase(),rows);
+    return sendJson(res,200,{ok:true,clients:rows.length});
+  }
 
   if (pathname === '/api/health' && req.method === 'GET') {
-    return sendJson(res, 200, { ok: true, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:sttReady(), sttMode:STT_PROVIDER==='google-legacy'?'async-google-speechrecognition':(STT_PROVIDER==='speechrecognition'?'async-google-speechrecognition':'async-local-whisper'), sttProvider:STT_PROVIDER, sttModel:STT_PROVIDER==='google-legacy'?'SpeechRecognition/Google':(STT_ENABLED?STT_MODEL:null), sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttAsync:true, telegramConfigured:Boolean(TELEGRAM_BOT_TOKEN), notificationSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET), notificationWorkerCredentials:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD), sessionResume:true, clock:appClockPayload() });
+    const database=await storage.health();
+    return sendJson(res, 200, { ok: true, database, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:sttReady(), sttMode:STT_PROVIDER==='google-legacy'?'async-google-speechrecognition':(STT_PROVIDER==='speechrecognition'?'async-google-speechrecognition':'async-local-whisper'), sttProvider:STT_PROVIDER, sttModel:STT_PROVIDER==='google-legacy'?'SpeechRecognition/Google':(STT_ENABLED?STT_MODEL:null), sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttAsync:true, telegramConfigured:Boolean(TELEGRAM_BOT_TOKEN), notificationSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET), notificationWorkerCredentials:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD), sessionResume:true, clock:appClockPayload() });
   }
 
 
   if (pathname === '/api/telegram/webhook' && req.method === 'POST') {
-    try{return await handleTelegramWebhook(req,res)}catch(err){console.error('[Telegram webhook]',err?.message||err);return sendJson(res,200,{ok:true})}
+    try{return await handleTelegramWebhook(req,res)}catch(err){console.error('[Telegram webhook]',err?.code||'FAILED');return sendJson(res,503,{ok:false})}
   }
 
   if (pathname === '/api/notifications/check' && (req.method === 'POST' || req.method === 'GET')) {
@@ -2641,7 +2662,9 @@ async function apiRouter(req, res, url) {
       expiresAt: now() + SESSION_TTL_MS,
       createdAt: now()
     };
-    const sid = sealSessionSnapshot(s);
+    const sealed = sealSessionSnapshot(s);
+    const sid = storage.enabled ? randomToken(32) : sealed;
+    if(storage.enabled)await storage.saveSession(sid,sealed,s.expiresAt);
     sessions.set(sid, s);
     // Best-effort account sync: uses the same BlueSales credentials only to create an in-memory
     // authenticated web session and read the account's own Quick Phrases / UI metadata.
@@ -2656,41 +2679,41 @@ async function apiRouter(req, res, url) {
 
   if (pathname === '/api/auth/logout' && req.method === 'POST') {
     const cookies = parseCookies(req);
-    if (cookies[COOKIE_NAME]) sessions.delete(cookies[COOKIE_NAME]);
+    if (cookies[COOKIE_NAME]) {await storage.deleteSession(cookies[COOKIE_NAME]);sessions.delete(cookies[COOKIE_NAME]);}
     return sendJson(res, 200, { ok: true }, { 'Set-Cookie': clearSessionCookie(req) });
   }
 
   if (pathname === '/api/session' && req.method === 'GET') {
-    const s = getSession(req);
+    const s = await getSession(req);
     if (!s) return sendJson(res, 200, { authenticated: false, version: VERSION });
     return sendJson(res, 200, { authenticated: true, login: s.login, csrf: s.csrf, version: VERSION, shareBaseUrl:shareBaseUrl(req), account: decorateUserAccess(s.currentUser || {login:s.login}), isAdmin:isAdminSession(s), uiSync: {state:s.uiSyncState || 'unknown', source:s.uiProfile?.source || null, message:s.uiSyncMessage || ''}, vk: { connected: Boolean(s.vkToken), groupId: s.vkGroupId || null, groupName: s.vkGroupName || 'VK Сообщество', groupScreenName: s.vkGroupScreenName || '', groupUrl: PRESET_VK_COMMUNITY_URL || '', groupPhoto: s.vkGroupPhoto || '' } });
   }
 
-  const s = requireAuth(req, res);
+  const s = await requireAuth(req, res);
   if (!s) return;
 
   if (pathname === '/api/notifications/settings' && req.method === 'GET') {
-    const store=readNotificationStore();
+    const store=await readNotificationStore();
     const visibleRules=(store.rules||[]).filter(r=>canManageNotificationManager(s,r.manager));
     return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:notificationMissingEnvironment().length===0,workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState},rules:visibleRules.map(notificationRulePublic),filesystemPersistent:false});
   }
   if (pathname === '/api/notifications/settings' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
-    try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно настроить только свой Telegram'});const store=readNotificationStore(),rule=upsertNotificationRule(store,body);writeNotificationStore(store);return sendJson(res,200,{ok:true,rule:notificationRulePublic(rule)})}catch(err){return handleApiError(res,err)}
+    try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно настроить только свой Telegram'});const store=await readNotificationStore(),rule=upsertNotificationRule(store,body);await writeNotificationStore(store);return sendJson(res,200,{ok:true,rule:notificationRulePublic(rule)})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/pair' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
-    try{if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'В Render → Environment добавьте секрет TELEGRAM_BOT_TOKEN и дождитесь перезапуска сервиса'});await refreshTelegramBotIdentity();const body=await readJson(req),manager=String(body.manager||'').trim();if(!manager)return sendJson(res,400,{ok:false,message:'Выберите менеджера'});if(!canManageNotificationManager(s,manager))return sendJson(res,403,{ok:false,message:'Можно подключить только свой Telegram'});const store=readNotificationStore();upsertNotificationRule(store,{manager,...(findNotificationRule(store,manager)||{})});const code=randomToken(12);store.pairCodes=store.pairCodes||{};store.pairCodes[code]={manager,expiresAt:Date.now()+15*60*1000};writeNotificationStore(store);return sendJson(res,200,{ok:true,botUsername:activeTelegramBotUsername,pairUrl:`https://t.me/${activeTelegramBotUsername}?start=${code}`,expiresMinutes:15})}catch(err){return handleApiError(res,err)}
+    try{if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'В Render → Environment добавьте секрет TELEGRAM_BOT_TOKEN и дождитесь перезапуска сервиса'});await refreshTelegramBotIdentity();const body=await readJson(req),manager=String(body.manager||'').trim();if(!manager)return sendJson(res,400,{ok:false,message:'Выберите менеджера'});if(!canManageNotificationManager(s,manager))return sendJson(res,403,{ok:false,message:'Можно подключить только свой Telegram'});const store=await readNotificationStore();upsertNotificationRule(store,{manager,...(findNotificationRule(store,manager)||{})});const code=randomToken(12);store.pairCodes=store.pairCodes||{};store.pairCodes[code]={manager,expiresAt:Date.now()+15*60*1000};await writeNotificationStore(store);return sendJson(res,200,{ok:true,botUsername:activeTelegramBotUsername,pairUrl:`https://t.me/${activeTelegramBotUsername}?start=${code}`,expiresMinutes:15})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/unpair' && req.method === 'POST') {
-    if(!requireCsrf(req,res,s))return;const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно отключить только свой Telegram'});const store=readNotificationStore(),rule=findNotificationRule(store,body.manager);if(rule){rule.telegramChatId='';rule.telegramUsername='';rule.telegramFirstName='';writeNotificationStore(store)}return sendJson(res,200,{ok:true})
+    if(!requireCsrf(req,res,s))return;const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно отключить только свой Telegram'});const store=await readNotificationStore(),rule=findNotificationRule(store,body.manager);if(rule){rule.telegramChatId='';rule.telegramUsername='';rule.telegramFirstName='';await writeNotificationStore(store)}return sendJson(res,200,{ok:true})
   }
   if (pathname === '/api/notifications/test' && req.method === 'POST') {
-    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно проверить только свой Telegram'});const store=readNotificationStore(),rule=findNotificationRule(store,body.manager);if(!rule?.telegramChatId)return sendJson(res,400,{ok:false,message:'Сначала подключите Telegram этого менеджера'});await sendTelegramText(rule.telegramChatId,`✅ Тест seb_gun CRM\nМенеджер: ${rule.manager}\nSLA: ${rule.slaMinutes} рабочих минут\nГрафик: ${rule.workStart}–${rule.workEnd}`);return sendJson(res,200,{ok:true})}catch(err){return handleApiError(res,err)}
+    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно проверить только свой Telegram'});const store=await readNotificationStore(),rule=findNotificationRule(store,body.manager);if(!rule?.telegramChatId)return sendJson(res,400,{ok:false,message:'Сначала подключите Telegram этого менеджера'});await sendTelegramText(rule.telegramChatId,`✅ Тест seb_gun CRM\nМенеджер: ${rule.manager}\nSLA: ${rule.slaMinutes} рабочих минут\nГрафик: ${rule.workStart}–${rule.workEnd}`);return sendJson(res,200,{ok:true})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/admin/notification-rules-export' && req.method === 'GET') {
     if(!requireAdminSession(s,res))return;
-    const store=readNotificationStore(),connected=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager&&r.telegramChatId);
+    const store=await readNotificationStore(),connected=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager&&r.telegramChatId);
     return sendJson(res,200,{ok:true,key:'NOTIFICATION_RULES_JSON',value:notificationRulesExportValue(store),count:connected.length});
   }
   if (pathname === '/api/notifications/check-now' && req.method === 'POST') {
@@ -2698,7 +2721,7 @@ async function apiRouter(req, res, url) {
   }
   if (pathname === '/api/notifications/overview' && req.method === 'GET') {
     try {
-      const store=readNotificationStore(),names=notificationActorNames(s),saved=(store.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
+      const store=await readNotificationStore(),names=notificationActorNames(s),saved=(store.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
       const rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered'});
       const allDialogs=await loadDialogsForNotifications(s,{maxPages:2,filter:'all'});
       await syncRecentLeadJournal(s,store,allDialogs,rule,{limit:40});
@@ -2709,37 +2732,37 @@ async function apiRouter(req, res, url) {
         manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',
         snippet:String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),
         since,waitMinutes:Math.max(0,Math.floor((now-Number(since||now))/60)),
-        workingWaitMinutes:workingMinutesUntilThreshold(Number(since||now)*1000,Date.now(),rule,rule.slaMinutes),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone
+        workingWaitMinutes:workingMinutesUntilThreshold(Number(since||now)*1000,Date.now(),rule,rule.slaMinutes),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,violationMinutes:rule.violationMinutes,workDays:rule.workDays,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone
       }}).filter(d=>d.workingWaitMinutes>=rule.slaMinutes).sort((a,b)=>b.workingWaitMinutes-a.workingWaitMinutes);
       const activeJournalIds=new Set();for(const row of activeRows){const savedRow=notificationJournalUpsert(store,{...row,receivedAt:row.since});if(savedRow)activeJournalIds.add(savedRow.id)}
       await resolveNotificationJournalReplies(store,s,activeJournalIds,20);
       const rows=notificationJournalRows(store,{admin:true}).map(row=>({...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0,workingWaitMinutes:row.status==='waiting'?workingMinutesUntilThreshold(row.receivedAt*1000,Date.now(),row,row.slaMinutes):workingMinutesUntilThreshold(row.receivedAt*1000,(row.answeredAt||row.receivedAt)*1000,row,row.slaMinutes)}));
-      const outbox=notificationOutboxRows(store,s);writeNotificationStore(store);
-      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses},historySync:{dialogs:Math.min(40,allDialogs.length),mode:'recent-vk-history'}});
+      const outbox=notificationOutboxRows(store,s);await writeNotificationStore(store);
+      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),violationMinutes:rule.violationMinutes,workDays:rule.workDays,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses},historySync:{dialogs:Math.min(40,allDialogs.length),mode:'recent-vk-history'}});
     } catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/admin/notification-journal' && req.method === 'GET') {
-    if(!requireAdminSession(s,res))return;const store=readNotificationStore();return sendJson(res,200,{ok:true,rows:notificationJournalRows(store,{admin:true})});
+    if(!requireAdminSession(s,res))return;const store=await readNotificationStore();return sendJson(res,200,{ok:true,rows:notificationJournalRows(store,{admin:true})});
   }
   const adminNotificationJournalMatch=pathname.match(/^\/api\/admin\/notification-journal\/([^/]+)$/);
   if(adminNotificationJournalMatch&&req.method==='DELETE'){
     if(!requireAdminSession(s,res))return;if(!requireCsrf(req,res,s))return;
-    const id=decodeURIComponent(adminNotificationJournalMatch[1]),store=readNotificationStore();if(!deleteNotificationJournalRow(store,id))return sendJson(res,404,{ok:false,message:'Запись уведомления не найдена'});writeNotificationStore(store);return sendJson(res,200,{ok:true,id});
+    const id=decodeURIComponent(adminNotificationJournalMatch[1]),store=await readNotificationStore();if(!deleteNotificationJournalRow(store,id))return sendJson(res,404,{ok:false,message:'Запись уведомления не найдена'});await writeNotificationStore(store);return sendJson(res,200,{ok:true,id});
   }
   if (pathname === '/api/notifications/outbox-event' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
-    try{const body=await readJson(req),store=readNotificationStore(),row=upsertNotificationOutbox(store,body,s);writeNotificationStore(store);return sendJson(res,200,{ok:true,row})}catch(err){return handleApiError(res,err)}
+    try{const body=await readJson(req),store=await readNotificationStore(),row=upsertNotificationOutbox(store,body,s);await writeNotificationStore(store);return sendJson(res,200,{ok:true,row})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/queue-alert' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
     try {
-      const body=await readJson(req),store=readNotificationStore(),row=upsertNotificationOutbox(store,{...body,status:'error',attempts:body.attempts||2},s);
+      const body=await readJson(req),store=await readNotificationStore(),row=upsertNotificationOutbox(store,{...body,status:'error',attempts:body.attempts||2},s);
       const names=notificationActorNames(s);
       const rules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.queueAlerts&&r.telegramChatId&&names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
       const who=String(body.peerName||'').trim()||`VK ${Number(body.peerId||0)}`;
       const text=`🟠 Сообщение стоит в очереди\n\nКлиент: ${who}\nМенеджер: ${row.manager||names[0]||'Не определён'}\nПричина: ${String(body.error||'сервер временно недоступен').slice(0,250)}\nCRM продолжит повторять отправку.`;
       for(const r of rules)await sendTelegramText(r.telegramChatId,text,{url:notificationDialogUrl(Number(body.peerId||0))});
-      row.alerted=true;writeNotificationStore(store);
+      row.alerted=true;await writeNotificationStore(store);
       return sendJson(res,200,{ok:true,sent:rules.length});
     } catch(err){return handleApiError(res,err)}
   }
@@ -2928,8 +2951,8 @@ async function apiRouter(req, res, url) {
       if (!peer.name && crm?.fullName) peer.name = crm.fullName;
       if (!peer.name) peer.name = peer.peerType === 'chat' ? `Беседа ${peerId}` : `VK ${peerId}`;
       if(peer.peerType==='user'){
-        const notificationStore=readNotificationStore(),names=notificationActorNames(s),saved=(notificationStore.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager))),rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[]});
-        if(ingestNotificationJournalMessages(notificationStore,{peerId,name:crm?.fullName||peer.name,manager:crm?.manager||crm?.managerLogin||'',crmStatus:crm?.crmStatus||'',messages,rule}))writeNotificationStore(notificationStore);
+        const notificationStore=await readNotificationStore(),names=notificationActorNames(s),saved=(notificationStore.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager))),rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[]});
+        if(ingestNotificationJournalMessages(notificationStore,{peerId,name:crm?.fullName||peer.name,manager:crm?.manager||crm?.managerLogin||'',crmStatus:crm?.crmStatus||'',messages,rule}))await writeNotificationStore(notificationStore);
       }
       return sendJson(res, 200, { ok: true, peerId, peer, messages, total: Number(raw?.count || messages.length), crm });
     } catch (err) { return handleApiError(res, err); }
@@ -2997,7 +3020,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       try{
         const result=await sendPromise;
         recentMessageSends.set(dedupeKey,{result,expiresAt:Date.now()+dedupeTtl});
-        const notificationStore=readNotificationStore();if(markNotificationJournalAnswered(notificationStore,peerId,Math.floor(Date.now()/1000),{responseText:[message,attachment?'[Вложение]':'',stickerId?'[Стикер]':'',forwardMessageIds.length?'[Пересланные сообщения]':''].filter(Boolean).join(' '),responseAuthor:s.currentUser?.name||s.login,responseMessageId:result.messageId}))writeNotificationStore(notificationStore);
+        const notificationStore=await readNotificationStore();if(markNotificationJournalAnswered(notificationStore,peerId,Math.floor(Date.now()/1000),{responseText:[message,attachment?'[Вложение]':'',stickerId?'[Стикер]':'',forwardMessageIds.length?'[Пересланные сообщения]':''].filter(Boolean).join(' '),responseAuthor:s.currentUser?.name||s.login,responseMessageId:result.messageId}))await writeNotificationStore(notificationStore);
         return sendJson(res,200,result);
       }catch(err){recentMessageSends.delete(dedupeKey);throw err}
     } catch (err) { return handleApiError(res, err); }
@@ -3089,7 +3112,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       if(ms.loggedManager && String(ms.loggedManager.login||'').toLowerCase()===String(s.login||'').toLowerCase()){
         s.currentUser=normalizeUser(ms.loggedManager);
       }
-      writeUiSync(s.login,profile);
+      await writeUiSync(s.login,profile);
       clearAccountCache(s.login);
       return sendJson(res,200,{
         ok:true,
@@ -3166,7 +3189,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       if(!name)return sendJson(res,400,{ok:false,message:'Не указан CRM-статус'});
       if(color&&!/^#[0-9a-f]{6}$/i.test(color))return sendJson(res,400,{ok:false,message:'Цвет должен быть в формате #RRGGBB'});
       const colors=loadStatusColorOverrides();if(color)colors[name]=color;else delete colors[name];
-      fs.writeFileSync(statusColorsPath(),JSON.stringify(colors,null,2),'utf8');clearAccountCache(s.login);
+      await storage.writeDocument(statusColorsPath(),colors);clearAccountCache(s.login);
       return sendJson(res,200,{ok:true,status:{name,color}});
     }catch(err){return handleApiError(res,err);}
   }
@@ -3191,12 +3214,12 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
         if(c&&!/^#[0-9a-f]{6}$/i.test(c))return sendJson(res,400,{ok:false,message:'Цвет должен быть в формате #RRGGBB'});
         rec.color=c;
         const colors=loadManagerColorOverrides();if(c){colors[rec.name]=c;}else delete colors[rec.name];
-        fs.writeFileSync(managerColorsPath(),JSON.stringify(colors,null,2),'utf8');
+        await storage.writeDocument(managerColorsPath(),colors);
       }
       if(b.role!==undefined && ['manager','admin','creator_admin'].includes(String(b.role)))rec.role=String(b.role);
       if(b.status!==undefined && ['active','blocked'].includes(String(b.status)))rec.status=String(b.status);
       if(Array.isArray(b.sections))rec.sections=b.sections.map(String).filter(x=>ADMIN_SECTION_KEYS.includes(x));
-      saveUserAccess(data);clearAccountCache(s.login);
+      await saveUserAccess(data);clearAccountCache(s.login);
       return sendJson(res,200,{ok:true,user:decorateUserAccess(rec),message:'Настройки мобильной версии сохранены. Права самого BlueSales меняются только в BlueSales.'});
     }catch(err){return handleApiError(res,err);}
   }
@@ -3213,7 +3236,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       const b=await readJson(req,2*1024*1024), phrase=cleanPhraseInput(b);
       if(!phrase.name)return sendJson(res,400,{ok:false,message:'Введите название фразы'});
       const store=phraseStore(),g=ensurePhraseGroup(store,b.groupName);
-      phrase.id=phraseId();g.phrases.push(phrase);savePhraseStore(store);clearAccountCache(s.login);
+      phrase.id=phraseId();g.phrases.push(phrase);await savePhraseStore(store);clearAccountCache(s.login);
       return sendJson(res,200,{ok:true,phrase,group:g.name});
     }catch(err){return handleApiError(res,err);}
   }
@@ -3225,7 +3248,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       if(!name)return sendJson(res,400,{ok:false,message:'Введите название раздела'});
       const store=phraseStore();
       if((store.groups||[]).some(g=>String(g.name||'').trim().toLocaleLowerCase('ru-RU')===name.toLocaleLowerCase('ru-RU')))return sendJson(res,409,{ok:false,message:'Такой раздел уже существует'});
-      const group=ensurePhraseGroup(store,name);savePhraseStore(store);clearAccountCache(s.login);
+      const group=ensurePhraseGroup(store,name);await savePhraseStore(store);clearAccountCache(s.login);
       return sendJson(res,200,{ok:true,group});
     }catch(err){return handleApiError(res,err)}
   }
@@ -3241,7 +3264,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       // v24.5: normal editing NEVER changes the section or position.
       // Moving is a separate explicit action through /move.
       found.group.phrases[found.index]=phrase;
-      savePhraseStore(store);
+      await savePhraseStore(store);
       clearAccountCache(s.login);
       return sendJson(res,200,{ok:true,phrase,group:found.group.name,index:found.index,moved:false});
     }catch(err){return handleApiError(res,err);}
@@ -3254,7 +3277,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       const id=decodeURIComponent(adminPhraseMoveMatch[1]),b=await readJson(req,512*1024),store=phraseStore();
       const moved=movePhraseInStore(store,id,b||{});
       if(!moved)return sendJson(res,404,{ok:false,message:'Фраза не найдена'});
-      savePhraseStore(store);
+      await savePhraseStore(store);
       clearAccountCache(s.login);
       console.log(`[UI] ${s.login} phrase-move | ${JSON.stringify({id,from:moved.fromGroup,to:moved.group,index:moved.index})}`);
       return sendJson(res,200,{ok:true,...moved});
@@ -3267,7 +3290,7 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
     try{
       const id=decodeURIComponent(adminPhraseMatch[1]),store=phraseStore(),found=findPhrase(store,id);
       if(!found)return sendJson(res,404,{ok:false,message:'Фраза не найдена'});
-      found.group.phrases.splice(found.index,1);store.groups=store.groups.filter(x=>(x.phrases||[]).length);savePhraseStore(store);clearAccountCache(s.login);
+      found.group.phrases.splice(found.index,1);store.groups=store.groups.filter(x=>(x.phrases||[]).length);await savePhraseStore(store);clearAccountCache(s.login);
       return sendJson(res,200,{ok:true});
     }catch(err){return handleApiError(res,err);}
   }
@@ -3649,13 +3672,17 @@ const server = http.createServer(async (req, res) => {
   if(shouldLog)res.on('finish',()=>console.log(`[HTTP] ${req.method} ${pathname} -> ${res.statusCode} (${Date.now()-started}ms)`));
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    if (url.pathname.startsWith('/api/')) return await apiRouter(req, res, url);
+    if (url.pathname === '/api/health') return await apiRouter(req,res,url);
+    if (url.pathname.startsWith('/api/')) return await storage.run(()=>apiRouter(req, res, url));
     return serveStatic(req, res, url.pathname);
   } catch (err) {
     return handleApiError(res, err);
   }
 });
 
+async function startServer(){
+if(storage.enabled&&String(process.env.SESSION_SECRET||'').length<32)throw new Error('SESSION_SECRET must contain at least 32 characters');
+await storage.init();
 server.listen(PORT, HOST, () => {
   console.log('');
   console.log(`seb_gun CRM + VK DIRECT v${VERSION}`);
@@ -3686,5 +3713,6 @@ server.listen(PORT, HOST, () => {
   if(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD&&PRESET_VK_TOKEN){setTimeout(runScheduledNotificationCheck,15000);setInterval(runScheduledNotificationCheck,60000)}
 });
 
-process.on('SIGINT', () => server.close(() => process.exit(0)));
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
+}
+startServer().catch(async err=>{console.error('[startup]',err.code||'DATABASE_INIT_FAILED');await storage.close().catch(()=>{});process.exit(1)});
+for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>server.close(async()=>{await storage.close();process.exit(0)}));

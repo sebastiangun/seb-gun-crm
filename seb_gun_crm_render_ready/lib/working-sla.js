@@ -4,12 +4,13 @@ const formatterCache=new Map();
 
 function timeParts(timestamp,timeZone='Europe/Moscow'){
   const key=String(timeZone||'Europe/Moscow');let formatter=formatterCache.get(key);
-  if(!formatter){formatter=new Intl.DateTimeFormat('en-US',{timeZone:key,hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});formatterCache.set(key,formatter)}
-  const out={hour:0,minute:0,second:0};for(const part of formatter.formatToParts(new Date(timestamp))){if(part.type in out)out[part.type]=Number(part.value)}return out
+  if(!formatter){formatter=new Intl.DateTimeFormat('en-US',{timeZone:key,hour:'2-digit',minute:'2-digit',second:'2-digit',weekday:'short',hourCycle:'h23'});formatterCache.set(key,formatter)}
+  const out={hour:0,minute:0,second:0};for(const part of formatter.formatToParts(new Date(timestamp))){if(part.type==='weekday')out.weekday=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].indexOf(part.value)+1;else if(part.type in out)out[part.type]=Number(part.value)}return out
 }
 function hhmmMinutes(value='00:00'){const [hour,minute]=String(value).split(':').map(Number);return Math.max(0,Math.min(1439,(Number(hour)||0)*60+(Number(minute)||0)))}
 function isWorkingTime(timestamp,rule={}){
   const parts=timeParts(timestamp,rule.timezone||'Europe/Moscow'),minute=parts.hour*60+parts.minute,start=hhmmMinutes(rule.workStart||'10:00'),end=hhmmMinutes(rule.workEnd||'22:00');
+  if(Array.isArray(rule.workDays)){const day=start>end&&minute<end?(parts.weekday===1?7:parts.weekday-1):parts.weekday;if(!rule.workDays.includes(day))return false;}
   if(start===end)return true;return start<end?(minute>=start&&minute<end):(minute>=start||minute<end)
 }
 function nextMinuteBoundary(timestamp){return Math.floor(Number(timestamp)/60000)*60000+60000}

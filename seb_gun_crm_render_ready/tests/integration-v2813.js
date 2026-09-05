@@ -6,7 +6,7 @@ const server=read('server.js'),pkg=JSON.parse(read('package.json')),notification
 function must(value,message){if(!value)throw new Error(message)}
 function utc(y,m,d,h,min=0,sec=0){return Date.UTC(y,m-1,d,h,min,sec)}
 const rule={slaMinutes:8,workStart:'10:00',workEnd:'22:00',timezone:'Europe/Moscow'};
-must(/^28\.(13|14|15)\.0$/.test(pkg.version)&&/const VERSION = '28\.(13|14|15)'/.test(server),'version mismatch');
+must(/^28\.(13|14|15|16)\.0$/.test(pkg.version)&&/const VERSION = '28\.(13|14|15|16)'/.test(server),'version mismatch');
 const night=sla.responseWindow(utc(2026,9,5,19,30),rule);
 must(night.outsideHoursAtReceipt&&night.responseStartAt===utc(2026,9,6,7,0)&&night.dueAt===utc(2026,9,6,7,8),'22:30 MSK must start at 10:00 and expire at 10:08 next day');
 const morning=sla.responseWindow(utc(2026,9,5,6,50),rule);

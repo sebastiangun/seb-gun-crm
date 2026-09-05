@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
 
-    buildCommand: cd seb_gun_crm_render_ready && npm install && npm run build && npm run check:runtime && npm run test:v283 && npm run test:v284 && npm run test:v285 && npm run test:v286 && npm run test:v287 && npm run test:v288 && npm run test:v289 && npm run test:v2810 && npm run test:v2811 && npm run test:v2812 && npm run test:v2813 && npm run test:v2814 && npm run test:v2815
+    buildCommand: cd seb_gun_crm_render_ready && npm ci --include=dev && npm run build && npm run check:runtime && npm run test:v283 && npm run test:v284 && npm run test:v285 && npm run test:v286 && npm run test:v287 && npm run test:v288 && npm run test:v289 && npm run test:v2810 && npm run test:v2811 && npm run test:v2812 && npm run test:v2813 && npm run test:v2814 && npm run test:v2815 && npm run test:database
     startCommand: cd seb_gun_crm_render_ready && npm start
 
     healthCheckPath: /api/health
@@ -93,3 +93,13 @@ services:
         sync: false
       - key: VK_COMMUNITY_URL
         sync: false
+
+      # PostgreSQL secrets: enter in Render Environment.
+      - key: DATABASE_URL
+        sync: false
+      - key: REQUIRE_DATABASE
+        value: "1"
+      - key: SESSION_SECRET
+        sync: false
+      - key: DB_IMPORT_ON_START
+        value: "0"

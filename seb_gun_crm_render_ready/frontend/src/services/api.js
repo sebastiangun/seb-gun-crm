@@ -85,6 +85,7 @@ async function request(path, options = {}) {
 }
 
 export const api = {
+  syncDatabase: () => request('/api/admin/database/sync', {method:'POST',body:{},timeout:120000,dedupe:false}),
   session: () => request('/api/session', { timeout: 60000 }),
   login: async (login, password) => {
     const data = await request('/api/auth/login', { method: 'POST', body: { login, password }, timeout: 60000 })

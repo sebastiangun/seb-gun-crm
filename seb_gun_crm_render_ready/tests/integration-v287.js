@@ -3,7 +3,7 @@ const fs=require('fs'),path=require('path'),root=path.join(__dirname,'..');
 const read=p=>fs.readFileSync(path.join(root,p),'utf8');
 const server=read('server.js'),pkg=JSON.parse(read('package.json')),composer=read('frontend/src/components/Composer.vue'),admin=read('frontend/src/views/AdminView.vue'),dialogs=read('frontend/src/stores/dialogs.js'),api=read('frontend/src/services/api.js'),router=read('frontend/src/router/index.js'),more=read('frontend/src/views/MoreView.vue'),css=read('frontend/src/assets/base.css');
 function must(v,m){if(!v)throw new Error(m)}
-must(/^28\.(7|8|9|10|11|12|13|14|15)\.0$/.test(pkg.version)&&/const VERSION = '28\.(7|8|9|10|11|12|13|14|15)'/.test(server),'version mismatch');
+must(/^28\.(7|8|9|10|11|12|13|14|15|16)\.0$/.test(pkg.version)&&/const VERSION = '28\.(7|8|9|10|11|12|13|14|15|16)'/.test(server),'version mismatch');
 must(composer.includes('resizeInput')&&composer.includes("el.style.height = 'auto'")&&composer.includes('overflowY'),'composer must grow and then scroll');
 must(router.includes("/admin/:section?")&&more.includes('session.isAdmin'),'admin routes must only be advertised to admins');
 must(admin.includes('Быстрые фразы')&&admin.includes('Пользователи')&&admin.includes('CRM-статусы'),'admin tabs missing');

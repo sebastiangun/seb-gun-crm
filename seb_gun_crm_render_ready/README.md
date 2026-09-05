@@ -1,3 +1,5 @@
+> Версия 28.16: сначала прочитайте [START_HERE_POSTGRESQL.md](START_HERE_POSTGRESQL.md). Не обновляйте Render до экспорта действующего журнала.
+
 # seb_gun CRM v28.3 — Vue workspace
 
 Это новая ветка интерфейса. Backend Node.js, VK API и BlueSales API сохранены, frontend переписан на Vue 3 + Pinia + Vue Router + Vite.
