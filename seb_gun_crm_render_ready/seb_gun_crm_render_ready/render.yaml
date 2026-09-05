@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
 
-    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install && npm run build && npm run check:runtime && npm run test:v283 && npm run test:v284 && npm run test:v285 && npm run test:v286 && npm run test:v287 && npm run test:v288 && npm run test:v289 && npm run test:v2810 && npm run test:v2811 && npm run test:v2812
+    buildCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm install && npm run build && npm run check:runtime && npm run test:v283 && npm run test:v284 && npm run test:v285 && npm run test:v286 && npm run test:v287 && npm run test:v288 && npm run test:v289 && npm run test:v2810 && npm run test:v2811 && npm run test:v2812 && npm run test:v2813
     startCommand: cd seb_gun_crm_render_ready/seb_gun_crm_render_ready && npm start
 
     healthCheckPath: /api/health

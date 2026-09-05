@@ -11,6 +11,7 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 const { URL } = require('url');
 const BlueSalesWeb = require('./lib/bluesales-web');
+const WorkingSla = require('./lib/working-sla');
 
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
@@ -56,7 +57,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.12';
+const VERSION = '28.13';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -2376,7 +2377,7 @@ function notificationJournalUpsert(store,input={}){
   if(!peerId||!receivedAt)return null;
   const id=notificationJournalId(peerId,receivedAt);if(store.deletedJournal[id])return null;
   const current=store.journal[id]||{};
-  const row={...current,id,peerId,receivedAt,name:String(input.name||current.name||`VK ${peerId}`).slice(0,180),manager:String(input.manager||current.manager||'').slice(0,180),crmStatus:String(input.crmStatus||current.crmStatus||'').slice(0,180),snippet:String(input.snippet||current.snippet||'').trim().replace(/\s+/g,' ').slice(0,240),status:current.status==='answered'?'answered':'waiting',recordedAt:Number(current.recordedAt||Date.now()),updatedAt:Date.now(),answeredAt:Number(current.answeredAt||0)};
+  const row={...current,id,peerId,receivedAt,name:String(input.name||current.name||`VK ${peerId}`).slice(0,180),manager:String(input.manager||current.manager||'').slice(0,180),crmStatus:String(input.crmStatus||current.crmStatus||'').slice(0,180),snippet:String(input.snippet||current.snippet||'').trim().replace(/\s+/g,' ').slice(0,240),status:current.status==='answered'?'answered':'waiting',recordedAt:Number(current.recordedAt||Date.now()),updatedAt:Date.now(),answeredAt:Number(current.answeredAt||0),responseStartAt:Number(input.responseStartAt||current.responseStartAt||receivedAt),dueAt:Number(input.dueAt||current.dueAt||0),outsideHoursAtReceipt:Boolean(input.outsideHoursAtReceipt??current.outsideHoursAtReceipt),slaMinutes:Number(input.slaMinutes||current.slaMinutes||8),workStart:String(input.workStart||current.workStart||'10:00'),workEnd:String(input.workEnd||current.workEnd||'22:00'),timezone:String(input.timezone||current.timezone||'Europe/Moscow')};
   store.journal[id]=row;return row
 }
 function notificationJournalRows(store,{rule=null,admin=false}={}){
@@ -2436,23 +2437,11 @@ function notificationCheckAuthorized(req,url){
   const auth=String(req.headers.authorization||'');if(auth===`Bearer ${NOTIFICATION_CHECK_SECRET}`)return true;
   return String(url.searchParams.get('key')||'')===NOTIFICATION_CHECK_SECRET
 }
-const zonedFormatterCache=new Map();
-function zonedParts(ts,timeZone){
-  const key=String(timeZone||NOTIFICATION_DEFAULT_TZ);let fmt=zonedFormatterCache.get(key);
-  if(!fmt){fmt=new Intl.DateTimeFormat('en-US',{timeZone:key,weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});zonedFormatterCache.set(key,fmt)}
-  const out={weekday:'',hour:0,minute:0};for(const p of fmt.formatToParts(new Date(ts))){if(p.type==='weekday')out.weekday=p.value;if(p.type==='hour')out.hour=Number(p.value);if(p.type==='minute')out.minute=Number(p.value)}return out
-}
-function hhmmMinutes(value='00:00'){const [h,m]=String(value).split(':').map(Number);return Math.max(0,Math.min(1439,(Number(h)||0)*60+(Number(m)||0)))}
 function notificationWorkingNow(ts,rule){
-  const p=zonedParts(ts,rule.timezone),minute=p.hour*60+p.minute,start=hhmmMinutes(rule.workStart),end=hhmmMinutes(rule.workEnd);
-  if(start===end)return true;return start<end?(minute>=start&&minute<end):(minute>=start||minute<end)
+  return WorkingSla.isWorkingTime(ts,rule)
 }
 function workingMinutesUntilThreshold(startMs,endMs,rule,threshold){
-  if(!Number.isFinite(startMs)||!Number.isFinite(endMs)||endMs<=startMs)return 0;
-  const need=Math.max(1,Number(threshold||rule.slaMinutes||8)),maxLookback=8*24*60,span=Math.min(maxLookback,Math.ceil((endMs-startMs)/60000)+2);let count=0;
-  let t=Math.max(startMs,endMs-maxLookback*60000);t=Math.floor(t/60000)*60000;
-  for(let i=0;i<span&&t<endMs;i++,t+=60000){if(notificationWorkingNow(t,rule)&&++count>=need)return count}
-  return count
+  return WorkingSla.workingMinutesBetween(startMs,endMs,{...rule,slaMinutes:threshold||rule.slaMinutes||8})
 }
 async function unansweredSinceForPeer(session,peerId){
   const params={peer_id:Number(peerId),count:100,offset:0,extended:0};if(session.vkGroupId)params.group_id=session.vkGroupId;
@@ -2474,19 +2463,20 @@ async function loadDialogsForNotifications(session,{maxPages=5,filter='unanswere
 }
 function notificationDialogUrl(peerId){const base=PUBLIC_BASE_URL||'';return base?`${base}/#/dialogs/${encodeURIComponent(peerId)}`:''}
 async function runNotificationCheck({session=null,manual=false}={}){
-  const store=readNotificationStore(),rules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.enabled&&r.telegramChatId&&r.manager);if(!rules.length)return {ok:true,checked:0,sent:0,message:'Нет активных подключённых правил'};
+  const store=readNotificationStore(),configuredRules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager),fallbackRule=safeNotificationRule({manager:'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered',workStart:'10:00',workEnd:'22:00',timezone:'Europe/Moscow'});
   const s=session||notificationServiceSession();if(!s)throw Object.assign(new Error('Для фоновой проверки задайте BLUESALES_NOTIFICATION_LOGIN и BLUESALES_NOTIFICATION_PASSWORD в Render'),{status:503,code:'NOTIFICATION_CREDENTIALS'});
-  const nowMs=Date.now(),activeRules=rules.filter(r=>notificationWorkingNow(nowMs,r));if(!activeRules.length)return {ok:true,checked:0,sent:0,outsideWorkingHours:true};
-  const filters=[...new Set(activeRules.map(r=>r.dialogFilter))],dialogs=[];
+  const nowMs=Date.now(),activeRules=configuredRules.filter(r=>notificationWorkingNow(nowMs,r)),fallbackActive=notificationWorkingNow(nowMs,fallbackRule);if(!activeRules.length&&!fallbackActive)return {ok:true,checked:0,sent:0,outsideWorkingHours:true};
+  const filters=[...new Set([...activeRules.map(r=>r.dialogFilter),fallbackRule.dialogFilter])],dialogs=[];
   for(const filter of filters){const rows=await loadDialogsForNotifications(s,{filter});for(const row of rows)dialogs.push({...row,notificationFilter:filter})}
-  const relevant=dialogs.filter(d=>activeRules.some(r=>r.dialogFilter===d.notificationFilter&&customerMatchesManager(d.crm||{},(r.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(','))));let sent=0,checked=0;const activeJournalIds=new Set();
-  for(const d of relevant){
-    const matching=activeRules.filter(r=>r.dialogFilter===d.notificationFilter&&customerMatchesManager(d.crm||{},(r.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(',')));if(!matching.length)continue;
+  let sent=0,checked=0;const activeJournalIds=new Set();
+  for(const d of dialogs){
+    const configuredMatching=activeRules.filter(r=>r.dialogFilter===d.notificationFilter&&customerMatchesManager(d.crm||{},(r.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(','))),matching=configuredMatching.length?configuredMatching:(fallbackActive&&fallbackRule.dialogFilter===d.notificationFilter?[fallbackRule]:[]);if(!matching.length)continue;
     let since=0;try{since=await unansweredSinceForPeer(s,d.peerId)}catch(err){console.warn('[notifications history]',d.peerId,err?.message||err);continue}if(!since)continue;checked++;
     const startMs=since*1000;
     for(const r of matching){
       const worked=workingMinutesUntilThreshold(startMs,nowMs,r,r.slaMinutes);if(worked<r.slaMinutes)continue;
-      const journalRow=notificationJournalUpsert(store,{peerId:d.peerId,receivedAt:since,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',snippet:d.lastMessage||''});if(journalRow)activeJournalIds.add(journalRow.id);
+      const responseWindow=WorkingSla.responseWindow(startMs,r),journalRow=notificationJournalUpsert(store,{peerId:d.peerId,receivedAt:since,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',snippet:d.lastMessage||'',responseStartAt:Math.floor(responseWindow.responseStartAt/1000),dueAt:Math.floor(responseWindow.dueAt/1000),outsideHoursAtReceipt:responseWindow.outsideHoursAtReceipt,slaMinutes:r.slaMinutes,workStart:r.workStart,workEnd:r.workEnd,timezone:r.timezone});if(journalRow)activeJournalIds.add(journalRow.id);
+      if(!r.enabled||!r.telegramChatId)continue;
       const key=`${r.id}:${d.peerId}:${since}`,prev=store.notified?.[key]||null;
       if(prev){if(!r.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<r.repeatMinutes*60000)continue}
       const client=d.crm?.fullName||d.name||`VK ${d.peerId}`,leadManager=String(d.crm?.manager||d.crm?.managerLogin||'Не назначен'),crmStatus=String(d.crm?.crmStatus||'Не указан'),snippet=String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),text=`🔴 Просрочен ответ\n\nКлиент: ${client}\nМенеджер лида: ${leadManager}\nCRM-статус: ${crmStatus}\nПолучатель уведомления: ${r.manager}\nБез ответа: больше ${r.slaMinutes} рабочих минут\n${snippet?`\n«${snippet}»`:''}`;
@@ -2517,7 +2507,7 @@ async function executeNotificationCheck(options,source){
   }catch(err){notificationSchedulerState.lastError=String(err?.message||err).slice(0,400);throw err}
 }
 async function runScheduledNotificationCheck(){
-  if(notificationCheckRunning||!TELEGRAM_BOT_TOKEN||!NOTIFICATION_BS_LOGIN||!NOTIFICATION_BS_PASSWORD||!PRESET_VK_TOKEN)return;
+  if(notificationCheckRunning||!NOTIFICATION_BS_LOGIN||!NOTIFICATION_BS_PASSWORD||!PRESET_VK_TOKEN)return;
   notificationCheckRunning=true;try{await executeNotificationCheck({manual:false},'internal')}catch(err){console.warn('[notifications scheduler]',err?.message||err)}finally{notificationCheckRunning=false}
 }
 async function handleTelegramWebhook(req,res){
@@ -2645,20 +2635,20 @@ async function apiRouter(req, res, url) {
     try {
       const store=readNotificationStore(),names=notificationActorNames(s),saved=(store.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
       const rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered'});
-      const dialogs=await loadDialogsForNotifications(s,{maxPages:5,filter:rule.dialogFilter});
+      const dialogs=await loadDialogsForNotifications(s,{maxPages:5,filter:'unanswered'});
       const now=Math.floor(Date.now()/1000);
-      const activeRows=dialogs.filter(d=>!d.lastMessageOut&&customerMatchesManager(d.crm||{},(rule.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(rule.statuses||[]).join(','))).map(d=>({
+      const activeRows=dialogs.filter(d=>!d.lastMessageOut).map(d=>{const since=Number(d.lastMessageAt||0),window=WorkingSla.responseWindow(since*1000,rule);return{
         peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,
         manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',
         snippet:String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),
-        since:Number(d.lastMessageAt||0),waitMinutes:Math.max(0,Math.floor((now-Number(d.lastMessageAt||now))/60)),
-        workingWaitMinutes:workingMinutesUntilThreshold(Number(d.lastMessageAt||now)*1000,Date.now(),rule,rule.slaMinutes)
-      })).filter(d=>d.workingWaitMinutes>=rule.slaMinutes).sort((a,b)=>b.waitMinutes-a.waitMinutes);
+        since,waitMinutes:Math.max(0,Math.floor((now-Number(since||now))/60)),
+        workingWaitMinutes:workingMinutesUntilThreshold(Number(since||now)*1000,Date.now(),rule,rule.slaMinutes),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone
+      }}).filter(d=>d.workingWaitMinutes>=rule.slaMinutes).sort((a,b)=>b.workingWaitMinutes-a.workingWaitMinutes);
       const activeJournalIds=new Set();for(const row of activeRows){const savedRow=notificationJournalUpsert(store,{...row,receivedAt:row.since});if(savedRow)activeJournalIds.add(savedRow.id)}
       await resolveNotificationJournalReplies(store,s,activeJournalIds,20);
-      const rows=notificationJournalRows(store,{rule}).map(row=>({...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0}));
+      const rows=notificationJournalRows(store,{admin:true}).map(row=>({...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0,workingWaitMinutes:row.status==='waiting'?workingMinutesUntilThreshold(row.receivedAt*1000,Date.now(),row,row.slaMinutes):workingMinutesUntilThreshold(row.receivedAt*1000,(row.answeredAt||row.receivedAt)*1000,row,row.slaMinutes)}));
       const outbox=notificationOutboxRows(store,s);writeNotificationStore(store);
-      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses}});
+      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses}});
     } catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/admin/notification-journal' && req.method === 'GET') {
@@ -3622,7 +3612,7 @@ server.listen(PORT, HOST, () => {
   console.log('Не закрывайте это окно во время работы локального сайта.');
   console.log('');
   if(TELEGRAM_BOT_TOKEN&&PUBLIC_BASE_URL)setTimeout(()=>ensureTelegramWebhook().catch(err=>console.warn('[Telegram webhook setup]',err?.message||err)),1200);
-  if(TELEGRAM_BOT_TOKEN&&NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD&&PRESET_VK_TOKEN){setTimeout(runScheduledNotificationCheck,15000);setInterval(runScheduledNotificationCheck,60000)}
+  if(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD&&PRESET_VK_TOKEN){setTimeout(runScheduledNotificationCheck,15000);setInterval(runScheduledNotificationCheck,60000)}
 });
 
 process.on('SIGINT', () => server.close(() => process.exit(0)));

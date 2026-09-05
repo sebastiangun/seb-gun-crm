@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.12.0",
+  "version": "28.13.0",
   "private": true,
-  "description": "seb_gun CRM v28.12: persistent unanswered-lead notification journal",
+  "description": "seb_gun CRM v28.13: working-hours SLA journal with deferred overnight countdown",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -44,7 +44,8 @@
     "test:v289": "node tests/integration-v289.js",
     "test:v2810": "node tests/integration-v2810.js",
     "test:v2811": "node tests/integration-v2811.js",
-    "test:v2812": "node tests/integration-v2812.js"
+    "test:v2812": "node tests/integration-v2812.js",
+    "test:v2813": "node tests/integration-v2813.js"
   },
   "engines": {
     "node": ">=18"
