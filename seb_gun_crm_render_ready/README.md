@@ -1,4 +1,4 @@
-> Версия 28.25: Google Sheets через Apps Script Web App. PostgreSQL и Google Cloud Console не нужны. Начните с [GOOGLE_APPS_SCRIPT_STORAGE_SETUP.md](GOOGLE_APPS_SCRIPT_STORAGE_SETUP.md).
+> Версия 28.26: исправлено Google Sheets/SLA-хранилище, OK CDN и полностью адаптирована карточка клиента для смартфона. PostgreSQL и Google Cloud Console не нужны. Начните с [GOOGLE_APPS_SCRIPT_STORAGE_SETUP.md](GOOGLE_APPS_SCRIPT_STORAGE_SETUP.md).
 
 # seb_gun CRM v28.3 — Vue workspace
 

@@ -67,7 +67,7 @@ onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
     </section>
 
     <section v-if="session.isAdmin" class="settings-card">
-      <div class="section-title-row"><div><h3>Google Drive / Sheets и состояние</h3><p>v28.25 хранит рабочие данные в Google Sheets через Apps Script Web App. PostgreSQL, SQL и Google Cloud Console не используются.</p></div><button class="secondary-btn compact" @click="refreshDiagnostics">Обновить</button></div>
+      <div class="section-title-row"><div><h3>Google Drive / Sheets и состояние</h3><p>v28.26 хранит рабочие данные в Google Sheets через Apps Script Web App, исправляет SLA-время и отделяет bootstrap/SLA-настройки по листам. PostgreSQL, SQL и Google Cloud Console не используются.</p></div><button class="secondary-btn compact" @click="refreshDiagnostics">Обновить</button></div>
       <div v-if="diagnostics" class="data-status-grid four"><span><small>RAM</small><b>{{diagnostics.memory?.rssMb||0}} МБ</b></span><span><small>Heap</small><b>{{diagnostics.memory?.heapUsedMb||0}} МБ</b></span><span><small>PG ждут</small><b>{{diagnostics.database?.pool?.waiting||0}}</b></span><span><small>PG latency</small><b>{{diagnostics.database?.latencyMs||0}} мс</b></span></div>
       <small v-if="diagnostics">Pool: {{diagnostics.database?.pool?.total||0}} всего / {{diagnostics.database?.pool?.idle||0}} свободно · SLA cache: {{diagnostics.cache?.slaReports||0}}</small>
       <button class="secondary-btn" :disabled="databaseSyncing" @click="syncDatabase">{{databaseSyncing?'Синхронизация…':'Синхронизировать клиентов'}}</button>

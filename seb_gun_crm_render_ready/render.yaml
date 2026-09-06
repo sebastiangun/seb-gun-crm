@@ -94,7 +94,7 @@ services:
       - key: VK_COMMUNITY_URL
         sync: false
 
-      # v28.25 Google Apps Script + Sheets storage. No PostgreSQL, SQL or Google Cloud Console is used.
+      # v28.26 Google Apps Script + Sheets storage + responsive client card. No PostgreSQL, SQL or Google Cloud Console is used.
       - key: GOOGLE_SPREADSHEET_ID
         sync: false
       - key: GOOGLE_SHEETS_WEBAPP_URL

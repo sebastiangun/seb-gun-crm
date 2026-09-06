@@ -61,7 +61,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.25';
+const VERSION = '28.26';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -1310,8 +1310,8 @@ function isAllowedMediaHost(hostname) {
   const h = String(hostname || '').toLowerCase();
   const exact = new Set(['vk.com','www.vk.com','vk.ru','www.vk.ru','vk.me','www.vk.me']);
   if (exact.has(h)) return true;
-  const suffixes = ['.userapi.com','.vkuserphoto.ru','.vkuseraudio.net','.vkuserlive.net','.vkcdn.ru','.vk-cdn.net'];
-  return suffixes.some(s => h.endsWith(s)) || ['userapi.com','vkuserphoto.ru','vkuseraudio.net','vkuserlive.net','vkcdn.ru','vk-cdn.net'].includes(h);
+  const suffixes = ['.userapi.com','.vkuserphoto.ru','.vkuseraudio.net','.vkuserlive.net','.vkcdn.ru','.vk-cdn.net','.okcdn.ru'];
+  return suffixes.some(s => h.endsWith(s)) || ['userapi.com','vkuserphoto.ru','vkuseraudio.net','vkuserlive.net','vkcdn.ru','vk-cdn.net','okcdn.ru'].includes(h);
 }
 
 function transcriptCacheKey(peerId, conversationMessageId) {
@@ -2830,7 +2830,7 @@ async function executeNotificationCheck(options,source){
 }
 
 // v28.17: SLA control/report settings are independent from Telegram recipients.
-// They are persisted in Google Sheets Runtime when DATABASE_URL is enabled.
+// They are persisted in Google Sheets and mirrored to the SLASettings tab.
 function slaReportSettingsPath(){return path.join(ROOT,'data','sla-report-settings.json')}
 function slaReportOwnerKey(session){return String(session?.login||notificationActorNames(session)[0]||'default').trim().toLowerCase()}
 function defaultSlaReportSettings(session){
@@ -2887,7 +2887,7 @@ async function computeSlaReportDirect(session,settings){
   await storage.scanLeadJournal(async batch=>{for(const item of batch){const row=slaReportRow(item.payload,settings,nowMs);if(!slaReportStatusMatches(row,settings)||!slaReportManagerMatches(row.responsibleManager,settings))continue;addSlaStat(map,row)}},{batchSize:750});
   const {managers,totals}=finalizeSlaStats(map),recent=await storage.readLeadJournalRecent(5000),visibleRows=[];
   for(const item of recent){const row=slaReportRow(item.payload,settings,nowMs);if(!slaReportStatusMatches(row,settings)||!slaReportManagerMatches(row.responsibleManager,settings))continue;visibleRows.push(row);if(visibleRows.length>=2000)break}
-  return {settings,rows:visibleRows,rowsTotal:totals.total,rowsLimited:totals.total>visibleRows.length,managers,totals,checkedAt:Date.now(),bootstrap:readDialogBootstrapState(),refresh:{mode:'background',running:slaRecentSyncRunning,lastStartedAt:slaRecentSyncLastAt,minIntervalMs:SLA_RECENT_SYNC_MIN_MS},performance:{mode:'direct-sql-paged',queryMs:Date.now()-started,batchSize:750,visibleLimit:2000}};
+  return {settings,rows:visibleRows,rowsTotal:totals.total,rowsLimited:totals.total>visibleRows.length,managers,totals,checkedAt:Date.now(),bootstrap:readDialogBootstrapState(),refresh:{mode:'background',running:slaRecentSyncRunning,lastStartedAt:slaRecentSyncLastAt,minIntervalMs:SLA_RECENT_SYNC_MIN_MS},performance:{mode:'google-sheets-cache',queryMs:Date.now()-started,batchSize:750,visibleLimit:2000}};
 }
 async function buildSlaReport(session,{force=false}={}){
   const settings=slaReportSettingsFor(session);
@@ -3008,7 +3008,9 @@ async function apiRouter(req, res, url) {
   }
 
   if (pathname === '/api/health' && req.method === 'GET') {
-    const database=await storage.health();
+    // Render hits this endpoint frequently. Keep it local and instant; the authenticated
+    // admin diagnostics endpoint performs the real Google Apps Script round-trip.
+    const database={mode:'google-apps-script',ready:Boolean(storage.enabled),configured:Boolean(storage.enabled),cache:storage.poolStats?.()||null};
     return sendJson(res, 200, { ok: true, database, version: VERSION, mode: 'web-only-bluesales+vk-direct-preconfigured', blueSalesApi: BS_BASE, blueSalesWebSync: BS_WEB_SYNC_ENABLED, quickPhrasesAuthority: 'local-bluesales-table-export+manager-filter+admin-editor', vkApiVersion: VK_API_VERSION, vkConfigured: Boolean(PRESET_VK_TOKEN), vkCommunity: PRESET_VK_COMMUNITY || null, vkCommunityUrl: PRESET_VK_COMMUNITY_URL || null, sttConfigured:sttReady(), sttMode:STT_PROVIDER==='google-legacy'?'async-google-speechrecognition':(STT_PROVIDER==='speechrecognition'?'async-google-speechrecognition':'async-local-whisper'), sttProvider:STT_PROVIDER, sttModel:STT_PROVIDER==='google-legacy'?'SpeechRecognition/Google':(STT_ENABLED?STT_MODEL:null), sttDtype:STT_DTYPE, sttNeedsApiKey:false, sttAsync:true, telegramConfigured:Boolean(TELEGRAM_BOT_TOKEN), notificationSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET), notificationWorkerCredentials:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD), sessionResume:true, clock:appClockPayload() });
   }
 
@@ -3108,7 +3110,7 @@ async function apiRouter(req, res, url) {
       const names=notificationActorNames(s),admin=isAdminSession(s),backfill=scheduleHistoricalNotificationBackfill(s,{delayMs:4000});
       if(storage.enabled){
         const started=Date.now();await storage.expireStaleBrowserPending(Date.now()-30*60*1000,200);const [rows,summary]=await Promise.all([storage.getNotificationHistoryRows({names,admin,limit:1500}),storage.getNotificationHistorySummary({names,admin})]);
-        return sendJson(res,200,{ok:true,rows,rowsTotal:summary.total,rowsLimited:summary.total>rows.length,summary,backfill,bootstrap:readDialogBootstrapState(),storage:'google-sheets',performance:{mode:'direct-sql',queryMs:Date.now()-started,limit:1500}});
+        return sendJson(res,200,{ok:true,rows,rowsTotal:summary.total,rowsLimited:summary.total>rows.length,summary,backfill,bootstrap:readDialogBootstrapState(),storage:'google-sheets',performance:{mode:'google-sheets-cache',queryMs:Date.now()-started,limit:1500}});
       }
       const store=await readNotificationStore(['deliveryLog']),allRows=notificationDeliveryRows(store,s,{admin}),rows=allRows.slice(0,1500);
       return sendJson(res,200,{ok:true,rows,rowsTotal:allRows.length,rowsLimited:allRows.length>rows.length,summary:notificationHistorySummary(allRows),backfill,bootstrap:readDialogBootstrapState(),storage:'json'});
@@ -4163,5 +4165,5 @@ server.listen(PORT, HOST, () => {
 });
 
 }
-startServer().catch(async err=>{console.error('[startup]',err.code||'DATABASE_INIT_FAILED');await storage.close().catch(()=>{});process.exit(1)});
+startServer().catch(async err=>{console.error('[startup]',err.code||'STARTUP_FAILED','-',String(err?.message||err).slice(0,300));await storage.close().catch(()=>{});process.exit(1)});
 for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>server.close(async()=>{await storage.close();process.exit(0)}));

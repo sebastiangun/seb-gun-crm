@@ -1,10 +1,27 @@
-// seb_gun CRM v28.25 — Google Sheets Web App storage
+// seb_gun CRM v28.26 — Google Sheets Web App storage
 // 1) Replace API_SECRET below with the same long secret you add to Render.
-// 2) Deploy -> New deployment -> Web app -> Execute as Me -> Who has access: Anyone.
-// 3) Copy the /exec URL into GOOGLE_SHEETS_WEBAPP_URL in Render.
+// 2) Deploy -> Manage deployments -> Edit -> New version -> Web app.
+// 3) Execute as Me -> Who has access: Anyone.
+// 4) Keep the /exec URL in GOOGLE_SHEETS_WEBAPP_URL in Render.
 
 const SPREADSHEET_ID = '1lm0ajA6nFpQ5jXybxm3MY5pVp0gTjqP_oC_0rira7oI';
 const API_SECRET = 'CHANGE_THIS_TO_THE_SAME_LONG_SECRET_AS_RENDER';
+
+// These columns must stay strings. Google Sheets otherwise converts 10:00/22:00
+// to fractional day numbers, which breaks SLA calculations when values are read back.
+const TEXT_COLUMNS = {
+  Leads: ['lead_id','work_start','work_end','timezone'],
+  LeadEvents: ['event_id','lead_id','dedupe_key'],
+  Notifications: ['notification_id'],
+  Outbox: ['request_id'],
+  SLASettings: ['setting_id','work_start','work_end','timezone'],
+  NotificationRules: ['rule_id','work_start','work_end','timezone'],
+  Managers: ['manager_id','login'],
+  Statuses: ['status_id'],
+  Users: ['login'],
+  Bootstrap: ['key'],
+  Runtime: ['key']
+};
 
 function response(data) {
   return ContentService.createTextOutput(JSON.stringify(data))
@@ -24,7 +41,31 @@ function authorize(body) {
 
 function book() { return SpreadsheetApp.openById(SPREADSHEET_ID); }
 
-function ensureSheet(name, headers) {
+function textColumnIndexes(name, headers) {
+  const wanted = new Set(TEXT_COLUMNS[name] || []);
+  const out = [];
+  headers.forEach((h, i) => { if (wanted.has(String(h))) out.push(i); });
+  return out;
+}
+
+function migrateTextColumns(sh, name, headers) {
+  const indexes = textColumnIndexes(name, headers);
+  if (!indexes.length || sh.getMaxRows() < 2) return;
+  indexes.forEach(idx => {
+    const maxRows = Math.max(1, sh.getMaxRows() - 1);
+    const colRange = sh.getRange(2, idx + 1, maxRows, 1);
+    if (sh.getLastRow() >= 2) {
+      const used = sh.getRange(2, idx + 1, sh.getLastRow() - 1, 1);
+      const display = used.getDisplayValues();
+      colRange.setNumberFormat('@');
+      used.setValues(display);
+    } else {
+      colRange.setNumberFormat('@');
+    }
+  });
+}
+
+function ensureSheet(name, headers, migrate) {
   const ss = book();
   let sh = ss.getSheetByName(name);
   if (!sh) sh = ss.insertSheet(name);
@@ -34,6 +75,7 @@ function ensureSheet(name, headers) {
     const mismatch = wanted.some((h, i) => String(current[i] || '') !== h);
     if (mismatch) sh.getRange(1, 1, 1, wanted.length).setValues([wanted]);
     sh.setFrozenRows(1);
+    if (migrate) migrateTextColumns(sh, name, wanted);
   }
   return sh;
 }
@@ -41,12 +83,20 @@ function ensureSheet(name, headers) {
 function readObjects(name) {
   const sh = book().getSheetByName(name);
   if (!sh || sh.getLastRow() < 1 || sh.getLastColumn() < 1) return [];
-  const values = sh.getDataRange().getValues();
+  const range = sh.getDataRange();
+  const values = range.getValues();
+  const display = range.getDisplayValues();
   if (!values.length) return [];
   const headers = values[0].map(String);
-  return values.slice(1).filter(row => row.some(v => v !== '' && v !== null)).map(row => {
+  const textIndexes = new Set(textColumnIndexes(name, headers));
+  return values.slice(1).filter(row => row.some(v => v !== '' && v !== null)).map((row, rowIndex) => {
     const out = {};
-    headers.forEach((h, i) => { if (h) out[h] = row[i] === undefined ? '' : row[i]; });
+    headers.forEach((h, i) => {
+      if (!h) return;
+      // For text/SLA clock columns always return the visible string (for example 10:00),
+      // never the internal 0.416666... value or an 1899 Date object.
+      out[h] = textIndexes.has(i) ? String(display[rowIndex + 1][i] || '') : (row[i] === undefined ? '' : row[i]);
+    });
     return out;
   });
 }
@@ -78,7 +128,7 @@ function normalizeRow(headers, row) {
 }
 
 function upsertMany(body) {
-  const sh = ensureSheet(String(body.sheet || ''), body.headers || []);
+  const sh = ensureSheet(String(body.sheet || ''), body.headers || [], false);
   const rows = Array.isArray(body.rows) ? body.rows : [];
   if (!rows.length) return { ok: true, written: 0 };
   const meta = keyColumn(sh, String(body.keyField || ''));
@@ -113,7 +163,7 @@ function deleteByKey(body) {
 }
 
 function appendRows(body) {
-  const sh = ensureSheet(String(body.sheet || ''), body.headers || []);
+  const sh = ensureSheet(String(body.sheet || ''), body.headers || [], false);
   const rows = Array.isArray(body.rows) ? body.rows : [];
   if (!rows.length) return { ok: true, appended: 0 };
   const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
@@ -132,8 +182,8 @@ function clearSheetRows(body) {
 
 function setup(body) {
   const schema = body.schema || {};
-  Object.keys(schema).forEach(name => ensureSheet(name, schema[name]));
-  return { ok: true, sheets: Object.keys(schema) };
+  Object.keys(schema).forEach(name => ensureSheet(name, schema[name], true));
+  return { ok: true, sheets: Object.keys(schema), storageVersion: '28.26' };
 }
 
 function doGet() {
@@ -145,7 +195,7 @@ function doPost(e) {
     const body = parseBody(e);
     authorize(body);
     const action = String(body.action || '');
-    if (action === 'health') return response({ ok: true, storage: 'google-apps-script', spreadsheetId: SPREADSHEET_ID, at: Date.now() });
+    if (action === 'health') return response({ ok: true, storage: 'google-apps-script', storageVersion: '28.26', spreadsheetId: SPREADSHEET_ID, at: Date.now() });
     if (action === 'setup') return response(setup(body));
     if (action === 'read') return response({ ok: true, rows: readObjects(String(body.sheet || '')) });
     if (action === 'readMany') {
