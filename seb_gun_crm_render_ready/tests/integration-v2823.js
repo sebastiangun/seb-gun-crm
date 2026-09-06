@@ -3,6 +3,7 @@ const assert=require('node:assert/strict'),fs=require('fs'),path=require('path')
 const root=path.join(__dirname,'..');
 const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
 const wrapper=fs.readFileSync(path.join(root,'server-v2823.js'),'utf8');
+const server=fs.readFileSync(path.join(root,'server.js'),'utf8');
 const eventStore=fs.readFileSync(path.join(root,'lib/event-state-store.js'),'utf8');
 assert.equal(pkg.scripts.start,'node server-v2823.js');
 assert.match(pkg.scripts['check:runtime'],/server-v2823\.js/);
@@ -14,6 +15,9 @@ assert.match(wrapper,/getNotificationHistorySummaryCached/);
 assert.match(wrapper,/event-log-state/);
 assert.match(wrapper,/const VERSION = '28\.23'/);
 assert.doesNotMatch(wrapper,/scanLeadJournal\(/);
+assert.match(server,/const VERSION = '28\.22'/);
+assert.match(server,/async function computeSlaReportDirect\(session,settings\)\{[\s\S]*?\n\}\nasync function buildSlaReport/);
+assert.match(server,/  if \(pathname === '\/api\/notifications\/history' && req\.method === 'GET'\) \{[\s\S]*?\n  \}\n  if \(pathname === '\/api\/notifications\/browser-pending'/);
 assert.match(eventStore,/CREATE TABLE IF NOT EXISTS crm_event_log/);
 assert.match(eventStore,/CREATE TABLE IF NOT EXISTS lead_state/);
 assert.match(eventStore,/event_projection_state/);
