@@ -61,7 +61,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.21';
+const VERSION = '28.22';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -2382,8 +2382,8 @@ function notificationRulesExportValue(store){
     slaMinutes:r.slaMinutes,violationMinutes:r.violationMinutes,workDays:r.workDays,workStart:r.workStart,workEnd:r.workEnd,timezone:r.timezone,repeatMinutes:r.repeatMinutes,telegramChatId:r.telegramChatId
   })));
 }
-async function readNotificationStore(){
-  const raw=await storage.readNotifications(notificationDefaultStore());
+async function readNotificationStore(only=null){
+  const raw=await storage.readNotifications(notificationDefaultStore(),only);
   return storage.trackNotifications(raw,hydrateNotificationStoreFromEnvironment(raw));
 }
 async function writeNotificationStore(store){
@@ -2526,6 +2526,34 @@ async function ensureHistoricalNotificationBackfill(store,session){
   return state;
 }
 
+async function ensureHistoricalNotificationBackfillDirect(session){
+  const prior=readNotificationHistoryBackfillState();
+  if(prior.status==='completed')return prior;
+  const bootstrap=readDialogBootstrapState();
+  if(bootstrap.status!=='completed')return {...prior,status:'waiting_for_dialog_bootstrap',bootstrap};
+  if(!storage.enabled){const store=await readNotificationStore();return ensureHistoricalNotificationBackfill(store,session)}
+  const settings={...slaReportSettingsFor(session),managerFilters:[],statuses:[]},sourceRows=await storage.countLeadJournal();
+  // v28.22 starts an id-keyset cursor. A partly completed numeric v28.20 cursor is
+  // intentionally restarted; deterministic historical ids + ON CONFLICT DO NOTHING
+  // make the restart safe without loading the complete journal.
+  const cursorId=String(prior.cursorId||''),page=await storage.readLeadJournalPageAfterId(cursorId,50),temp=notificationDefaultStore();
+  let warnings=Number(prior.v2822?.created?.warnings||prior.created?.warnings||0),violations=Number(prior.v2822?.created?.violations||prior.created?.violations||0),outbox=Number(prior.v2822?.created?.outbox||prior.created?.outbox||0);
+  const candidateById=new Map();
+  for(const item of page){const row=slaReportRow(item.payload,settings,Date.now());if(row.notified&&row.notificationAt){const x=historicalDeliveryRow(temp,row,'sla_warning',row.notificationAt,settings);if(x)candidateById.set(x.id,x)}if(row.violated&&row.violationAt){const x=historicalDeliveryRow(temp,row,'sla_violation',row.violationAt,settings);if(x)candidateById.set(x.id,x)}}
+  const inserted=await storage.upsertNotificationHistoryRows([...candidateById.values()],{ignoreExisting:true}),insertedSet=new Set(inserted.ids);
+  for(const id of insertedSet){const row=candidateById.get(id);if(row?.eventType==='sla_warning')warnings++;else if(row?.eventType==='sla_violation')violations++}
+  const nextCursorId=page.length?String(page[page.length-1].id):cursorId;
+  const priorProcessed=prior.v2822?.cursorId?Number(prior.v2822.processedRows||0):0,processedRows=Math.min(sourceRows,priorProcessed+page.length);
+  let status=page.length<50?'completed':'running',outboxDone=Boolean(prior.v2822?.outboxDone);
+  if(status==='completed'&&!outboxDone){
+    const rows=await storage.readOutboxBackfillRows(5000),outboxTemp=notificationDefaultStore(),outboxCandidates=new Map();
+    for(const row of rows){if(!row?.createdAt)continue;const eventAt=Math.max(Number(row.createdAt||0),Number(row.alertedAt||0)||Number(row.createdAt||0)),fake={id:`outbox:${row.requestId}`,peerId:row.peerId,name:row.peerName||`VK ${row.peerId}`,responsibleManager:row.manager||'',currentManager:row.manager||'',currentCrmStatus:'',crmStatus:'',snippet:row.snippet||'',workDays:settings.workDays,workStart:settings.workStart,workEnd:settings.workEnd,timezone:settings.timezone,slaMinutes:settings.slaMinutes,violationMinutes:settings.violationMinutes};const x=historicalDeliveryRow(outboxTemp,fake,'outbox_stuck',Math.floor(eventAt/1000),settings);if(x)outboxCandidates.set(x.id,x)}
+    const outboxInserted=await storage.upsertNotificationHistoryRows([...outboxCandidates.values()],{ignoreExisting:true});outbox+=outboxInserted.inserted;outboxDone=true;
+  }
+  const progress=sourceRows?Math.min(100,Math.round(processedRows/sourceRows*100)):100,state={status,cursor:processedRows,sourceRows,processedRows,progress,created:{warnings,violations,outbox,total:warnings+violations+outbox},bootstrapStatus:bootstrap.status,outboxDone,v2822:{cursorId:nextCursorId,processedRows,outboxDone,created:{warnings,violations,outbox}}};
+  if(status==='completed')state.completedAt=Date.now();await writeNotificationHistoryBackfillState(state);return state;
+}
+
 let notificationHistoryBackfillRunning=false;
 let notificationHistoryBackfillTimer=null;
 function scheduleHistoricalNotificationBackfill(session,{delayMs=2500}={}){
@@ -2539,8 +2567,7 @@ function scheduleHistoricalNotificationBackfill(session,{delayMs=2500}={}){
     let shouldContinue=false;
     storage.run(async()=>{
       try{
-        const store=await readNotificationStore();
-        const state=await ensureHistoricalNotificationBackfill(store,session);
+        const state=await ensureHistoricalNotificationBackfillDirect(session);
         shouldContinue=state.status==='running';
       }catch(err){console.warn('[notification history backfill]',err?.message||err)}
     }).catch(err=>console.warn('[notification history backfill storage]',err?.message||err)).finally(()=>{
@@ -2646,6 +2673,32 @@ function ingestNotificationJournalMessages(store,{peerId,name,manager='',crmStat
   return changed;
 }
 
+// v28.22: one peer is hydrated from lead_journal only, changed in memory, then
+// written back incrementally. This replaces the previous full notification-store
+// snapshot for chat opens, bootstrap and recent SLA sync.
+async function ingestNotificationJournalDirect({peerId,name,manager='',crmStatus='',messages=[],rule={}}={}){
+  if(!storage.enabled){
+    const store=await readNotificationStore(['journal','deletedJournal']);
+    const changed=ingestNotificationJournalMessages(store,{peerId,name,manager,crmStatus,messages,rule});
+    if(changed)await writeNotificationStore(store);return changed;
+  }
+  const existing=await storage.readLeadJournalByPeer(peerId),deleted=await storage.readDeletedJournalIdsByPeer(peerId),store=notificationDefaultStore(),bases=new Map();
+  store.journal={};store.deletedJournal={};
+  for(const item of existing){store.journal[item.id]=item.payload;bases.set(item.id,item.payload)}
+  for(const id of deleted)store.deletedJournal[id]=true;
+  const changed=ingestNotificationJournalMessages(store,{peerId,name,manager,crmStatus,messages,rule});
+  if(changed)await storage.upsertLeadJournalBatch(Object.values(store.journal),bases);
+  return changed;
+}
+async function syncRecentLeadJournalDirect(session,dialogs,rule,{limit=20}={}){
+  const selected=(dialogs||[]).filter(d=>Number(d.peerId)>0&&Number(d.peerId)<2000000000).slice(0,Math.max(1,Number(limit)||20));let synced=0;
+  for(const d of selected){
+    try{const params={peer_id:Number(d.peerId),count:100,offset:0,extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;const raw=await vkCallPolite(session.vkToken,'messages.getHistory',params,{minGapMs:450,retries:4}),maps=vkIdentityMaps(raw||{}),messages=(raw?.items||[]).map(m=>normalizeVkMessage(m,maps));synced+=await ingestNotificationJournalDirect({peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule})}catch(err){console.warn('[lead journal direct sync]',d.peerId,err?.message||err)}
+    await sleep(250);
+  }
+  return synced;
+}
+
 async function syncRecentLeadJournal(session,store,dialogs,rule,{limit=40}={}){
   const selected=(dialogs||[]).filter(d=>Number(d.peerId)>0&&Number(d.peerId)<2000000000).slice(0,Math.max(1,Number(limit)||40));let synced=0;
   for(let i=0;i<selected.length;i+=5){
@@ -2697,7 +2750,7 @@ function workingMinutesUntilThreshold(startMs,endMs,rule,threshold){
 }
 async function unansweredSinceForPeer(session,peerId){
   const params={peer_id:Number(peerId),count:100,offset:0,extended:0};if(session.vkGroupId)params.group_id=session.vkGroupId;
-  const raw=await vkCall(session.vkToken,'messages.getHistory',params),items=Array.isArray(raw?.items)?raw.items:[];let earliest=0,seenIncoming=false;
+  const raw=await vkCallPolite(session.vkToken,'messages.getHistory',params,{minGapMs:380,retries:3}),items=Array.isArray(raw?.items)?raw.items:[];let earliest=0,seenIncoming=false;
   for(const m of items){if(Number(m?.out||0)===1)break;seenIncoming=true;const d=Number(m?.date||0);if(d)earliest=d}
   return seenIncoming?earliest:0
 }
@@ -2710,7 +2763,7 @@ async function loadDialogsForNotifications(session,{maxPages=5,filter='unanswere
   const pageLimit=Number(maxPages)>0?Math.max(1,Number(maxPages)):500;
   const all=[];let offset=0;for(let page=0;page<pageLimit;page++){
     const params={count:200,offset,filter:['all','unanswered','unread'].includes(filter)?filter:'unanswered',extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;
-    const raw=await vkCall(session.vkToken,'messages.getConversations',params),maps=vkIdentityMaps(raw||{}),rows=(raw?.items||[]).map(x=>normalizeVkDialog(x,maps));all.push(...rows);offset+=rows.length;if(!rows.length||offset>=Number(raw?.count||0))break
+    const raw=await vkCallPolite(session.vkToken,'messages.getConversations',params,{minGapMs:380,retries:3}),maps=vkIdentityMaps(raw||{}),rows=(raw?.items||[]).map(x=>normalizeVkDialog(x,maps));all.push(...rows);offset+=rows.length;if(!rows.length||offset>=Number(raw?.count||0))break
   }
   const vkIds=all.filter(d=>d.peerType==='user'&&d.peerId>0).map(d=>d.peerId);
   if(vkIds.length){try{const linked=await getCustomersByVkIds(session,vkIds),byVk=new Map(linked.filter(c=>c.social?.vkId).map(c=>[Number(c.social.vkId),c]));for(const d of all){const c=byVk.get(d.peerId);if(c)d.crm={clientId:c.id,fullName:c.fullName,crmStatus:c.crmStatus,manager:c.manager,managerLogin:c.managerLogin,tags:c.tags}}}catch(err){console.warn('[notifications crm link]',err?.message||err)}}
@@ -2723,52 +2776,39 @@ function safeOutboxWatchSettings(input={}){return {enabled:input.enabled!==false
 function readOutboxWatchSettings(){try{return safeOutboxWatchSettings(readStoredJson(outboxWatchSettingsPath())||{})}catch{return safeOutboxWatchSettings({})}}
 async function saveOutboxWatchSettings(input={}){const value=safeOutboxWatchSettings({...input,updatedAt:Date.now()});await storage.writeDocument(outboxWatchSettingsPath(),value);return value}
 async function runNotificationCheck({session=null,manual=false}={}){
-  const store=await readNotificationStore(),configuredRules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager),fallbackRule=safeNotificationRule({manager:'',warningAlerts:false,violationAlerts:false,outboxAlerts:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered',workStart:'10:00',workEnd:'22:00',timezone:'Europe/Moscow'});
+  // v28.22: scheduled notifications no longer hydrate lead_journal or
+  // notification_history. Only small mutable state (rules/notified/outbox) is read;
+  // journal rows and delivery rows are written incrementally.
+  const store=await readNotificationStore(['rules','notified','outbox']),configuredRules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager);
   const s=session||notificationServiceSession();if(!s)throw Object.assign(new Error('Для фоновой проверки задайте BLUESALES_NOTIFICATION_LOGIN и BLUESALES_NOTIFICATION_PASSWORD в Render'),{status:503,code:'NOTIFICATION_CREDENTIALS'});
-  const nowMs=Date.now(),activeRules=configuredRules.filter(r=>notificationWorkingNow(nowMs,r));
-  let sent=0,checked=0,deliveryEvents=0;const activeJournalIds=new Set(),dialogRules=activeRules.filter(r=>r.warningAlerts||r.violationAlerts);
+  const nowMs=Date.now(),activeRules=configuredRules.filter(r=>notificationWorkingNow(nowMs,r));let sent=0,checked=0,deliveryEvents=0;const dialogRules=activeRules.filter(r=>r.warningAlerts||r.violationAlerts);
   if(dialogRules.length){
-    const filters=[...new Set(dialogRules.map(r=>r.dialogFilter))],dialogs=[];
-    for(const filter of filters){const rows=await loadDialogsForNotifications(s,{filter});for(const row of rows)dialogs.push({...row,notificationFilter:filter})}
+    const filters=[...new Set(dialogRules.map(r=>r.dialogFilter))],dialogs=[];for(const filter of filters){const rows=await loadDialogsForNotifications(s,{filter,maxPages:1});for(const row of rows.slice(0,120))dialogs.push({...row,notificationFilter:filter})}
     for(const d of dialogs){
       const matching=dialogRules.filter(r=>r.dialogFilter===d.notificationFilter&&notificationRuleMatchesCustomer(r,d.crm||{}));if(!matching.length)continue;
       let since=0;try{since=await unansweredSinceForPeer(s,d.peerId)}catch(err){console.warn('[notifications history]',d.peerId,err?.message||err);continue}if(!since)continue;checked++;
       const startMs=since*1000,client=d.crm?.fullName||d.name||`VK ${d.peerId}`,leadManager=String(d.crm?.manager||d.crm?.managerLogin||'Не назначен'),crmStatus=String(d.crm?.crmStatus||'Не указан'),snippet=String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180);
+      // Store this episode independently from the notification delivery state.
+      const journalRule=matching[0]||safeNotificationRule({manager:'',enabled:false});
+      try{await ingestNotificationJournalDirect({peerId:d.peerId,name:client,manager:leadManager,crmStatus,messages:[{out:false,date:since,text:snippet,attachments:[]}],rule:journalRule})}catch(err){console.warn('[notification journal incremental]',d.peerId,err?.message||err)}
       for(const r of matching){
-        const worked=workingMinutesUntilThreshold(startMs,nowMs,r,r.slaMinutes),responseWindow=WorkingSla.responseWindow(startMs,r),journalRow=notificationJournalUpsert(store,{peerId:d.peerId,receivedAt:since,name:client,manager:leadManager,crmStatus,snippet,responseStartAt:Math.floor(responseWindow.responseStartAt/1000),dueAt:Math.floor(responseWindow.dueAt/1000),outsideHoursAtReceipt:responseWindow.outsideHoursAtReceipt,slaMinutes:r.slaMinutes,violationMinutes:r.violationMinutes,workDays:r.workDays,workStart:r.workStart,workEnd:r.workEnd,timezone:r.timezone});if(journalRow)activeJournalIds.add(journalRow.id);
-        const phases=[];if(r.warningAlerts&&worked>=r.slaMinutes)phases.push(['sla_warning',r.slaMinutes,`🟡 Нужно ответить клиенту\n\nКлиент: ${client}\nМенеджер лида: ${leadManager}\nCRM-статус: ${crmStatus}\nПолучатель уведомления: ${r.manager}\nБез ответа: ${worked} рабочих минут\nПорог предупреждения: ${r.slaMinutes} мин.${snippet?`\n\n«${snippet}»`:''}`]);
+        const worked=workingMinutesUntilThreshold(startMs,nowMs,r,r.slaMinutes),phases=[];
+        if(r.warningAlerts&&worked>=r.slaMinutes)phases.push(['sla_warning',r.slaMinutes,`🟡 Нужно ответить клиенту\n\nКлиент: ${client}\nМенеджер лида: ${leadManager}\nCRM-статус: ${crmStatus}\nПолучатель уведомления: ${r.manager}\nБез ответа: ${worked} рабочих минут\nПорог предупреждения: ${r.slaMinutes} мин.${snippet?`\n\n«${snippet}»`:''}`]);
         if(r.violationAlerts&&worked>=r.violationMinutes)phases.push(['sla_violation',r.violationMinutes,`🔴 Нарушен регламент ответа\n\nКлиент: ${client}\nОтветственный менеджер: ${leadManager}\nCRM-статус: ${crmStatus}\nПолучатель уведомления: ${r.manager}\nБез ответа: ${worked} рабочих минут\nНарушение после: ${r.violationMinutes} мин.${snippet?`\n\n«${snippet}»`:''}`]);
-        for(const [eventType,threshold,text] of phases){
-          const key=`${eventType}:${r.id}:${d.peerId}:${since}`,prev=store.notified?.[key]||null;if(prev){if(!r.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<r.repeatMinutes*60000)continue}
-          const occurrence=prev?Number(prev.count||1):0,subjectKey=`${d.peerId}:${since}:${threshold}:${occurrence}`;const delivery=await deliverNotificationEvent(store,r,eventType,{peerId:d.peerId,clientName:client,leadManager,crmStatus,snippet,subjectKey,text});
-          store.notified=store.notified||{};store.notified[key]={sentAt:nowMs,manager:r.manager,peerId:d.peerId,since,count:occurrence+1,deliveryId:delivery.id};deliveryEvents++;if(delivery.channels?.telegram?.status==='sent')sent++;
-        }
+        for(const [eventType,threshold,text] of phases){const key=`${eventType}:${r.id}:${d.peerId}:${since}`,prev=store.notified?.[key]||null;if(prev){if(!r.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<r.repeatMinutes*60000)continue}const occurrence=prev?Number(prev.count||1):0,subjectKey=`${d.peerId}:${since}:${threshold}:${occurrence}`,delivery=await deliverNotificationEvent(store,r,eventType,{peerId:d.peerId,clientName:client,leadManager,crmStatus,snippet,subjectKey,text});store.notified=store.notified||{};store.notified[key]={sentAt:nowMs,manager:r.manager,peerId:d.peerId,since,count:occurrence+1,deliveryId:delivery.id};deliveryEvents++;if(delivery.channels?.telegram?.status==='sent')sent++}
       }
     }
   }
-  await resolveNotificationJournalReplies(store,s,activeJournalIds,30);
-
-  // v28.19: server-side watchdog for outgoing messages. It is independent from SLA.
   const outboxSettings=readOutboxWatchSettings();
   if(outboxSettings.enabled){
-    const candidates=notificationOutboxRows(store,s,{admin:true}).filter(row=>nowMs-Number(row.createdAt||row.updatedAt||nowMs)>=outboxSettings.stuckMinutes*60000);
-    const ids=[...new Set(candidates.map(x=>Number(x.peerId||0)).filter(x=>x>0&&x<2000000000))],crmMap=new Map();
+    const candidates=notificationOutboxRows(store,s,{admin:true}).filter(row=>nowMs-Number(row.createdAt||row.updatedAt||nowMs)>=outboxSettings.stuckMinutes*60000),ids=[...new Set(candidates.map(x=>Number(x.peerId||0)).filter(x=>x>0&&x<2000000000))],crmMap=new Map();
     if(ids.length){try{for(const c of await getCustomersByVkIds(s,ids))if(c?.social?.vkId)crmMap.set(Number(c.social.vkId),c)}catch(err){console.warn('[outbox watchdog crm]',err?.message||err)}}
-    for(const row of candidates){const crm=crmMap.get(Number(row.peerId))||{},matching=activeRules.filter(r=>r.outboxAlerts&&notificationRuleMatchesCustomer(r,crm));if(!matching.length)continue;
-      const client=String(crm.fullName||row.peerName||`VK ${row.peerId}`),leadManager=String(crm.manager||crm.managerLogin||row.manager||'Не назначен'),crmStatus=String(crm.crmStatus||'Не указан');
-      for(const r of matching){const key=`outbox_stuck:${r.id}:${row.requestId}`,prev=store.notified?.[key]||null;if(prev){if(!outboxSettings.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<outboxSettings.repeatMinutes*60000)continue}
-        const occurrence=prev?Number(prev.count||1):0,text=`🟠 Исходящее сообщение зависло\n\nКлиент: ${client}\nМенеджер лида: ${leadManager}\nCRM-статус: ${crmStatus}\nОтправлял: ${row.manager||'Не определён'}\nВ очереди: ${Math.max(1,Math.floor((nowMs-Number(row.createdAt||nowMs))/60000))} мин.\nПопыток: ${row.attempts||0}\nПричина: ${row.error||'ожидает отправки'}`;
-        const delivery=await deliverNotificationEvent(store,r,'outbox_stuck',{peerId:row.peerId,clientName:client,leadManager,crmStatus,snippet:row.snippet,subjectKey:`${row.requestId}:${occurrence}`,text});store.notified=store.notified||{};store.notified[key]={sentAt:nowMs,manager:r.manager,requestId:row.requestId,count:occurrence+1,deliveryId:delivery.id};deliveryEvents++;if(delivery.channels?.telegram?.status==='sent')sent++;row.alerted=true;row.alertedAt=nowMs;row.alertedRuleIds=[...(new Set([...(row.alertedRuleIds||[]),r.id]))]
-      }
+    for(const row of candidates){const crm=crmMap.get(Number(row.peerId))||{},matching=activeRules.filter(r=>r.outboxAlerts&&notificationRuleMatchesCustomer(r,crm));if(!matching.length)continue;const client=String(crm.fullName||row.peerName||`VK ${row.peerId}`),leadManager=String(crm.manager||crm.managerLogin||row.manager||'Не назначен'),crmStatus=String(crm.crmStatus||'Не указан');
+      for(const r of matching){const key=`outbox_stuck:${r.id}:${row.requestId}`,prev=store.notified?.[key]||null;if(prev){if(!outboxSettings.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<outboxSettings.repeatMinutes*60000)continue}const occurrence=prev?Number(prev.count||1):0,text=`🟠 Исходящее сообщение зависло\n\nКлиент: ${client}\nМенеджер лида: ${leadManager}\nCRM-статус: ${crmStatus}\nОтправлял: ${row.manager||'Не определён'}\nВ очереди: ${Math.max(1,Math.floor((nowMs-Number(row.createdAt||nowMs))/60000))} мин.\nПопыток: ${row.attempts||0}\nПричина: ${row.error||'ожидает отправки'}`,delivery=await deliverNotificationEvent(store,r,'outbox_stuck',{peerId:row.peerId,clientName:client,leadManager,crmStatus,snippet:row.snippet,subjectKey:`${row.requestId}:${occurrence}`,text});store.notified=store.notified||{};store.notified[key]={sentAt:nowMs,manager:r.manager,requestId:row.requestId,count:occurrence+1,deliveryId:delivery.id};deliveryEvents++;if(delivery.channels?.telegram?.status==='sent')sent++;row.alerted=true;row.alertedAt=nowMs;row.alertedRuleIds=[...(new Set([...(row.alertedRuleIds||[]),r.id]))]}
     }
   }
-  const cutoff=nowMs-30*24*60*60*1000;for(const[k,v]of Object.entries(store.notified||{}))if(Number(v?.sentAt||0)<cutoff)delete store.notified[k];for(const[k,v]of Object.entries(store.deliveryLog||{})){
-    // v28.20: historical reconstruction is audit evidence and is never auto-pruned.
-    // Real delivery attempts are retained for a year so the separate audit screen stays useful.
-    if(v?.historical)continue;
-    if(Number(v?.createdAt||0)<nowMs-365*24*60*60*1000)delete store.deliveryLog[k];
-  }
-  await writeNotificationStore(store);return {ok:true,checked,sent,deliveryEvents,manual,outboxStuckMinutes:outboxSettings.stuckMinutes}
+  const cutoff=nowMs-30*24*60*60*1000;for(const[k,v]of Object.entries(store.notified||{}))if(Number(v?.sentAt||0)<cutoff)delete store.notified[k];
+  const deliveries=Object.values(store.deliveryLog||{});await writeNotificationStore(store);if(storage.enabled){if(deliveries.length)await storage.upsertNotificationHistoryRows(deliveries);await storage.pruneNotificationHistory(nowMs-365*24*60*60*1000)}return {ok:true,checked,sent,deliveryEvents,manual,outboxStuckMinutes:outboxSettings.stuckMinutes}
 }
 let notificationCheckRunning=false;
 const notificationSchedulerState={lastAt:0,lastSuccessAt:0,lastError:'',checked:0,sent:0,source:''};
@@ -2821,33 +2861,42 @@ function slaReportRow(row,settings,nowMs=Date.now()){
   return {...row,workingResponseMinutes:worked,violated,notified,responsibleManager,notificationAt:notificationAtMs?Math.floor(notificationAtMs/1000):0,violationAt:violationAtMs?Math.floor(violationAtMs/1000):0,onTime:Boolean(answeredAt)&&!violated,waiting:!answeredAt};
 }
 let slaRecentSyncRunning=false;
+let slaRecentSyncLastAt=0;
+const SLA_RECENT_SYNC_MIN_MS=Math.max(60000,Number(process.env.SLA_RECENT_SYNC_MIN_MS||120000));
+const slaReportCache=new Map(),slaReportInflight=new Map();
+function slaReportCacheKey(session,settings){return `${slaReportOwnerKey(session)}|${JSON.stringify(settings)}`}
+function emptyManagerStat(manager){return {manager,total:0,answered:0,onTime:0,violations:0,waiting:0,responseTotal:0,responseCount:0,maxResponseMinutes:0}}
+function addSlaStat(map,row){const key=row.responsibleManager||'Не назначен',stat=map.get(key)||emptyManagerStat(key);stat.total++;if(row.waiting)stat.waiting++;else{stat.answered++;stat.responseTotal+=row.workingResponseMinutes;stat.responseCount++;stat.maxResponseMinutes=Math.max(stat.maxResponseMinutes,row.workingResponseMinutes);if(row.onTime)stat.onTime++}if(row.violated)stat.violations++;map.set(key,stat)}
+function finalizeSlaStats(map){const managers=[...map.values()].map(x=>({...x,averageResponseMinutes:x.responseCount?Math.round(x.responseTotal/x.responseCount):0,responseTotal:undefined,responseCount:undefined})).sort((a,b)=>b.violations-a.violations||b.total-a.total||a.manager.localeCompare(b.manager,'ru'));const totals=managers.reduce((a,x)=>({total:a.total+x.total,answered:a.answered+x.answered,onTime:a.onTime+x.onTime,violations:a.violations+x.violations,waiting:a.waiting+x.waiting}),{total:0,answered:0,onTime:0,violations:0,waiting:0});return {managers,totals}}
 function scheduleRecentSlaSync(session){
-  const bootstrap=readDialogBootstrapState();
-  if(slaRecentSyncRunning||bootstrap.status==='running'||bootstrap.status==='starting')return false;
-  slaRecentSyncRunning=true;
-  setTimeout(()=>storage.run(async()=>{
+  const bootstrap=readDialogBootstrapState(),now=Date.now();
+  if(slaRecentSyncRunning||bootstrap.status==='running'||bootstrap.status==='starting'||bootstrap.status==='paused_rate_limit'||now-slaRecentSyncLastAt<SLA_RECENT_SYNC_MIN_MS)return false;
+  slaRecentSyncRunning=true;slaRecentSyncLastAt=now;
+  setTimeout(async()=>{
     try{
-      const settings=slaReportSettingsFor(session),store=await readNotificationStore();
-      const dialogs=await loadDialogsForNotifications(session,{maxPages:1,filter:'all'});
-      await syncRecentLeadJournal(session,store,dialogs,{...settings,enabled:false,dialogFilter:'unanswered',manager:'',queueAlerts:false},{limit:20});
-      await resolveNotificationJournalReplies(store,session,new Set(),10);
-      await writeNotificationStore(store);
+      const settings=slaReportSettingsFor(session),dialogs=await loadDialogsForNotifications(session,{maxPages:1,filter:'all'});
+      await syncRecentLeadJournalDirect(session,dialogs,{...settings,enabled:false,dialogFilter:'unanswered',manager:'',queueAlerts:false},{limit:20});
+      slaReportCache.clear();
     }catch(err){console.warn('[sla background sync]',err?.message||err)}
     finally{slaRecentSyncRunning=false}
-  }),80);
+  },120);
   return true;
 }
-async function buildSlaReport(session){
-  const settings=slaReportSettingsFor(session),store=await readNotificationStore();
-  // v28.20: the report endpoint is intentionally DB-only and fast.
-  // VK history refresh is scheduled separately so a slow VK/BlueSales request
-  // cannot reset the browser connection while the user opens the SLA screen.
-  const nowMs=Date.now(),rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,nowMs)).filter(row=>slaReportStatusMatches(row,settings)&&slaReportManagerMatches(row.responsibleManager,settings));
-  const map=new Map();for(const row of rows){const key=row.responsibleManager||'Не назначен',stat=map.get(key)||{manager:key,total:0,answered:0,onTime:0,violations:0,waiting:0,responseTotal:0,responseCount:0,maxResponseMinutes:0};stat.total++;if(row.waiting)stat.waiting++;else{stat.answered++;stat.responseTotal+=row.workingResponseMinutes;stat.responseCount++;stat.maxResponseMinutes=Math.max(stat.maxResponseMinutes,row.workingResponseMinutes);if(row.onTime)stat.onTime++}if(row.violated)stat.violations++;map.set(key,stat)}
-  const managers=[...map.values()].map(x=>({...x,averageResponseMinutes:x.responseCount?Math.round(x.responseTotal/x.responseCount):0,responseTotal:undefined,responseCount:undefined})).sort((a,b)=>b.violations-a.violations||b.total-a.total||a.manager.localeCompare(b.manager,'ru'));
-  const totals=managers.reduce((a,x)=>({total:a.total+x.total,answered:a.answered+x.answered,onTime:a.onTime+x.onTime,violations:a.violations+x.violations,waiting:a.waiting+x.waiting}),{total:0,answered:0,onTime:0,violations:0,waiting:0});
-  const sortedRows=rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0)),visibleRows=sortedRows.slice(0,2000);
-  return {settings,rows:visibleRows,rowsTotal:sortedRows.length,rowsLimited:sortedRows.length>visibleRows.length,managers,totals,checkedAt:Date.now(),bootstrap:readDialogBootstrapState(),refresh:{mode:'background',running:slaRecentSyncRunning}};
+async function computeSlaReportDirect(session,settings){
+  const started=Date.now(),nowMs=Date.now(),map=new Map();
+  await storage.scanLeadJournal(async batch=>{for(const item of batch){const row=slaReportRow(item.payload,settings,nowMs);if(!slaReportStatusMatches(row,settings)||!slaReportManagerMatches(row.responsibleManager,settings))continue;addSlaStat(map,row)}},{batchSize:750});
+  const {managers,totals}=finalizeSlaStats(map),recent=await storage.readLeadJournalRecent(5000),visibleRows=[];
+  for(const item of recent){const row=slaReportRow(item.payload,settings,nowMs);if(!slaReportStatusMatches(row,settings)||!slaReportManagerMatches(row.responsibleManager,settings))continue;visibleRows.push(row);if(visibleRows.length>=2000)break}
+  return {settings,rows:visibleRows,rowsTotal:totals.total,rowsLimited:totals.total>visibleRows.length,managers,totals,checkedAt:Date.now(),bootstrap:readDialogBootstrapState(),refresh:{mode:'background',running:slaRecentSyncRunning,lastStartedAt:slaRecentSyncLastAt,minIntervalMs:SLA_RECENT_SYNC_MIN_MS},performance:{mode:'direct-sql-paged',queryMs:Date.now()-started,batchSize:750,visibleLimit:2000}};
+}
+async function buildSlaReport(session,{force=false}={}){
+  const settings=slaReportSettingsFor(session);
+  if(!storage.enabled){
+    const store=await readNotificationStore(['journal','deletedJournal']),nowMs=Date.now(),rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,nowMs)).filter(row=>slaReportStatusMatches(row,settings)&&slaReportManagerMatches(row.responsibleManager,settings)),map=new Map();for(const row of rows)addSlaStat(map,row);const {managers,totals}=finalizeSlaStats(map),visibleRows=rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0)).slice(0,2000);return {settings,rows:visibleRows,rowsTotal:rows.length,rowsLimited:rows.length>visibleRows.length,managers,totals,checkedAt:Date.now(),bootstrap:readDialogBootstrapState(),refresh:{mode:'background',running:slaRecentSyncRunning},performance:{mode:'json-fallback'}};
+  }
+  const key=slaReportCacheKey(session,settings),cached=slaReportCache.get(key);if(!force&&cached&&Date.now()-cached.at<15000)return {...cached.value,performance:{...(cached.value.performance||{}),cache:'hit'}};
+  if(slaReportInflight.has(key))return slaReportInflight.get(key);
+  const job=computeSlaReportDirect(session,settings).then(value=>{slaReportCache.set(key,{at:Date.now(),value});return value}).finally(()=>slaReportInflight.delete(key));slaReportInflight.set(key,job);return job;
 }
 
 // v28.19: one-time historical bootstrap. It scans every VK conversation once,
@@ -2883,47 +2932,36 @@ async function runDialogBootstrapOnce(session){
   if(before.status==='completed'&&!legacyTruncated)return before;
   dialogBootstrapRunning=true;
   const hardLimit=100000,resumeAt=Math.max(0,Number(before.currentBatchEnd||0));
-  const state={...before,status:'running',startedAt:before.startedAt||Date.now(),lastError:'',processedDialogs:Math.max(0,Number(before.processedDialogs||0)),failedDialogs:Math.max(0,Number(before.failedDialogs||0)),totalDialogs:Math.max(0,Number(before.totalDialogs||0)),currentBatchEnd:resumeAt,scanLimitDialogs:hardLimit,possibleTruncation:false};
+  const state={...before,status:'running',startedAt:before.startedAt||Date.now(),lastError:'',processedDialogs:Math.max(0,Number(before.processedDialogs||0)),failedDialogs:Math.max(0,Number(before.failedDialogs||0)),totalDialogs:Math.max(0,Number(before.totalDialogs||0)),currentBatchEnd:resumeAt,scanLimitDialogs:hardLimit,possibleTruncation:false,storageMode:storage.enabled?'incremental-sql':'json-fallback'};
   await writeDialogBootstrapState(state);
   try{
-    const store=await readNotificationStore(),settings={...slaReportSettingsFor(session),managerFilters:[],statuses:[]},rule={...settings,manager:'',warningAlerts:false,violationAlerts:false,outboxAlerts:false,dialogFilter:'unanswered'};
-    let offset=resumeAt,lastPersisted=resumeAt,total=Math.max(resumeAt,state.totalDialogs||0);
+    const settings={...slaReportSettingsFor(session),managerFilters:[],statuses:[]},rule={...settings,manager:'',warningAlerts:false,violationAlerts:false,outboxAlerts:false,dialogFilter:'unanswered'},legacyStore=storage.enabled?null:await readNotificationStore(['journal','deletedJournal']);
+    let offset=resumeAt,lastProgressPersisted=resumeAt,total=Math.max(resumeAt,state.totalDialogs||0);
     while(offset<hardLimit){
-      const page=await loadDialogBootstrapPage(session,offset,100);
-      const reportedTotal=Math.max(0,Number(page.total||0));
-      if(reportedTotal)total=Math.min(hardLimit,reportedTotal);
-      state.totalDialogs=total;state.possibleTruncation=reportedTotal>hardLimit;
+      const page=await loadDialogBootstrapPage(session,offset,100),reportedTotal=Math.max(0,Number(page.total||0));
+      if(reportedTotal)total=Math.min(hardLimit,reportedTotal);state.totalDialogs=total;state.possibleTruncation=reportedTotal>hardLimit;
       if(!page.rows.length||offset>=total)break;
       for(const d of page.rows){
         if(offset>=hardLimit)break;
         try{
           const params={peer_id:Number(d.peerId),count:200,offset:0,extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;
-          const raw=await vkCallPolite(session.vkToken,'messages.getHistory',params,{minGapMs:450,retries:6}),maps=vkIdentityMaps(raw||{}),messages=(raw?.items||[]).map(m=>normalizeVkMessage(m,maps));
-          ingestNotificationJournalMessages(store,{peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule});
+          const raw=await vkCallPolite(session.vkToken,'messages.getHistory',params,{minGapMs:500,retries:6}),maps=vkIdentityMaps(raw||{}),messages=(raw?.items||[]).map(m=>normalizeVkMessage(m,maps));
+          if(storage.enabled)await ingestNotificationJournalDirect({peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule});
+          else ingestNotificationJournalMessages(legacyStore,{peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule});
           state.processedDialogs++;
-        }catch(err){
-          if(err?.code==='VK_RATE_LIMIT')throw err;
-          state.failedDialogs++;console.warn('[bootstrap dialogs]',d.peerId,err?.message||err);
-        }
+        }catch(err){if(err?.code==='VK_RATE_LIMIT')throw err;state.failedDialogs++;console.warn('[bootstrap dialogs]',d.peerId,err?.message||err)}
         offset++;state.currentBatchEnd=offset;
-        // Persist in coarse chunks. v28.20 wrote the entire notification snapshot after every 4 dialogs,
-        // which saturated PostgreSQL/Render while the UI was polling it.
-        if(offset-lastPersisted>=25){await writeNotificationStore(store);await writeDialogBootstrapState(state);lastPersisted=offset}
+        if(offset-lastProgressPersisted>=25){if(legacyStore)await writeNotificationStore(legacyStore);await writeDialogBootstrapState(state);lastProgressPersisted=offset}
       }
-      if(offset-lastPersisted>0){await writeNotificationStore(store);await writeDialogBootstrapState(state);lastPersisted=offset}
-      if(offset>=total)break;
-      await sleep(700);
+      if(offset-lastProgressPersisted>0){if(legacyStore)await writeNotificationStore(legacyStore);await writeDialogBootstrapState(state);lastProgressPersisted=offset}
+      if(offset>=total)break;await sleep(900);
     }
-    const rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,Date.now())),folders={waiting:0,onTime:0,violations:0,total:rows.length};for(const row of rows){if(row.waiting)folders.waiting++;else if(row.violated)folders.violations++;else folders.onTime++}
-    Object.assign(state,{status:'completed',completedAt:Date.now(),folders,currentBatchEnd:Math.min(offset,total||offset),totalDialogs:total||offset});
-    await writeNotificationStore(store);await writeDialogBootstrapState(state);scheduleHistoricalNotificationBackfill(session,{delayMs:5000});return state;
+    let folders;
+    if(storage.enabled){slaReportCache.clear();const report=await buildSlaReport(session,{force:true});folders={waiting:report.totals.waiting||0,onTime:report.totals.onTime||0,violations:report.totals.violations||0,total:report.totals.total||0}}
+    else{const rows=notificationJournalRows(legacyStore,{admin:true}).map(row=>slaReportRow(row,settings,Date.now()));folders={waiting:0,onTime:0,violations:0,total:rows.length};for(const row of rows){if(row.waiting)folders.waiting++;else if(row.violated)folders.violations++;else folders.onTime++};await writeNotificationStore(legacyStore)}
+    Object.assign(state,{status:'completed',completedAt:Date.now(),folders,currentBatchEnd:Math.min(offset,total||offset),totalDialogs:total||offset});await writeDialogBootstrapState(state);scheduleHistoricalNotificationBackfill(session,{delayMs:5000});return state;
   }catch(err){
-    if(err?.code==='VK_RATE_LIMIT'){
-      const retryAt=Date.now()+60000;Object.assign(state,{status:'paused_rate_limit',lastError:'VK временно ограничил частоту запросов. Проверка автоматически продолжится через минуту.',retryAt});
-      await writeDialogBootstrapState(state);
-      scheduleDialogBootstrapResume(session,61000);
-      return state;
-    }
+    if(err?.code==='VK_RATE_LIMIT'){const retryAt=Date.now()+60000;Object.assign(state,{status:'paused_rate_limit',lastError:'VK временно ограничил частоту запросов. Проверка автоматически продолжится через минуту.',retryAt});await writeDialogBootstrapState(state);scheduleDialogBootstrapResume(session,61000);return state}
     Object.assign(state,{status:'failed',lastError:String(err?.message||err).slice(0,500),failedAt:Date.now()});await writeDialogBootstrapState(state);throw err;
   }finally{dialogBootstrapRunning=false}
 }
@@ -2943,7 +2981,7 @@ async function handleTelegramWebhook(req,res){
   if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'Telegram bot не настроен'});
   if(TELEGRAM_WEBHOOK_SECRET&&String(req.headers['x-telegram-bot-api-secret-token']||'')!==TELEGRAM_WEBHOOK_SECRET)return sendJson(res,403,{ok:false});
   const update=await readJson(req),msg=update?.message;if(!msg?.chat?.id)return sendJson(res,200,{ok:true});
-  const text=String(msg.text||'').trim(),chatId=String(msg.chat.id),store=await readNotificationStore();
+  const text=String(msg.text||'').trim(),chatId=String(msg.chat.id),store=await readNotificationStore(['rules','pairCodes']);
   if(/^\/id(?:\s|$)/i.test(text)){await sendTelegramText(chatId,`Ваш Telegram chat ID: ${chatId}\n\nОбычно достаточно подключиться кнопкой в CRM. После подключения всех менеджеров администратор сохранит их в Render через NOTIFICATION_RULES_JSON.`);return sendJson(res,200,{ok:true})}
   const m=text.match(/^\/start(?:\s+([A-Za-z0-9_-]+))?/i);
   if(m){const code=String(m[1]||'');const pair=store.pairCodes?.[code];if(pair&&Number(pair.expiresAt||0)>Date.now()){
@@ -3047,6 +3085,11 @@ async function apiRouter(req, res, url) {
   const s = await requireAuth(req, res);
   if (!s) return;
 
+  if (pathname === '/api/admin/diagnostics' && req.method === 'GET') {
+    if(!requireAdminSession(s,res))return;
+    const memory=process.memoryUsage(),database=await storage.health().catch(err=>({mode:storage.enabled?'postgresql':'json',ready:false,error:String(err?.message||err)}));
+    return sendJson(res,200,{ok:true,version:VERSION,uptimeSeconds:Math.round(process.uptime()),memory:{rssMb:Math.round(memory.rss/1048576),heapUsedMb:Math.round(memory.heapUsed/1048576),heapTotalMb:Math.round(memory.heapTotal/1048576),externalMb:Math.round(memory.external/1048576)},database,bootstrap:readDialogBootstrapState(),notificationBackfill:readNotificationHistoryBackfillState(),background:{slaRecentSyncRunning,slaRecentSyncLastAt,notificationCheckRunning,notificationScheduler:{...notificationSchedulerState}},cache:{slaReports:slaReportCache.size,documents:storage.poolStats?.()?.documentsCached||0},timestamp:Date.now()});
+  }
 
   if (pathname === '/api/bootstrap/dialogs-once' && req.method === 'GET') {
     return sendJson(res,200,{ok:true,state:readDialogBootstrapState(),running:dialogBootstrapRunning});
@@ -3062,33 +3105,30 @@ async function apiRouter(req, res, url) {
   }
   if (pathname === '/api/notifications/history' && req.method === 'GET') {
     try{
-      const store=await readNotificationStore();
-      const expired=expirePendingBrowserDeliveries(store);
-      const names=notificationActorNames(s).map(notificationRuleKey),admin=isAdminSession(s);
-      const allRows=Object.values(store.deliveryLog||{}).filter(row=>admin||names.includes(notificationRuleKey(row.recipientManager))).sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0));
-      if(expired)await writeNotificationStore(store);
-      const backfill=scheduleHistoricalNotificationBackfill(s,{delayMs:4000});
-      // Keep the audit page responsive even after years of history. Summary is over all rows;
-      // the UI receives the newest slice instead of a multi-megabyte JSON response.
-      const rows=allRows.slice(0,1500);
-      return sendJson(res,200,{ok:true,rows,rowsTotal:allRows.length,rowsLimited:allRows.length>rows.length,summary:notificationHistorySummary(allRows),backfill,bootstrap:readDialogBootstrapState(),storage:storage.enabled?'postgresql':'json'});
+      const names=notificationActorNames(s),admin=isAdminSession(s),backfill=scheduleHistoricalNotificationBackfill(s,{delayMs:4000});
+      if(storage.enabled){
+        const started=Date.now();await storage.expireStaleBrowserPending(Date.now()-30*60*1000,200);const [rows,summary]=await Promise.all([storage.getNotificationHistoryRows({names,admin,limit:1500}),storage.getNotificationHistorySummary({names,admin})]);
+        return sendJson(res,200,{ok:true,rows,rowsTotal:summary.total,rowsLimited:summary.total>rows.length,summary,backfill,bootstrap:readDialogBootstrapState(),storage:'postgresql',performance:{mode:'direct-sql',queryMs:Date.now()-started,limit:1500}});
+      }
+      const store=await readNotificationStore(['deliveryLog']),allRows=notificationDeliveryRows(store,s,{admin}),rows=allRows.slice(0,1500);
+      return sendJson(res,200,{ok:true,rows,rowsTotal:allRows.length,rowsLimited:allRows.length>rows.length,summary:notificationHistorySummary(allRows),backfill,bootstrap:readDialogBootstrapState(),storage:'json'});
     }catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/browser-pending' && req.method === 'GET') {
-    try{const store=await readNotificationStore(),rows=notificationDeliveryRows(store,s).filter(row=>row?.channels?.browser?.status==='pending').slice(0,30);await writeNotificationStore(store);return sendJson(res,200,{ok:true,rows})}catch(err){return handleApiError(res,err)}
+    try{const names=notificationActorNames(s),admin=isAdminSession(s);if(storage.enabled){await storage.expireStaleBrowserPending(Date.now()-30*60*1000,100);return sendJson(res,200,{ok:true,rows:await storage.getBrowserPendingNotifications({names,admin,limit:30})})};const store=await readNotificationStore(['deliveryLog']),rows=notificationDeliveryRows(store,s,{admin}).filter(row=>row?.channels?.browser?.status==='pending').slice(0,30);return sendJson(res,200,{ok:true,rows})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/browser-delivery' && req.method === 'POST') {
-    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req),store=await readNotificationStore(),row=(store.deliveryLog||{})[String(body.id||'')];if(!row)return sendJson(res,404,{ok:false,message:'Уведомление не найдено'});const names=notificationActorNames(s).map(notificationRuleKey);if(!isAdminSession(s)&&!names.includes(notificationRuleKey(row.recipientManager)))return sendJson(res,403,{ok:false,message:'Нет доступа к этому уведомлению'});notificationDeliveryChannel(store,row.id,'browser',['sent','failed','blocked','missed'].includes(String(body.status))?String(body.status):'failed',body.error||'');await writeNotificationStore(store);return sendJson(res,200,{ok:true,row:store.deliveryLog[row.id]})}catch(err){return handleApiError(res,err)}
+    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req),id=String(body.id||''),names=notificationActorNames(s).map(notificationRuleKey);if(storage.enabled){const row=await storage.getNotificationHistoryById(id);if(!row)return sendJson(res,404,{ok:false,message:'Уведомление не найдено'});if(!isAdminSession(s)&&!names.includes(notificationRuleKey(row.recipientManager)))return sendJson(res,403,{ok:false,message:'Нет доступа к этому уведомлению'});const temp=notificationDefaultStore();temp.deliveryLog[id]=row;const updated=notificationDeliveryChannel(temp,id,'browser',['sent','failed','blocked','missed'].includes(String(body.status))?String(body.status):'failed',body.error||'');await storage.upsertNotificationHistoryRows([updated]);return sendJson(res,200,{ok:true,row:updated})}const store=await readNotificationStore(['deliveryLog']),row=(store.deliveryLog||{})[id];if(!row)return sendJson(res,404,{ok:false,message:'Уведомление не найдено'});if(!isAdminSession(s)&&!names.includes(notificationRuleKey(row.recipientManager)))return sendJson(res,403,{ok:false,message:'Нет доступа к этому уведомлению'});notificationDeliveryChannel(store,row.id,'browser',['sent','failed','blocked','missed'].includes(String(body.status))?String(body.status):'failed',body.error||'');await writeNotificationStore(store);return sendJson(res,200,{ok:true,row:store.deliveryLog[row.id]})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/admin/sla/violations' && req.method === 'GET') {
-    if(!requireAdminSession(s,res))return;try{const store=await readNotificationStore(),settings={...slaReportSettingsFor(s),managerFilters:[],statuses:[]},rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,Date.now())).filter(row=>row.violated).sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0));return sendJson(res,200,{ok:true,rows,deletedIds:Object.keys(store.deletedJournal||{}),bootstrap:readDialogBootstrapState()})}catch(err){return handleApiError(res,err)}
+    if(!requireAdminSession(s,res))return;try{const settings={...slaReportSettingsFor(s),managerFilters:[],statuses:[]};if(storage.enabled){const rows=[];await storage.scanLeadJournal(async batch=>{for(const item of batch){const row=slaReportRow(item.payload,settings,Date.now());if(row.violated)rows.push(row)}if(rows.length>3000){rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0));rows.length=2500}},{batchSize:750});rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0));return sendJson(res,200,{ok:true,rows:rows.slice(0,2000),rowsTotal:rows.length,rowsLimited:rows.length>2000,deletedIds:await storage.readDeletedJournalIds(),bootstrap:readDialogBootstrapState(),storage:'postgresql'})}const store=await readNotificationStore(['journal','deletedJournal']),rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,Date.now())).filter(row=>row.violated).sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0));return sendJson(res,200,{ok:true,rows,deletedIds:Object.keys(store.deletedJournal||{}),bootstrap:readDialogBootstrapState(),storage:'json'})}catch(err){return handleApiError(res,err)}
   }
   const adminSlaViolationRestore=pathname.match(/^\/api\/admin\/sla\/violations\/([^/]+)\/restore$/);
   if(adminSlaViolationRestore&&req.method==='POST'){
-    if(!requireAdminSession(s,res)||!requireCsrf(req,res,s))return;const id=decodeURIComponent(adminSlaViolationRestore[1]),store=await readNotificationStore();if(!store.deletedJournal?.[id])return sendJson(res,404,{ok:false,message:'Удалённая запись не найдена'});delete store.deletedJournal[id];await writeNotificationStore(store);return sendJson(res,200,{ok:true,id});
+    if(!requireAdminSession(s,res)||!requireCsrf(req,res,s))return;const id=decodeURIComponent(adminSlaViolationRestore[1]);if(storage.enabled){if(!await storage.restoreLeadJournal(id))return sendJson(res,404,{ok:false,message:'Удалённая запись не найдена'});slaReportCache.clear();return sendJson(res,200,{ok:true,id})}const store=await readNotificationStore(['deletedJournal']);if(!store.deletedJournal?.[id])return sendJson(res,404,{ok:false,message:'Удалённая запись не найдена'});delete store.deletedJournal[id];await writeNotificationStore(store);return sendJson(res,200,{ok:true,id});
   }
   if (pathname === '/api/outbox/overview' && req.method === 'GET') {
-    try{const store=await readNotificationStore();return sendJson(res,200,{ok:true,outbox:notificationOutboxRows(store,s,{admin:isAdminSession(s)}),storage:storage.enabled?'postgresql':'json'});}catch(err){return handleApiError(res,err)}
+    try{if(storage.enabled){const rows=await storage.readOutboxRows(1500),store=notificationDefaultStore();store.outbox=Object.fromEntries(rows.map(row=>[String(row.requestId||row.id||crypto.randomUUID()),row]));return sendJson(res,200,{ok:true,outbox:notificationOutboxRows(store,s,{admin:isAdminSession(s)}),storage:'postgresql',performance:{mode:'direct-sql',limit:1500}})}const store=await readNotificationStore(['outbox']);return sendJson(res,200,{ok:true,outbox:notificationOutboxRows(store,s,{admin:isAdminSession(s)}),storage:'json'});}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/sla/settings' && req.method === 'GET') {
     return sendJson(res,200,{ok:true,settings:slaReportSettingsFor(s),storage:storage.enabled?'postgresql':'json'});
@@ -3105,27 +3145,27 @@ async function apiRouter(req, res, url) {
   }
 
   if (pathname === '/api/notifications/settings' && req.method === 'GET') {
-    const store=await readNotificationStore();
+    const store=await readNotificationStore(['rules']);
     const visibleRules=(store.rules||[]).filter(r=>canManageNotificationManager(s,r.manager));
     return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:notificationMissingEnvironment().length===0,workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState},rules:visibleRules.map(notificationRulePublic),filesystemPersistent:storage.enabled,storage:storage.enabled?'postgresql':'json'});
   }
   if (pathname === '/api/notifications/settings' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
-    try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно настроить только свой Telegram'});const candidate=safeNotificationRule(body);if((candidate.warningAlerts||candidate.violationAlerts||candidate.outboxAlerts)&&!notificationRuleHasExplicitFilters(candidate))return sendJson(res,400,{ok:false,message:'Для строгих уведомлений выберите хотя бы одного менеджера лида и хотя бы один CRM-статус'});const store=await readNotificationStore(),rule=upsertNotificationRule(store,body);await writeNotificationStore(store);return sendJson(res,200,{ok:true,rule:notificationRulePublic(rule)})}catch(err){return handleApiError(res,err)}
+    try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно настроить только свой Telegram'});const candidate=safeNotificationRule(body);if((candidate.warningAlerts||candidate.violationAlerts||candidate.outboxAlerts)&&!notificationRuleHasExplicitFilters(candidate))return sendJson(res,400,{ok:false,message:'Для строгих уведомлений выберите хотя бы одного менеджера лида и хотя бы один CRM-статус'});const store=await readNotificationStore(['rules']),rule=upsertNotificationRule(store,body);await writeNotificationStore(store);return sendJson(res,200,{ok:true,rule:notificationRulePublic(rule)})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/pair' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
-    try{if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'В Render → Environment добавьте секрет TELEGRAM_BOT_TOKEN и дождитесь перезапуска сервиса'});await refreshTelegramBotIdentity();const body=await readJson(req),manager=String(body.manager||'').trim();if(!manager)return sendJson(res,400,{ok:false,message:'Выберите менеджера'});if(!canManageNotificationManager(s,manager))return sendJson(res,403,{ok:false,message:'Можно подключить только свой Telegram'});const store=await readNotificationStore();upsertNotificationRule(store,{manager,...(findNotificationRule(store,manager)||{})});const code=randomToken(12);store.pairCodes=store.pairCodes||{};store.pairCodes[code]={manager,expiresAt:Date.now()+15*60*1000};await writeNotificationStore(store);return sendJson(res,200,{ok:true,botUsername:activeTelegramBotUsername,pairUrl:`https://t.me/${activeTelegramBotUsername}?start=${code}`,expiresMinutes:15})}catch(err){return handleApiError(res,err)}
+    try{if(!TELEGRAM_BOT_TOKEN)return sendJson(res,503,{ok:false,message:'В Render → Environment добавьте секрет TELEGRAM_BOT_TOKEN и дождитесь перезапуска сервиса'});await refreshTelegramBotIdentity();const body=await readJson(req),manager=String(body.manager||'').trim();if(!manager)return sendJson(res,400,{ok:false,message:'Выберите менеджера'});if(!canManageNotificationManager(s,manager))return sendJson(res,403,{ok:false,message:'Можно подключить только свой Telegram'});const store=await readNotificationStore(['rules','pairCodes']);upsertNotificationRule(store,{manager,...(findNotificationRule(store,manager)||{})});const code=randomToken(12);store.pairCodes=store.pairCodes||{};store.pairCodes[code]={manager,expiresAt:Date.now()+15*60*1000};await writeNotificationStore(store);return sendJson(res,200,{ok:true,botUsername:activeTelegramBotUsername,pairUrl:`https://t.me/${activeTelegramBotUsername}?start=${code}`,expiresMinutes:15})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/unpair' && req.method === 'POST') {
-    if(!requireCsrf(req,res,s))return;const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно отключить только свой Telegram'});const store=await readNotificationStore(),rule=findNotificationRule(store,body.manager);if(rule){rule.telegramChatId='';rule.telegramUsername='';rule.telegramFirstName='';await writeNotificationStore(store)}return sendJson(res,200,{ok:true})
+    if(!requireCsrf(req,res,s))return;const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно отключить только свой Telegram'});const store=await readNotificationStore(['rules']),rule=findNotificationRule(store,body.manager);if(rule){rule.telegramChatId='';rule.telegramUsername='';rule.telegramFirstName='';await writeNotificationStore(store)}return sendJson(res,200,{ok:true})
   }
   if (pathname === '/api/notifications/test' && req.method === 'POST') {
-    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно проверить только свой Telegram'});const store=await readNotificationStore(),rule=findNotificationRule(store,body.manager);if(!rule?.telegramChatId)return sendJson(res,400,{ok:false,message:'Сначала подключите Telegram этого менеджера'});await sendTelegramText(rule.telegramChatId,`✅ Тест seb_gun CRM\nМенеджер: ${rule.manager}\nSLA: ${rule.slaMinutes} рабочих минут\nГрафик: ${rule.workStart}–${rule.workEnd}`);return sendJson(res,200,{ok:true})}catch(err){return handleApiError(res,err)}
+    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно проверить только свой Telegram'});const store=await readNotificationStore(['rules']),rule=findNotificationRule(store,body.manager);if(!rule?.telegramChatId)return sendJson(res,400,{ok:false,message:'Сначала подключите Telegram этого менеджера'});await sendTelegramText(rule.telegramChatId,`✅ Тест seb_gun CRM\nМенеджер: ${rule.manager}\nSLA: ${rule.slaMinutes} рабочих минут\nГрафик: ${rule.workStart}–${rule.workEnd}`);return sendJson(res,200,{ok:true})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/admin/notification-rules-export' && req.method === 'GET') {
     if(!requireAdminSession(s,res))return;
-    const store=await readNotificationStore(),connected=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager&&r.telegramChatId);
+    const store=await readNotificationStore(['rules']),connected=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager&&r.telegramChatId);
     return sendJson(res,200,{ok:true,key:'NOTIFICATION_RULES_JSON',value:notificationRulesExportValue(store),count:connected.length});
   }
   if (pathname === '/api/notifications/check-now' && req.method === 'POST') {
@@ -3133,37 +3173,26 @@ async function apiRouter(req, res, url) {
   }
   if (pathname === '/api/notifications/overview' && req.method === 'GET') {
     try {
-      const store=await readNotificationStore(),names=notificationActorNames(s),saved=(store.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
-      const rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered'});
-      const allDialogs=await loadDialogsForNotifications(s,{maxPages:2,filter:'all'});
-      await syncRecentLeadJournal(s,store,allDialogs,rule,{limit:40});
-      const dialogs=allDialogs.filter(d=>!d.lastMessageOut&&notificationRuleMatchesCustomer(rule,d.crm||{}));
-      const now=Math.floor(Date.now()/1000);
-      const activeRows=dialogs.filter(d=>!d.lastMessageOut).map(d=>{const since=Number(d.lastMessageAt||0),window=WorkingSla.responseWindow(since*1000,rule);return{
-        peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,
-        manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',
-        snippet:String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),
-        since,waitMinutes:Math.max(0,Math.floor((now-Number(since||now))/60)),
-        workingWaitMinutes:workingMinutesUntilThreshold(Number(since||now)*1000,Date.now(),rule,rule.slaMinutes),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,violationMinutes:rule.violationMinutes,workDays:rule.workDays,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone
-      }}).filter(d=>d.workingWaitMinutes>=rule.slaMinutes).sort((a,b)=>b.workingWaitMinutes-a.workingWaitMinutes);
-      const activeJournalIds=new Set();for(const row of activeRows){const savedRow=notificationJournalUpsert(store,{...row,receivedAt:row.since});if(savedRow)activeJournalIds.add(savedRow.id)}
-      await resolveNotificationJournalReplies(store,s,activeJournalIds,20);
-      const rows=notificationJournalRows(store,{rule}).map(row=>({...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0,workingWaitMinutes:row.status==='waiting'?workingMinutesUntilThreshold(row.receivedAt*1000,Date.now(),rule,rule.slaMinutes):workingMinutesUntilThreshold(row.receivedAt*1000,(row.answeredAt||row.receivedAt)*1000,rule,rule.slaMinutes)}));
-      const outbox=notificationOutboxRows(store,s);await writeNotificationStore(store);
-      return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),violationMinutes:rule.violationMinutes,workDays:rule.workDays,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses},historySync:{dialogs:Math.min(40,allDialogs.length),mode:'recent-vk-history'}});
+      const store=await readNotificationStore(['rules','outbox']),names=notificationActorNames(s),saved=(store.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager))),rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered'}),allDialogs=await loadDialogsForNotifications(s,{maxPages:2,filter:'all'});
+      if(storage.enabled)await syncRecentLeadJournalDirect(s,allDialogs,rule,{limit:20});else await syncRecentLeadJournal(s,store,allDialogs,rule,{limit:20});
+      const dialogs=allDialogs.filter(d=>!d.lastMessageOut&&notificationRuleMatchesCustomer(rule,d.crm||{})),now=Math.floor(Date.now()/1000),activeRows=dialogs.map(d=>{const since=Number(d.lastMessageAt||0),window=WorkingSla.responseWindow(since*1000,rule);return{peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',snippet:String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),since,waitMinutes:Math.max(0,Math.floor((now-Number(since||now))/60)),workingWaitMinutes:workingMinutesUntilThreshold(Number(since||now)*1000,Date.now(),rule,rule.slaMinutes),responseStartAt:Math.floor(window.responseStartAt/1000),dueAt:Math.floor(window.dueAt/1000),outsideHoursAtReceipt:window.outsideHoursAtReceipt,violationMinutes:rule.violationMinutes,workDays:rule.workDays,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone}}).filter(d=>d.workingWaitMinutes>=rule.slaMinutes).sort((a,b)=>b.workingWaitMinutes-a.workingWaitMinutes);
+      let rows=[];
+      if(storage.enabled){const recent=await storage.readLeadJournalRecent(1000);rows=recent.map(x=>x.payload).filter(row=>notificationRuleMatchesCustomer(rule,{manager:row.currentManager||row.manager||'',managerLogin:row.currentManager||row.manager||'',crmStatus:row.currentCrmStatus||row.crmStatus||''})).map(row=>({...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0,workingWaitMinutes:row.status==='waiting'?workingMinutesUntilThreshold(row.receivedAt*1000,Date.now(),rule,rule.slaMinutes):workingMinutesUntilThreshold(row.receivedAt*1000,(row.answeredAt||row.receivedAt)*1000,rule,rule.slaMinutes)}))}
+      else{const activeJournalIds=new Set();for(const row of activeRows){const savedRow=notificationJournalUpsert(store,{...row,receivedAt:row.since});if(savedRow)activeJournalIds.add(savedRow.id)}await resolveNotificationJournalReplies(store,s,activeJournalIds,20);rows=notificationJournalRows(store,{rule}).map(row=>({...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0,workingWaitMinutes:row.status==='waiting'?workingMinutesUntilThreshold(row.receivedAt*1000,Date.now(),rule,rule.slaMinutes):workingMinutesUntilThreshold(row.receivedAt*1000,(row.answeredAt||row.receivedAt)*1000,rule,rule.slaMinutes)}));await writeNotificationStore(store)}
+      const outbox=notificationOutboxRows(store,s);return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),violationMinutes:rule.violationMinutes,workDays:rule.workDays,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses},historySync:{dialogs:Math.min(20,allDialogs.length),mode:storage.enabled?'incremental-sql':'json-fallback'}});
     } catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/admin/notification-journal' && req.method === 'GET') {
-    if(!requireAdminSession(s,res))return;const store=await readNotificationStore();return sendJson(res,200,{ok:true,rows:notificationJournalRows(store,{admin:true})});
+    if(!requireAdminSession(s,res))return;if(storage.enabled){const rows=(await storage.readLeadJournalRecent(2000)).map(x=>x.payload);return sendJson(res,200,{ok:true,rows,rowsLimited:(await storage.countLeadJournal())>rows.length,storage:'postgresql'})}const store=await readNotificationStore(['journal','deletedJournal']);return sendJson(res,200,{ok:true,rows:notificationJournalRows(store,{admin:true}),storage:'json'});
   }
   const adminNotificationJournalMatch=pathname.match(/^\/api\/admin\/notification-journal\/([^/]+)$/);
   if(adminNotificationJournalMatch&&req.method==='DELETE'){
     if(!requireAdminSession(s,res))return;if(!requireCsrf(req,res,s))return;
-    const id=decodeURIComponent(adminNotificationJournalMatch[1]),store=await readNotificationStore();if(!deleteNotificationJournalRow(store,id))return sendJson(res,404,{ok:false,message:'Запись уведомления не найдена'});await writeNotificationStore(store);return sendJson(res,200,{ok:true,id});
+    const id=decodeURIComponent(adminNotificationJournalMatch[1]);if(storage.enabled){if(!await storage.markLeadJournalDeleted(id))return sendJson(res,404,{ok:false,message:'Запись уведомления не найдена'});slaReportCache.clear();return sendJson(res,200,{ok:true,id})}const store=await readNotificationStore(['journal','deletedJournal']);if(!deleteNotificationJournalRow(store,id))return sendJson(res,404,{ok:false,message:'Запись уведомления не найдена'});await writeNotificationStore(store);return sendJson(res,200,{ok:true,id});
   }
   if (pathname === '/api/notifications/outbox-event' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
-    try{const body=await readJson(req),store=await readNotificationStore(),row=upsertNotificationOutbox(store,body,s);await writeNotificationStore(store);return sendJson(res,200,{ok:true,row})}catch(err){return handleApiError(res,err)}
+    try{const body=await readJson(req),store=await readNotificationStore(['outbox']),row=upsertNotificationOutbox(store,body,s);await writeNotificationStore(store);return sendJson(res,200,{ok:true,row})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/queue-alert' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
@@ -3171,7 +3200,7 @@ async function apiRouter(req, res, url) {
       // v28.19: the browser only reports the failed send. The server watchdog
       // decides when it is truly "stuck" using /api/outbox/settings and then
       // sends Telegram/browser notifications exactly once per configured rule.
-      const body=await readJson(req),store=await readNotificationStore(),row=upsertNotificationOutbox(store,{...body,status:'error',attempts:body.attempts||2},s);row.alerted=false;await writeNotificationStore(store);
+      const body=await readJson(req),store=await readNotificationStore(['outbox']),row=upsertNotificationOutbox(store,{...body,status:'error',attempts:body.attempts||2},s);row.alerted=false;await writeNotificationStore(store);
       return sendJson(res,200,{ok:true,queuedForWatchdog:true,stuckMinutes:readOutboxWatchSettings().stuckMinutes});
     } catch(err){return handleApiError(res,err)}
   }
@@ -3360,8 +3389,9 @@ async function apiRouter(req, res, url) {
       if (!peer.name && crm?.fullName) peer.name = crm.fullName;
       if (!peer.name) peer.name = peer.peerType === 'chat' ? `Беседа ${peerId}` : `VK ${peerId}`;
       if(peer.peerType==='user'){
-        const notificationStore=await readNotificationStore(),names=notificationActorNames(s),saved=(notificationStore.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager))),rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[]});
-        if(ingestNotificationJournalMessages(notificationStore,{peerId,name:crm?.fullName||peer.name,manager:crm?.manager||crm?.managerLogin||'',crmStatus:crm?.crmStatus||'',messages,rule}))await writeNotificationStore(notificationStore);
+        const notificationStore=await readNotificationStore(storage.enabled?['rules']:['rules','journal','deletedJournal']),names=notificationActorNames(s),saved=(notificationStore.rules||[]).map(safeNotificationRule).find(r=>names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager))),rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[]});
+        if(storage.enabled)await ingestNotificationJournalDirect({peerId,name:crm?.fullName||peer.name,manager:crm?.manager||crm?.managerLogin||'',crmStatus:crm?.crmStatus||'',messages,rule});
+        else if(ingestNotificationJournalMessages(notificationStore,{peerId,name:crm?.fullName||peer.name,manager:crm?.manager||crm?.managerLogin||'',crmStatus:crm?.crmStatus||'',messages,rule}))await writeNotificationStore(notificationStore);
       }
       return sendJson(res, 200, { ok: true, peerId, peer, messages, total: Number(raw?.count || messages.length), crm });
     } catch (err) { return handleApiError(res, err); }
@@ -3429,7 +3459,8 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
       try{
         const result=await sendPromise;
         recentMessageSends.set(dedupeKey,{result,expiresAt:Date.now()+dedupeTtl});
-        const notificationStore=await readNotificationStore();if(markNotificationJournalAnswered(notificationStore,peerId,Math.floor(Date.now()/1000),{responseText:[message,attachment?'[Вложение]':'',stickerId?'[Стикер]':'',forwardMessageIds.length?'[Пересланные сообщения]':''].filter(Boolean).join(' '),responseAuthor:s.currentUser?.name||s.login,responseMessageId:result.messageId}))await writeNotificationStore(notificationStore);
+        const answerDetails={responseText:[message,attachment?'[Вложение]':'',stickerId?'[Стикер]':'',forwardMessageIds.length?'[Пересланные сообщения]':''].filter(Boolean).join(' '),responseAuthor:s.currentUser?.name||s.login,responseMessageId:result.messageId};
+        if(storage.enabled){await storage.markLeadJournalAnswered(peerId,Math.floor(Date.now()/1000),answerDetails);slaReportCache.clear()}else{const notificationStore=await readNotificationStore(['journal','deletedJournal']);if(markNotificationJournalAnswered(notificationStore,peerId,Math.floor(Date.now()/1000),answerDetails))await writeNotificationStore(notificationStore)}
         return sendJson(res,200,result);
       }catch(err){recentMessageSends.delete(dedupeKey);throw err}
     } catch (err) { return handleApiError(res, err); }
@@ -4058,6 +4089,7 @@ function handleApiError(res, err) {
   console.error('[API]', err && err.stack ? err.stack : err);
   if (err instanceof VkApiError) {
     const status = err.code === 'VK_AUTH' ? 401 : err.code === 'VK_RATE_LIMIT' ? 429 : err.code === 'VK_TIMEOUT' ? 504 : err.code === 'VK_PERMISSIONS' ? 403 : 502;
+    if(status===429&&!res.headersSent)res.setHeader('Retry-After','15');
     return sendJson(res, status, { ok: false, error: err.code, message: err.message, details: err.details || undefined });
   }
   if (err instanceof BlueSalesError) {
@@ -4066,10 +4098,13 @@ function handleApiError(res, err) {
       catch { console.error('[BlueSales API details]', String(err.details).slice(0, 1800)); }
     }
     const status = err.code === 'AUTH' ? 401 : err.code === 'BUSY' ? 409 : (err.code === 'API_BUSY' || err.code === 'QUEUE_BUSY') ? 503 : err.code === 'TIMEOUT' ? 504 : 502;
+    if(status===503&&!res.headersSent)res.setHeader('Retry-After','5');
     return sendJson(res, status, { ok: false, error: err.code, message: err.message, details: err.details || undefined });
   }
   const status = err && err.status ? err.status : 500;
   const code = String(err?.code || (status===503?'SERVICE_UNAVAILABLE':'SERVER'));
+  if(status===503&&!res.headersSent)res.setHeader('Retry-After','5');
+  if(status===429&&!res.headersSent)res.setHeader('Retry-After','15');
   return sendJson(res, status, { ok: false, error: code, message: err?.message || 'Внутренняя ошибка сервера' });
 }
 
@@ -4082,7 +4117,9 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (url.pathname === '/api/health') return await apiRouter(req,res,url);
-    if (url.pathname.startsWith('/api/')) return await storage.run(()=>apiRouter(req, res, url));
+    // v28.22: do not reload app_documents before every API request. Individual
+    // routes query the exact PostgreSQL tables they need; document writes update the cache.
+    if (url.pathname.startsWith('/api/')) return await apiRouter(req, res, url);
     return serveStatic(req, res, url.pathname);
   } catch (err) {
     return handleApiError(res, err);

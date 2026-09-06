@@ -1,4 +1,4 @@
-> Версия 28.19: сначала прочитайте [START_HERE_POSTGRESQL.md](START_HERE_POSTGRESQL.md), затем UPDATE_V28.19.txt. PostgreSQL обязателен для устойчивой истории SLA, одноразового сканирования и аудита уведомлений.
+> Версия 28.22: сначала прочитайте [START_HERE_POSTGRESQL.md](START_HERE_POSTGRESQL.md), затем UPDATE_V28.22.txt. PostgreSQL обязателен; SLA/история теперь читаются direct SQL, bootstrap пишет lead_journal инкрементально.
 
 # seb_gun CRM v28.3 — Vue workspace
 

@@ -29,3 +29,11 @@ CREATE TABLE IF NOT EXISTS client_events (id bigserial PRIMARY KEY, scope text N
 CREATE INDEX IF NOT EXISTS client_events_client ON client_events(scope,client_id,observed_at);
 CREATE TABLE IF NOT EXISTS lead_assignments (id text PRIMARY KEY, lead_id text NOT NULL REFERENCES lead_journal(id), from_manager text, to_manager text NOT NULL, changed_at timestamptz, payload jsonb NOT NULL);
 CREATE TABLE IF NOT EXISTS sla_violations (lead_id text PRIMARY KEY REFERENCES lead_journal(id), manager_at_detection text NOT NULL, threshold_minutes integer NOT NULL, detected_at timestamptz NOT NULL DEFAULT now(), payload jsonb NOT NULL);
+
+-- v28.22: direct-report indexes. Read-only API routes no longer hydrate every
+-- notification table into one Node.js object before applying LIMIT/filtering.
+CREATE INDEX IF NOT EXISTS lead_journal_received_num ON lead_journal ((CASE WHEN payload->>'receivedAt' ~ '^[0-9]+$' THEN (payload->>'receivedAt')::bigint ELSE 0 END) DESC, id DESC);
+CREATE INDEX IF NOT EXISTS notification_history_created_num ON notification_history ((CASE WHEN payload->>'createdAt' ~ '^[0-9]+$' THEN (payload->>'createdAt')::bigint ELSE 0 END) DESC, id DESC);
+CREATE INDEX IF NOT EXISTS notification_history_recipient_lower ON notification_history ((lower(COALESCE(payload->>'recipientManager',''))));
+CREATE INDEX IF NOT EXISTS notification_history_browser_status ON notification_history ((COALESCE(payload#>>'{channels,browser,status}','')));
+INSERT INTO crm_migrations(id) VALUES ('002-direct-report-indexes') ON CONFLICT DO NOTHING;

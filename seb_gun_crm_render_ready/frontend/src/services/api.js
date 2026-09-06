@@ -175,6 +175,7 @@ export const api = {
   browserDelivery: (id,status,error='') => request('/api/notifications/browser-delivery', { method:'POST', body:{id,status,error}, timeout:15000 }),
   exportNotificationRules: () => request('/api/admin/notification-rules-export', { timeout: 15000, dedupe: false }),
   adminOverview: () => request('/api/admin/overview', { timeout: 60000, dedupe: false }),
+  adminDiagnostics: () => request('/api/admin/diagnostics', { timeout: 15000, retries: 1, retryDelay: 2500 }),
   adminUsers: () => request('/api/admin/users', { timeout: 60000, dedupe: false }),
   updateAdminUser: (key, payload) => request(`/api/admin/users/${encodeURIComponent(key)}`, { method: 'PUT', body: payload, timeout: 45000 }),
   adminPhrases: () => request('/api/admin/phrases', { timeout: 30000, dedupe: false }),

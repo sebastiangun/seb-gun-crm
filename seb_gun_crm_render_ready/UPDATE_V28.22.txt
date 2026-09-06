@@ -1,0 +1,195 @@
+seb_gun CRM v28.22 — DIRECT SQL + INCREMENTAL JOURNAL
+=====================================================
+
+Цель релиза
+===========
+Устранить архитектурную причину 503/429, которая оставалась после v28.21.
+В v28.21 фронтенд уже перестал создавать агрессивный request storm, но многие API-запросы всё ещё читали полный notification-store из PostgreSQL.
+
+Главные изменения
+=================
+
+1. API больше не перечитывает app_documents перед каждым запросом
+---------------------------------------------------------------
+Раньше практически каждый /api/* выполнялся через:
+  storage.run(() => apiRouter(...))
+а storage.run() делал SELECT key,payload FROM app_documents.
+
+Теперь документы загружаются в память при старте и обновляются сразу после writeDocument().
+Обычный API-запрос не выполняет полный refresh app_documents.
+
+2. Частичные notification snapshots
+-----------------------------------
+readNotificationStore() теперь принимает список секций.
+Например настройке Telegram нужны только rules, а outbox endpoint читает только outbox.
+
+Секции:
+- journal
+- rules
+- outbox
+- pairCodes
+- notified
+- deletedJournal
+- deliveryLog
+
+writeNotificationStore() записывает только те секции, которые были реально загружены.
+Это не позволяет частичному запросу случайно удалить данные другой секции.
+
+3. /api/sla/report больше не загружает notification_history/outbox/rules
+-----------------------------------------------------------------------
+PostgreSQL SLA работает напрямую с lead_journal.
+
+Архитектура:
+  lead_journal -> SQL keyset scan небольшими пакетами -> расчёт SLA -> агрегаты
+  lead_journal -> LIMIT для последних строк интерфейса
+
+В памяти не создаётся один огромный объект из всех таблиц.
+Добавлен общий cache SLA на 15 секунд, поэтому несколько вкладок не пересчитывают один и тот же отчёт одновременно.
+
+Ответ содержит performance.mode = direct-sql-paged.
+
+4. /api/notifications/history — прямой SQL
+------------------------------------------
+История доставки теперь:
+- SELECT только из notification_history;
+- ORDER BY createdAt;
+- LIMIT 1500;
+- summary считается SQL aggregate-запросом по всей истории;
+- фильтр доступа по recipientManager выполняется в SQL.
+
+То есть LIMIT применяется до передачи данных в Node.js, а не после полной загрузки таблицы.
+
+5. Browser delivery — прямые операции
+-------------------------------------
+/api/notifications/browser-pending читает только pending browser rows LIMIT 30.
+/api/notifications/browser-delivery читает/обновляет только одну запись.
+
+Pending browser delivery старше 30 минут автоматически получает статус missed.
+Фактическая история старше 365 дней удаляется SQL-запросом; historical backfill не удаляется.
+
+6. Bootstrap диалогов больше не держит полный journal в памяти
+--------------------------------------------------------------
+Для каждого VK peer:
+- читаются только lead_journal rows этого peer;
+- история VK обрабатывается локально;
+- изменившиеся строки пишутся через upsertLeadJournalBatch();
+- используется row-level merge;
+- lead_events / lead_assignments / sla_violations продолжают заполняться.
+
+Полный writeNotificationStore(огромныйStore) каждые 25 диалогов больше не используется в PostgreSQL-режиме.
+Progress сохраняется отдельно.
+
+7. Открытие обычного VK-чата тоже стало incremental
+--------------------------------------------------
+Раньше открытие диалога могло прочитать весь notification-store только ради обновления SLA-журнала.
+Теперь загружается только история конкретного peer и обновляются только его lead_journal rows.
+
+8. Отправка ответа больше не загружает весь journal
+---------------------------------------------------
+После успешного messages.send сервер напрямую обновляет ожидающие lead_journal строки данного peer.
+SLA cache инвалидируется.
+
+9. Фоновая SLA sync имеет минимальный интервал
+---------------------------------------------
+SLA GET больше не может запускать свежий VK sync при каждом обновлении экрана.
+По умолчанию минимальный интервал = 120 секунд.
+Можно задать:
+  SLA_RECENT_SYNC_MIN_MS
+
+Во время one-time bootstrap свежая sync не запускается.
+
+10. Notification scheduler больше не загружает journal/history
+--------------------------------------------------------------
+Фоновая проверка читает только:
+- rules
+- notified
+- outbox
+
+SLA lead episodes пишутся incremental.
+Delivery history пишется incremental непосредственно в notification_history.
+
+VK conversations для одного фильтра ограничены одной страницей и до 120 кандидатов за одну проверку.
+VK calls используют polite throttle/backoff.
+
+11. Historical notification backfill — direct batch
+---------------------------------------------------
+Backfill больше не читает полный lead_journal.
+Используется keyset cursor:
+  id > cursorId
+  LIMIT 50
+
+Каждый пакет создаёт deterministic historical IDs и INSERT ... ON CONFLICT DO NOTHING.
+Повтор после restart безопасен.
+
+12. Админские операции
+----------------------
+Удаление нарушения = отдельный tombstone в notification_state.
+Восстановление = удаление tombstone.
+Для этого не нужно читать весь journal.
+
+Admin journal выводит последние 2000 rows и сообщает, если список ограничен.
+
+13. Диагностика нагрузки
+-----------------------
+Новый endpoint:
+  GET /api/admin/diagnostics
+
+Показывает:
+- RAM RSS;
+- heap used / heap total;
+- uptime;
+- PostgreSQL latency;
+- pool total / idle / waiting;
+- количество cached documents;
+- bootstrap status;
+- notification backfill status;
+- SLA background sync;
+- notification scheduler state;
+- SLA cache size.
+
+В «Ещё» у администратора появился блок «PostgreSQL и нагрузка».
+
+14. Retry-After
+---------------
+Для управляемых 429/503 сервер теперь выставляет Retry-After.
+Frontend v28.21+ уже умеет учитывать этот заголовок и общий cooldown.
+
+15. PostgreSQL indexes
+----------------------
+Добавлены индексы:
+- lead_journal_received_num;
+- notification_history_created_num;
+- notification_history_recipient_lower;
+- notification_history_browser_status.
+
+Render
+======
+Build Command менять НЕ нужно:
+
+cd seb_gun_crm_render_ready && npm ci --include=dev && npm run build && npm run check:runtime && npm run test:v2819 && npm run test:database
+
+package.json версии 28.22 устроен так, что test:v2819 запускает:
+- integration-v2819
+- integration-v2820
+- integration-v2821
+- integration-v2822
+
+Что проверено в этой сборке
+===========================
+Локально успешно:
+- node --check server.js
+- node --check lib/postgres-storage.js
+- npm run check:runtime
+- npm run test:v2819
+- tests/create-safety.js
+- tests/phrase-source.js
+- запуск Node.js сервера в JSON fallback
+- GET /api/health -> 200
+- HEAD / -> 200
+
+Полный Vite build и PGlite database test локально не были завершены из-за недоступной/медленной установки npm-зависимостей в рабочей среде ChatGPT. Они остаются обязательными в Render Build Command. Тест postgres-storage.js дополнительно расширен проверками direct SQL v28.22, поэтому Render остановит deploy, если миграция/SQL несовместимы.
+
+Важно
+=====
+Невозможно честно гарантировать «вообще ни одной ошибки» во внешних API: VK, BlueSales, Telegram и Render могут отвечать timeout/rate-limit независимо от кода CRM.
+Цель v28.22 — не превращать такие внешние ошибки в перегрузку всего сервера и сохранять данные/прогресс при временных сбоях.
