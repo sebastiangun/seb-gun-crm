@@ -1,0 +1,16 @@
+v28.22 conflict rollback test hotfix
+
+Render database test failure:
+  actual: three
+  expected: four
+
+This was a test expectation bug, not a production storage bug.
+The test intentionally performs two concurrent conflicting writes:
+- first snapshot changes manager to three and commits successfully;
+- second stale snapshot changes manager to four and is required to reject with STORAGE_CONFLICT.
+
+After the rejected second write, PostgreSQL must retain manager=three. Expecting four contradicted the immediately preceding assert.rejects(...) and would imply a failed transaction changed data.
+
+Fix:
+- tests/postgres-storage.js now expects manager=three before exercising the v28.22 direct-SQL journal methods.
+- Production storage conflict/rollback behavior is unchanged.

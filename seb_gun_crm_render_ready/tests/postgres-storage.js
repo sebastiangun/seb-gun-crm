@@ -21,7 +21,7 @@ const assert=require('node:assert/strict'),fs=require('fs'),os=require('os'),pat
  let current=await db.readNotifications(defaults());assert.equal(current.journal.a.status,'answered');assert.equal(current.journal.a.manager,'two');
  first=await db.readNotifications(defaults());second=await db.readNotifications(defaults());first.journal.a.manager='three';second.journal.a.manager='four';await db.writeNotifications(first);await assert.rejects(db.writeNotifications(second),{code:'STORAGE_CONFLICT'});
  // v28.22 direct SQL / incremental paths.
- const peerRows=await db.readLeadJournalByPeer(123);assert.equal(peerRows.length,1);assert.equal(peerRows[0].payload.manager,'four');
+ const peerRows=await db.readLeadJournalByPeer(123);assert.equal(peerRows.length,1);assert.equal(peerRows[0].payload.manager,'three');
  let scanned=0;await db.scanLeadJournal(async rows=>{scanned+=rows.length},{batchSize:50});assert.equal(scanned,1);
  const recent=await db.readLeadJournalRecent(10);assert.equal(recent.length,1);
  await db.markLeadJournalAnswered(123,2000000000,{responseText:'Direct reply',responseAuthor:'tester'});assert.equal((await db.readLeadJournalByPeer(123))[0].payload.status,'answered');
