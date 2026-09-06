@@ -2,10 +2,10 @@
   "name": "seb-gun-crm-vk",
   "version": "28.22.0",
   "private": true,
-  "description": "seb_gun CRM v28.22: direct PostgreSQL reads, incremental SLA journal/bootstrap, lightweight notification audit and diagnostics",
-  "main": "server.js",
+  "description": "seb_gun CRM v28.23: append-only event log, materialized lead state, lightweight SLA/history reads",
+  "main": "server-v2823.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node server-v2823.js",
     "check": "npm run check:runtime && npm run build",
     "test:core": "node tests/ui-parser-v209.js && node tests/integration-v209.js && node tests/integration-v210.js && node tests/integration-v220.js && node tests/integration-v230.js && node tests/integration-v240.js && node tests/integration-v241.js && node tests/integration-v242.js && node tests/integration-v243.js && node tests/integration-v244.js",
     "test": "node tests/ui-parser-v209.js && node tests/integration-v209.js && node tests/integration-v210.js && node tests/integration-v220.js && node tests/integration-v230.js && node tests/integration-v240.js && node tests/integration-v241.js && node tests/integration-v242.js && node tests/integration-v243.js && node tests/integration-v244.js && node tests/integration-v245.js",
@@ -31,7 +31,7 @@
     "test:v269": "node tests/integration-v269.js",
     "test:v270": "node tests/integration-v270.js",
     "build": "vite build --config frontend/vite.config.js",
-    "check:runtime": "node --check server.js && node --check lib/bluesales-web.js && node --check lib/vk-phrase-attachments.js && node --check lib/google-speech-stt.mjs && node --check lib/local-transformers-stt.mjs && node --check lib/transformers-stt-worker.mjs && node --check lib/postgres-storage.js && node --check scripts/database.js",
+    "check:runtime": "node --check server.js && node --check server-v2823.js && node --check lib/event-state-store.js && node --check lib/bluesales-web.js && node --check lib/vk-phrase-attachments.js && node --check lib/google-speech-stt.mjs && node --check lib/local-transformers-stt.mjs && node --check lib/transformers-stt-worker.mjs && node --check lib/postgres-storage.js && node --check scripts/database.js",
     "test:v280": "node tests/integration-v280.js",
     "test:v281": "node tests/integration-v281.js",
     "test:v282": "node tests/integration-v282.js",
@@ -51,14 +51,15 @@
     "db:migrate": "node scripts/database.js migrate",
     "db:import": "node scripts/database.js import",
     "db:status": "node scripts/database.js status",
-    "test:database": "node tests/postgres-storage.js && node tests/create-safety.js && node tests/phrase-source.js",
+    "test:database": "node tests/postgres-storage.js && node tests/event-state-v2823.js && node tests/create-safety.js && node tests/phrase-source.js",
     "test:v2817": "node tests/integration-v2817.js",
     "test:v2818": "node tests/integration-v2818.js",
-    "test:v2819": "node tests/integration-v2819.js && node tests/integration-v2820.js && node tests/integration-v2821.js && node tests/integration-v2822.js",
+    "test:v2819": "node tests/integration-v2819.js && node tests/integration-v2820.js && node tests/integration-v2821.js && node tests/integration-v2822.js && node tests/integration-v2823.js",
     "test:v2820": "node tests/integration-v2820.js",
-    "test:release": "node tests/integration-v2819.js && node tests/integration-v2820.js && node tests/integration-v2821.js && node tests/integration-v2822.js && npm run test:database",
     "test:v2821": "node tests/integration-v2821.js",
-    "test:v2822": "node tests/integration-v2822.js"
+    "test:v2822": "node tests/integration-v2822.js",
+    "test:v2823": "node tests/integration-v2823.js && node tests/event-state-v2823.js",
+    "test:release": "node tests/integration-v2819.js && node tests/integration-v2820.js && node tests/integration-v2821.js && node tests/integration-v2822.js && node tests/integration-v2823.js && npm run test:database"
   },
   "engines": {
     "node": ">=18"
