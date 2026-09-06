@@ -153,3 +153,6 @@ input,select,textarea{width:100%;min-width:0;max-width:100%;border:1px solid var
   .client-form-actions{bottom:64px}
 }
 @media(max-width:390px){.client-shortcuts-grid{grid-template-columns:1fr}.client-mobile-actions{grid-template-columns:1fr 1fr}.client-mobile-actions button:last-child{grid-column:1/-1}.crm-accordion-body .crm-field{grid-template-columns:40% minmax(0,60%)}}
+
+/* v28.27 monthly analytics rotation notice */
+.global-month-alert{position:fixed;z-index:1200;top:36px;left:50%;transform:translateX(-50%);width:min(680px,calc(100% - 24px));display:flex;gap:10px;align-items:center;justify-content:center;padding:10px 14px;border:1px solid #d89a25;border-radius:12px;background:#fff4d6;color:#5a3b00;box-shadow:0 8px 28px rgba(0,0,0,.22);cursor:pointer}.global-month-alert span{font-size:12px}.monthly-rotation-alert{display:grid;gap:10px}.monthly-rotation-alert .danger-btn{width:100%}@media(max-width:640px){.global-month-alert{top:34px;align-items:flex-start;flex-direction:column;gap:2px;padding:9px 12px}.global-month-alert b{font-size:12px}.global-month-alert span{font-size:11px}}

@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.26.0",
+  "version": "28.27.0",
   "private": true,
-  "description": "seb_gun CRM v28.26: fixed Google Sheets SLA storage + redesigned responsive client card",
+  "description": "seb_gun CRM v28.27: monthly Google Sheets analytics + QuickPhrases + BlueSales client cache fallback",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -48,10 +48,10 @@
     "test:v2813": "node tests/integration-v2813.js",
     "test:v2814": "node tests/integration-v2814.js",
     "test:v2815": "node tests/integration-v2815.js",
-    "test:database": "node tests/google-apps-script-storage-v2826.js && node tests/create-safety.js && node tests/phrase-source.js",
+    "test:database": "node tests/google-apps-script-storage-v2827.js && node tests/create-safety.js && node tests/phrase-source.js",
     "test:v2817": "node tests/integration-v2817.js",
     "test:v2818": "node tests/integration-v2818.js",
-    "test:v2819": "node tests/integration-v2826.js",
+    "test:v2819": "node tests/integration-v2827.js",
     "test:v2820": "node tests/integration-v2820.js",
     "test:release": "npm run test:v2819 && npm run test:database",
     "test:v2821": "node tests/integration-v2821.js",
@@ -59,7 +59,8 @@
     "test:v2823": "node tests/integration-v2823.js && node tests/event-state-v2823.js",
     "test:v2824": "node tests/integration-v2824.js",
     "test:v2825": "node tests/integration-v2825.js && node tests/google-apps-script-storage-v2825.js",
-    "test:v2826": "node tests/integration-v2826.js && node tests/google-apps-script-storage-v2826.js"
+    "test:v2826": "node tests/integration-v2826.js && node tests/google-apps-script-storage-v2826.js",
+    "test:v2827": "node tests/integration-v2827.js && node tests/google-apps-script-storage-v2827.js"
   },
   "engines": {
     "node": ">=18"

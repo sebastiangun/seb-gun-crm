@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onBeforeUnmount, watch } from 'vue'
+import { onMounted, onBeforeUnmount, watch, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useSessionStore } from './stores/session'
 import { useUiStore } from './stores/ui'
@@ -17,8 +17,14 @@ const router = useRouter()
 const route = useRoute()
 const outbox = useOutboxStore()
 const browserNotifications = useBrowserNotificationsStore()
+const monthlyRotation = ref(null)
 watch(() => route.fullPath, () => rememberListRoute(route), { immediate: true })
 watch(() => session.authenticated, value => { if(value)browserNotifications.start();else browserNotifications.stop() })
+
+async function checkMonthlyRotation(){
+  if(!session.authenticated||!session.isAdmin)return;
+  try{const d=await api.adminDiagnostics();monthlyRotation.value=d?.monthly?.rotationRequired?d.monthly:null;if(monthlyRotation.value)ui.toast(`Новый месяц ${monthlyRotation.value.period}: подключите новую Google-таблицу аналитики`,'error',12000)}catch{}
+}
 
 async function authExpired() {
   ui.toast('Сессия BlueSales завершилась. Войдите снова.', 'error', 5000)
@@ -29,7 +35,7 @@ async function authExpired() {
 onMounted(async () => {
   window.addEventListener('crm:auth-expired', authExpired)
   await session.bootstrap()
-  if(session.authenticated){outbox.init(session.loginName);browserNotifications.start();api.bootstrapDialogsOnce().catch(()=>{})}
+  if(session.authenticated){outbox.init(session.loginName);browserNotifications.start();api.bootstrapDialogsOnce().catch(()=>{});checkMonthlyRotation()}
   if (session.authenticated && route.path === '/') router.replace('/dialogs')
 })
 onBeforeUnmount(() => {window.removeEventListener('crm:auth-expired', authExpired);browserNotifications.stop()})
@@ -44,6 +50,7 @@ onBeforeUnmount(() => {window.removeEventListener('crm:auth-expired', authExpire
     </div>
     <LoginView v-else-if="!session.authenticated" />
     <template v-else>
+      <button v-if="monthlyRotation" class="global-month-alert" @click="router.push('/more')"><b>⚠ Новый месяц {{monthlyRotation.period}}</b><span>Администратору нужно подключить новую Google-таблицу аналитики →</span></button>
       <MoscowClock />
       <router-view />
       <BottomNav v-if="!$route.path.startsWith('/dialogs/') && !$route.path.startsWith('/admin')" />

@@ -1,4 +1,4 @@
-> Версия 28.26: исправлено Google Sheets/SLA-хранилище, OK CDN и полностью адаптирована карточка клиента для смартфона. PostgreSQL и Google Cloud Console не нужны. Начните с [GOOGLE_APPS_SCRIPT_STORAGE_SETUP.md](GOOGLE_APPS_SCRIPT_STORAGE_SETUP.md).
+> Версия 28.27: аналитика хранится помесячно в Google Sheets, VK-переписка остаётся за весь период, Bootstrap больше не нагружает BlueSales, добавлены `QuickPhrases` (185 фраз) и `ClientsCache` с fallback вместо 503. Текущая сентябрьская таблица: `seb_gun_crm_storage_2026-09` (`1lm0ajA6nFpQ5jXybxm3MY5pVp0gTjqP_oC_0rira7oI`). При смене месяца администратор получает предупреждение. Начните с [GOOGLE_APPS_SCRIPT_STORAGE_SETUP.md](GOOGLE_APPS_SCRIPT_STORAGE_SETUP.md).
 
 # seb_gun CRM v28.3 — Vue workspace
 
@@ -21,7 +21,7 @@ Render использует те же команды из `render.yaml`. Сек�
 - `frontend/src/stores/dialogs.js` — список диалогов и polling;
 - `frontend/src/stores/chat.js` — сообщения, загрузка ранней истории, отправка, STT;
 - `frontend/src/stores/drafts.js` — persistent draft по `peerId`;
-- `frontend/src/stores/phrases.js` — 151 быстрый скрипт;
+- `frontend/src/stores/phrases.js` — быстрые фразы; рабочий набор из 185 фраз хранится/зеркалируется в Google Sheets;
 - `frontend/src/stores/clients.js` / `reminders.js` — BlueSales экраны;
 - `frontend/src/components/MultiFilterSheet.vue` — мобильные мультифильтры;
 - `frontend/src/components/PhraseDrawer.vue` — левая шторка скриптов;

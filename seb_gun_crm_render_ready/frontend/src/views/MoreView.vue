@@ -8,7 +8,7 @@ import { useBrowserNotificationsStore } from '../stores/browserNotifications'
 
 const session=useSessionStore(),ui=useUiStore(),router=useRouter()
 const browserNotifications=useBrowserNotificationsStore()
-const databaseSyncing=ref(false),bootstrap=ref(null),pollTimer=ref(0),notificationSummary=ref(null),pollCount=ref(0),diagnostics=ref(null)
+const databaseSyncing=ref(false),bootstrap=ref(null),pollTimer=ref(0),notificationSummary=ref(null),pollCount=ref(0),diagnostics=ref(null),monthStarting=ref(false)
 const bootstrapProgress=computed(()=>{const total=Number(bootstrap.value?.totalDialogs||0),done=Number(bootstrap.value?.currentBatchEnd||bootstrap.value?.processedDialogs||0);return total?Math.min(100,Math.round(done/total*100)):0})
 const bootstrapRunning=computed(()=>['running','starting'].includes(String(bootstrap.value?.status||'')))
 
@@ -16,6 +16,7 @@ async function enableBrowserNotifications(){try{await browserNotifications.enabl
 async function testBrowserNotifications(){try{await browserNotifications.test();ui.toast('Тестовое уведомление отправлено','ok')}catch(e){ui.toast(e.message,'error',7000)}}
 async function syncDatabase(){databaseSyncing.value=true;try{const d=await api.syncDatabase();ui.toast(`Сохранено карточек: ${d.clients}`,'ok')}catch(e){ui.toast(e.message,'error')}finally{databaseSyncing.value=false}}
 async function refreshDiagnostics(){if(!session.isAdmin)return;try{diagnostics.value=await api.adminDiagnostics()}catch{}}
+async function startCurrentMonth(){if(!session.isAdmin||monthStarting.value)return;if(!confirm(`Очистить месячную аналитику в ПОДКЛЮЧЕННОЙ таблице и начать период ${diagnostics.value?.monthly?.period||'текущего месяца'}? Быстрые фразы, настройки и кэш клиентов сохранятся; Outbox начнётся заново для нового месяца.`))return;monthStarting.value=true;try{const d=await api.startCurrentAnalyticsMonth();ui.toast(d.message||'Новый месяц аналитики активирован','ok',7000);await Promise.all([refreshDiagnostics(),loadStatus({withHistory:true})])}catch(e){ui.toast(e.message,'error',9000)}finally{monthStarting.value=false}}
 async function loadStatus({withHistory=false,withDiagnostics=false}={}){try{const b=await api.bootstrapDialogsStatus();bootstrap.value=b.state||null;if(withHistory){const h=await api.notificationHistory().catch(()=>null);notificationSummary.value=h?.summary||notificationSummary.value}if(withDiagnostics&&session.isAdmin)await refreshDiagnostics()}catch{}}
 async function poll(){pollCount.value++;await loadStatus({withHistory:pollCount.value%4===0});if(bootstrapRunning.value||bootstrap.value?.status==='paused_rate_limit')pollTimer.value=window.setTimeout(poll,15000)}
 async function logout(){await session.logout();router.replace('/dialogs')}
@@ -32,7 +33,7 @@ onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
       <div class="setting-row"><span>BlueSales</span><b>{{session.account?.name||session.loginName}}</b></div>
       <div class="setting-row"><span>VK</span><b>{{session.vk?.groupName||'Подключён'}}</b></div>
       <div class="setting-row"><span>Права</span><b>{{session.isAdmin?'Администратор':'Менеджер'}}</b></div>
-      <div class="setting-row"><span>Версия</span><b>v28.22 Vue</b></div>
+      <div class="setting-row"><span>Версия</span><b>v28.27 Vue</b></div>
       <div class="setting-row timezone-row"><span>Время проекта</span><b>Москва (МСК)</b></div>
     </section>
 
@@ -59,7 +60,7 @@ onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
     </section>
 
     <section v-if="session.isAdmin" class="settings-card bootstrap-dashboard">
-      <div class="section-title-row"><div><h3>Первичная проверка диалогов</h3><p>Запускается автоматически один раз. После завершения полный исторический проход больше не повторяется.</p></div><b :class="bootstrap?.status==='completed'?'connected-text':bootstrap?.status==='failed'?'danger-text':'muted-text'">{{bootstrap?.status||'не запускалась'}}</b></div>
+      <div class="section-title-row"><div><h3>Первичная проверка диалогов</h3><p>Проверяет только активный месяц аналитики. Переписка и список диалогов остаются за весь период.</p></div><b :class="bootstrap?.status==='completed'?'connected-text':bootstrap?.status==='failed'?'danger-text':'muted-text'">{{bootstrap?.status||'не запускалась'}}</b></div>
       <div v-if="bootstrap?.totalDialogs" class="progress-block"><div class="progress-track"><i :style="{width:`${bootstrapProgress}%`}"></i></div><div class="progress-meta"><b>{{bootstrapProgress}}%</b><span>{{bootstrap.currentBatchEnd||bootstrap.processedDialogs||0}} / {{bootstrap.totalDialogs}} диалогов</span><span v-if="bootstrap.failedDialogs">Ошибок: {{bootstrap.failedDialogs}}</span></div></div>
       <div class="data-status-grid"><span><small>Обработано успешно</small><b>{{bootstrap?.processedDialogs||0}}</b></span><span><small>Ошибок</small><b>{{bootstrap?.failedDialogs||0}}</b></span><span><small>История уведомлений</small><b>{{notificationSummary?.historical||0}} старых событий</b></span></div>
       <div v-if="bootstrap?.folders" class="folder-mini-stats"><span>Нарушения <b>{{bootstrap.folders.violations||0}}</b></span><span>Вовремя <b>{{bootstrap.folders.onTime||0}}</b></span><span>Ждут <b>{{bootstrap.folders.waiting||0}}</b></span></div>
@@ -67,9 +68,10 @@ onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
     </section>
 
     <section v-if="session.isAdmin" class="settings-card">
-      <div class="section-title-row"><div><h3>Google Drive / Sheets и состояние</h3><p>v28.26 хранит рабочие данные в Google Sheets через Apps Script Web App, исправляет SLA-время и отделяет bootstrap/SLA-настройки по листам. PostgreSQL, SQL и Google Cloud Console не используются.</p></div><button class="secondary-btn compact" @click="refreshDiagnostics">Обновить</button></div>
-      <div v-if="diagnostics" class="data-status-grid four"><span><small>RAM</small><b>{{diagnostics.memory?.rssMb||0}} МБ</b></span><span><small>Heap</small><b>{{diagnostics.memory?.heapUsedMb||0}} МБ</b></span><span><small>PG ждут</small><b>{{diagnostics.database?.pool?.waiting||0}}</b></span><span><small>PG latency</small><b>{{diagnostics.database?.latencyMs||0}} мс</b></span></div>
-      <small v-if="diagnostics">Pool: {{diagnostics.database?.pool?.total||0}} всего / {{diagnostics.database?.pool?.idle||0}} свободно · SLA cache: {{diagnostics.cache?.slaReports||0}}</small>
+      <div class="section-title-row"><div><h3>Google Drive / Sheets и состояние</h3><p>v28.27 хранит аналитику помесячно: текущий месяц — отдельная Google-таблица. Быстрые фразы и кэш клиентов также зеркалируются в Sheets. PostgreSQL и Google Cloud Console не используются.</p></div><button class="secondary-btn compact" @click="refreshDiagnostics">Обновить</button></div>
+      <div v-if="diagnostics?.monthly?.rotationRequired" class="inline-error monthly-rotation-alert"><b>Новый месяц аналитики: {{diagnostics.monthly.period}}</b><span>Подключено: {{diagnostics.monthly.sheetName||diagnostics.monthly.spreadsheetId||'таблица'}} · период {{diagnostics.monthly.sheetPeriod||'не указан'}}. Сначала создайте/скопируйте НОВУЮ Google-таблицу, назовите её с {{diagnostics.monthly.period.replace('-','_')}} и поменяйте GOOGLE_SPREADSHEET_ID в Render. Старую таблицу приложение очищать не даст.</span><button v-if="diagnostics.monthly.sheetNameMatchesPeriod" class="danger-btn" :disabled="monthStarting" @click="startCurrentMonth">{{monthStarting?'Подготавливаю…':'Очистить аналитику в НОВОЙ таблице и начать месяц'}}</button><small v-else>После подключения таблицы с названием месяца кнопка активации появится здесь.</small></div>
+      <div v-if="diagnostics" class="data-status-grid four"><span><small>Период</small><b>{{diagnostics.monthly?.period||'—'}}</b></span><span><small>Клиенты в кэше</small><b>{{diagnostics.cache?.clients||0}}</b></span><span><small>Быстрые фразы</small><b>{{diagnostics.cache?.quickPhrases||0}}</b></span><span><small>SLA cache</small><b>{{diagnostics.cache?.slaReports||0}}</b></span></div>
+      <small v-if="diagnostics">Google Sheets · {{diagnostics.monthly?.rotationRequired?'нужно переключить таблицу':'активный месяц подключён'}} · RAM {{diagnostics.memory?.rssMb||0}} МБ</small>
       <button class="secondary-btn" :disabled="databaseSyncing" @click="syncDatabase">{{databaseSyncing?'Синхронизация…':'Синхронизировать клиентов'}}</button>
     </section>
 

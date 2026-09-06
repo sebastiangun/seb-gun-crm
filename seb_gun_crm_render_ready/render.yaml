@@ -94,7 +94,7 @@ services:
       - key: VK_COMMUNITY_URL
         sync: false
 
-      # v28.26 Google Apps Script + Sheets storage + responsive client card. No PostgreSQL, SQL or Google Cloud Console is used.
+      # v28.27 monthly Google Sheets analytics + QuickPhrases + BlueSales ClientsCache fallback. No PostgreSQL or Google Cloud Console.
       - key: GOOGLE_SPREADSHEET_ID
         sync: false
       - key: GOOGLE_SHEETS_WEBAPP_URL
@@ -103,5 +103,9 @@ services:
         sync: false
       - key: REQUIRE_GOOGLE_STORAGE
         value: "1"
+      - key: MONTHLY_AUTO_PREPARE
+        value: "1"
+      - key: ANALYTICS_TIMEZONE
+        value: "Europe/Moscow"
       - key: SESSION_SECRET
         sync: false

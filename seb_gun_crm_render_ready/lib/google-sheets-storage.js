@@ -11,6 +11,20 @@ const text=x=>String(x??'');
 const num=x=>Number.isFinite(Number(x))?Number(x):0;
 function safeJsonParse(v,fallback=null){try{return JSON.parse(String(v||''))}catch{return fallback}}
 function json(v){return JSON.stringify(v??null)}
+function currentMonthPeriod(timezone='Europe/Moscow',at=Date.now()){
+  try{
+    const parts=new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit'}).formatToParts(new Date(at));
+    const year=parts.find(x=>x.type==='year')?.value,month=parts.find(x=>x.type==='month')?.value;
+    if(year&&month)return `${year}-${month}`;
+  }catch{}
+  const d=new Date(at);return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`;
+}
+function periodBounds(period){
+  const m=/^(\d{4})-(\d{2})$/.exec(String(period||''));if(!m)return {period:'',startSec:0,endSec:0};
+  const y=Number(m[1]),mo=Number(m[2]);if(!y||mo<1||mo>12)return {period:'',startSec:0,endSec:0};
+  const offsetMs=3*60*60*1000,startMs=Date.UTC(y,mo-1,1)-offsetMs,endMs=Date.UTC(mo===12?y+1:y,mo===12?0:mo,1)-offsetMs;
+  return {period:`${y}-${String(mo).padStart(2,'0')}`,startSec:Math.floor(startMs/1000),endSec:Math.floor(endMs/1000)};
+}
 function clockText(primary,fallback=''){
   const s=String(primary??'').trim();
   if(/^\d{1,2}:\d{2}$/.test(s)){const [h,m]=s.split(':');return `${String(Number(h)||0).padStart(2,'0')}:${String(Number(m)||0).padStart(2,'0')}`}
@@ -55,7 +69,9 @@ const SHEETS={
   Statuses:['status_id','name','active','color','updated_at','payload_json'],
   Users:['login','name','role','is_admin','active','telegram_chat_id','browser_notifications','updated_at','payload_json'],
   Bootstrap:['key','status','offset','processed','total','errors','retry_at','last_peer_id','updated_at','completed_at','payload_json'],
-  Runtime:['key','value','updated_at','description']
+  Runtime:['key','value','updated_at','description'],
+  QuickPhrases:['phrase_id','group_id','group_name','name','text','hotkey','managers_json','attachments_json','active','group_order','phrase_order','updated_at'],
+  ClientsCache:['client_key','account_login','client_id','vk_id','full_name','phone','email','city','crm_status','manager','next_contact_date','tags_json','updated_at','payload_json']
 };
 
 function leadToRow(x){const m=materializeLead(x);return {lead_id:text(m.id),peer_id:num(m.peerId),client_name:text(m.name),manager:text(m.currentManager||m.manager),crm_status:text(m.currentCrmStatus||m.crmStatus),received_at:num(m.receivedAt),answered_at:num(m.answeredAt),waiting:Boolean(m.waiting),sla_warning:Boolean(m.notified),sla_violation:Boolean(m.violated),working_minutes:num(m.workingResponseMinutes),response_minutes:num(m.responseMinutes),responsible_manager:text(m.responsibleManager||m.currentManager||m.manager),manager_history:json(arr(m.managerHistory)),status_history:json(arr(m.statusHistory)),snippet:text(m.snippet),work_days:json(arr(m.workDays)),work_start:clockText(m.workStart,'10:00'),work_end:clockText(m.workEnd,'22:00'),sla_minutes:num(m.slaMinutes),violation_minutes:num(m.violationMinutes),timezone:text(m.timezone),deleted:Boolean(m.deleted),updated_at:num(m.updatedAt)||Date.now(),payload_json:json(m)}}
@@ -66,6 +82,30 @@ function outboxToRow(x){return {request_id:text(x.requestId),peer_id:num(x.peerI
 function rowToOutbox(r){const p=safeJsonParse(r.payload_json,{})||{};return {...p,requestId:text(r.request_id||p.requestId),peerId:num(r.peer_id||p.peerId),peerName:text(r.peer_name||p.peerName),manager:text(r.manager||p.manager),snippet:text(r.snippet||p.snippet),status:text(r.status||p.status),attempts:num(r.attempts||p.attempts),error:text(r.error||p.error),createdAt:num(r.created_at||p.createdAt),updatedAt:num(r.updated_at||p.updatedAt),stuckAt:num(r.stuck_at||p.stuckAt),alerted:String(r.alerted)==='true'||r.alerted===true,alertedAt:num(r.alerted_at||p.alertedAt)}}
 function ruleToRow(x){const workStart=clockText(x.workStart,'10:00'),workEnd=clockText(x.workEnd,'22:00');return {rule_id:text(x.id||x.manager),recipient_manager:text(x.manager),manager_filters:json(arr(x.managerFilters)),statuses:json(arr(x.statuses)),work_days:json(arr(x.workDays)),work_start:workStart,work_end:workEnd,dialog_filter:text(x.dialogFilter),sla_minutes:num(x.slaMinutes),violation_minutes:num(x.violationMinutes),warning_alerts:Boolean(x.warningAlerts),violation_alerts:Boolean(x.violationAlerts),outbox_alerts:Boolean(x.outboxAlerts),telegram_chat_id:text(x.telegramChatId),browser_enabled:Boolean(x.browserEnabled!==false),enabled:Boolean(x.enabled!==false),updated_at:Date.now(),payload_json:json({...x,workStart,workEnd})}}
 function rowToRule(r){const p=safeJsonParse(r.payload_json,{})||{};return {...p,id:text(r.rule_id||p.id),manager:text(r.recipient_manager||p.manager),managerFilters:safeJsonParse(r.manager_filters,p.managerFilters)||[],statuses:safeJsonParse(r.statuses,p.statuses)||[],workDays:safeJsonParse(r.work_days,p.workDays)||[],workStart:clockText(p.workStart,r.work_start||'10:00'),workEnd:clockText(p.workEnd,r.work_end||'22:00'),dialogFilter:text(r.dialog_filter||p.dialogFilter),slaMinutes:num(r.sla_minutes||p.slaMinutes),violationMinutes:num(r.violation_minutes||p.violationMinutes),warningAlerts:String(r.warning_alerts)==='true'||r.warning_alerts===true,violationAlerts:String(r.violation_alerts)==='true'||r.violation_alerts===true,outboxAlerts:String(r.outbox_alerts)==='true'||r.outbox_alerts===true,telegramChatId:text(r.telegram_chat_id||p.telegramChatId),enabled:String(r.enabled)!=='false'}}
+function phraseRowsFromStore(store={}){
+  const rows=[];arr(store.groups).forEach((g,gi)=>arr(g.phrases).forEach((p,pi)=>rows.push({
+    phrase_id:text(p.id),group_id:text(g.id),group_name:text(g.name),name:text(p.name),text:text(p.text),hotkey:text(p.hotkey),
+    managers_json:json(arr(p.managers)),attachments_json:json(arr(p.attachments)),active:p.active!==false,group_order:gi,phrase_order:pi,updated_at:Date.now()
+  })));return rows;
+}
+function phraseStoreFromRows(rowsMap){
+  const groups=new Map();
+  const rows=[...(rowsMap||new Map()).values()].map(x=>x.data).filter(r=>String(r.active)!=='false'&&r.active!==false)
+    .sort((a,b)=>num(a.group_order)-num(b.group_order)||num(a.phrase_order)-num(b.phrase_order)||text(a.name).localeCompare(text(b.name),'ru'));
+  for(const r of rows){
+    const gid=text(r.group_id||r.group_name);if(!groups.has(gid))groups.set(gid,{id:text(r.group_id),name:text(r.group_name||'Без раздела'),phrases:[]});
+    groups.get(gid).phrases.push({id:text(r.phrase_id),name:text(r.name),text:text(r.text),hotkey:text(r.hotkey),managers:safeJsonParse(r.managers_json,[])||[],attachments:safeJsonParse(r.attachments_json,[])||[]});
+  }
+  return {version:5,source:'google-sheets',updatedAt:new Date().toISOString(),groups:[...groups.values()]};
+}
+function clientToRow(login,c={}){
+  const id=text(c.id||c.clientId),account=text(login).toLowerCase(),vk=num(c.social?.vkId||c.vkId),tags=arr(c.tags).map(t=>typeof t==='string'?t:(t?.name||t?.id||'')).filter(Boolean);
+  return {client_key:`${account}:${id}`,account_login:account,client_id:id,vk_id:vk,full_name:text(c.fullName||c.name),phone:text(c.phone),email:text(c.email),city:text(c.city),crm_status:text(c.crmStatus),manager:text(c.manager||c.managerLogin),next_contact_date:text(c.nextContactDate),tags_json:json(tags),updated_at:Date.now(),payload_json:json(c)};
+}
+function rowToClient(r={}){
+  const p=safeJsonParse(r.payload_json,{})||{},tags=safeJsonParse(r.tags_json,[])||[];
+  return {...p,id:p.id??(Number(r.client_id)||text(r.client_id)),fullName:text(r.full_name||p.fullName),phone:text(r.phone||p.phone),email:text(r.email||p.email),city:text(r.city||p.city),crmStatus:text(r.crm_status||p.crmStatus),manager:text(r.manager||p.manager),nextContactDate:text(r.next_contact_date||p.nextContactDate),tags:arr(p.tags).length?p.tags:tags,social:{...(p.social||{}),vkId:num(r.vk_id||p.social?.vkId)}};
+}
 
 class Storage{
   constructor(root){
@@ -74,14 +114,39 @@ class Storage{
     this.apiSecret=String(process.env.GOOGLE_SHEETS_API_SECRET||'').trim();
     this.sheetId=String(process.env.GOOGLE_SPREADSHEET_ID||'').trim();
     this.enabled=Boolean(this.webappUrl&&this.apiSecret&&this.sheetId);
-    this.rows=new Map();this.documents=new Map();this.bases=new WeakMap();this.loadedSections=new WeakMap();this.createClaims=new Set();this.eventDedupe=new Set();this.lastSyncAt=0;this.refreshPromise=null;
+    this.timezone=String(process.env.ANALYTICS_TIMEZONE||process.env.APP_TIMEZONE||'Europe/Moscow').trim()||'Europe/Moscow';
+    this.analyticsPeriod=String(process.env.ANALYTICS_PERIOD||currentMonthPeriod(this.timezone)).trim();
+    this.autoPrepareLegacy=String(process.env.MONTHLY_AUTO_PREPARE||'0')==='1';
+    const bounds=periodBounds(this.analyticsPeriod);this.periodStartSec=bounds.startSec;this.periodEndSec=bounds.endSec;
+    this.rotationRequired=false;this.sheetPeriod='';this.sheetName='';this.rows=new Map();this.documents=new Map();this.bases=new WeakMap();this.loadedSections=new WeakMap();this.createClaims=new Set();this.eventDedupe=new Set();this.lastSyncAt=0;this.refreshPromise=null;
   }
   async init(){
     if(!this.enabled){if(process.env.REQUIRE_GOOGLE_STORAGE==='1')throw new Error('Google Apps Script storage is not configured: set GOOGLE_SHEETS_WEBAPP_URL, GOOGLE_SHEETS_API_SECRET and GOOGLE_SPREADSHEET_ID');return;}
-    const h=await this.call('health',{});if(!h?.ok)throw new Error(h?.error||'Google Apps Script health failed');
+    const h=await this.call('health',{});if(!h?.ok)throw new Error(h?.error||'Google Apps Script health failed');this.sheetName=text(h.spreadsheetName||'').trim();
     await this.call('setup',{schema:SHEETS});
     await this.refreshAll();
-    await this.upsert('Runtime',{key:'storage_version',value:'28.26',updated_at:Date.now(),description:'Google Apps Script / Sheets storage version'});
+    const periodRow=(this.rows.get('Runtime')||new Map()).get('analytics_period');
+    this.sheetPeriod=text(periodRow?.data?.value).trim();
+    // One-time migration from v28.26/current legacy sheet: when the table has no
+    // analytics_period yet, MONTHLY_AUTO_PREPARE=1 is an explicit opt-in to erase
+    // ONLY monthly analytics and rebuild the active month. The table name must
+    // contain the current period (2026-09 / 2026_09 / 202609), otherwise startup
+    // fails before any destructive operation.
+    if(!this.sheetPeriod&&this.autoPrepareLegacy){
+      if(!this.sheetNameMatchesPeriod()){
+        const e=new Error(`MONTHLY_AUTO_PREPARE refused: spreadsheet «${this.sheetName||this.sheetId}» does not contain active period ${this.analyticsPeriod}`);
+        e.code='MONTH_SHEET_NAME_MISMATCH';throw e;
+      }
+      await this.startCurrentMonth();
+    }else if(!this.sheetPeriod){
+      this.sheetPeriod=this.analyticsPeriod;
+      await this.upsert('Runtime',{key:'analytics_period',value:this.analyticsPeriod,updated_at:Date.now(),description:'Active analytics month YYYY-MM'});
+      await this.upsert('Runtime',{key:'period_start',value:`${this.analyticsPeriod}-01`,updated_at:Date.now(),description:'Monthly analytics start'});
+    }
+    this.rotationRequired=this.sheetPeriod!==this.analyticsPeriod;
+    await this.upsert('Runtime',{key:'storage_version',value:'28.27',updated_at:Date.now(),description:'Monthly Google Apps Script / Sheets storage version'});
+    await this.upsert('Runtime',{key:'rotation_required',value:this.rotationRequired?'true':'false',updated_at:Date.now(),description:'Admin must connect a new monthly spreadsheet when true'});
+    if(!(this.rows.get('QuickPhrases')||new Map()).size)await this.seedQuickPhrasesFromLocal();
   }
   async call(action,payload={},timeoutMs=30000){
     if(!this.enabled)throw Object.assign(new Error('Google Apps Script storage is disabled'),{status:503,code:'GOOGLE_SHEETS_DISABLED'});
@@ -95,7 +160,7 @@ class Storage{
     finally{clearTimeout(timer)}
   }
   col(n){let s='';for(let x=n;x>0;x=Math.floor((x-1)/26))s=String.fromCharCode(65+(x-1)%26)+s;return s;}
-  keyFor(name,o){return ({Leads:o.lead_id,LeadEvents:o.event_id,Notifications:o.notification_id,Outbox:o.request_id,SLASettings:o.setting_id,NotificationRules:o.rule_id,Managers:o.manager_id||o.login,Statuses:o.status_id||o.name,Users:o.login,Bootstrap:o.key,Runtime:o.key})[name]||'';}
+  keyFor(name,o){return ({Leads:o.lead_id,LeadEvents:o.event_id,Notifications:o.notification_id,Outbox:o.request_id,SLASettings:o.setting_id,NotificationRules:o.rule_id,Managers:o.manager_id||o.login,Statuses:o.status_id||o.name,Users:o.login,Bootstrap:o.key,Runtime:o.key,QuickPhrases:o.phrase_id,ClientsCache:o.client_key})[name]||'';}
   normalizeRows(name,list=[]){const headers=SHEETS[name]||[];const m=new Map();for(const src of list||[]){const o={};for(const h of headers)o[h]=src?.[h]??'';const key=this.keyFor(name,o);if(key)m.set(String(key),{data:o});}this.rows.set(name,m);if(name==='LeadEvents')this.eventDedupe=new Set([...m.values()].map(x=>String(x.data.dedupe_key||'')).filter(Boolean));return m;}
   async readSheet(name){const j=await this.call('read',{sheet:name});return this.normalizeRows(name,j.rows||[]);}
   async refreshAll(){
@@ -118,6 +183,7 @@ class Storage{
     const v=this.documents.get(key);if(v!==undefined)return clone(v);
     if(key==='dialog-bootstrap-v2819.json'){const row=(this.rows.get('Bootstrap')||new Map()).get('dialogs-once');if(row)return safeJsonParse(row.data.payload_json,undefined)}
     if(key==='sla-report-settings.json'){const profiles={};for(const [id,row] of this.rows.get('SLASettings')||[]){const payload=safeJsonParse(row.data.payload_json,null);if(payload)profiles[id]=payload}if(Object.keys(profiles).length)return {version:1,profiles}}
+    if(key==='quick_phrases.json'&&(this.rows.get('QuickPhrases')||new Map()).size)return phraseStoreFromRows(this.rows.get('QuickPhrases'));
     try{return JSON.parse(fs.readFileSync(file,'utf8'))}catch{return undefined}
   }
   async writeDocument(file,value){
@@ -126,7 +192,10 @@ class Storage{
     await this.upsert('Runtime',{key:'doc:'+key,value:json(value),updated_at:Date.now(),description:'CRM document'});
     if(key==='dialog-bootstrap-v2819.json'){
       const v=obj(value)?value:{};
-      await this.upsert('Bootstrap',{key:'dialogs-once',status:text(v.status||'pending'),offset:num(v.offset||v.processed),processed:num(v.processed||v.offset),total:num(v.totalDialogs||v.total),errors:num(v.errors),retry_at:num(v.retryAt),last_peer_id:num(v.lastPeerId),updated_at:num(v.updatedAt)||Date.now(),completed_at:num(v.completedAt),payload_json:json(v)});
+      await this.upsert('Bootstrap',{key:'dialogs-once',status:text(v.status||'pending'),offset:num(v.currentBatchEnd||v.offset),processed:num(v.processedDialogs||v.processed),total:num(v.totalDialogs||v.total),errors:num(v.failedDialogs||v.errors),retry_at:num(v.retryAt),last_peer_id:num(v.lastPeerId),updated_at:num(v.updatedAt)||Date.now(),completed_at:num(v.completedAt),payload_json:json(v)});
+    }
+    if(key==='quick_phrases.json'){
+      await this.replaceQuickPhrases(value);
     }
     if(key==='sla-report-settings.json'){
       const rows=[];
@@ -144,7 +213,50 @@ class Storage{
       const u=value.loggedManager;if(u?.login)await this.upsert('Users',{login:text(u.login),name:text(u.name||u.login),role:text(u.role||'manager'),is_admin:Boolean(u.isAdmin||u.admin),active:true,telegram_chat_id:'',browser_notifications:true,updated_at:Date.now(),payload_json:json(u)});
     }
   }
-  async applyPhraseUpdate(){return}
+  async seedQuickPhrasesFromLocal(){
+    try{const file=path.join(this.root,'data','quick_phrases.json'),raw=JSON.parse(fs.readFileSync(file,'utf8'));if(Array.isArray(raw?.groups))await this.replaceQuickPhrases(raw);}catch(err){console.warn('[QuickPhrases seed]',err?.message||err)}
+  }
+  async replaceQuickPhrases(store={}){
+    const rows=phraseRowsFromStore(store);
+    await this.call('clear',{sheet:'QuickPhrases'},45000).catch(()=>{});
+    this.rows.set('QuickPhrases',new Map());
+    if(rows.length)await this.upsertMany('QuickPhrases',rows);
+    return {written:rows.length};
+  }
+  getQuickPhraseGroups(){return phraseStoreFromRows(this.rows.get('QuickPhrases')).groups}
+  async applyPhraseUpdate(){const doc=this.documents.get('quick_phrases.json');if(doc?.groups)await this.replaceQuickPhrases(doc);return true}
+  sheetNameMatchesPeriod(){const p=this.analyticsPeriod,tokens=[p,p.replace('-','_'),p.replace('-','')];const n=text(this.sheetName).toLowerCase();return tokens.some(x=>n.includes(String(x).toLowerCase()))}
+  monthlyStatus(){return {period:this.analyticsPeriod,sheetPeriod:this.sheetPeriod||'',sheetName:this.sheetName||'',sheetNameMatchesPeriod:this.sheetNameMatchesPeriod(),rotationRequired:Boolean(this.rotationRequired),autoPrepareLegacy:Boolean(this.autoPrepareLegacy),periodStartSec:this.periodStartSec,periodEndSec:this.periodEndSec,spreadsheetId:this.sheetId}}
+  async clearSheetData(name){
+    if(!SHEETS[name])throw new Error('Unknown sheet '+name);
+    await this.call('clear',{sheet:name},45000);
+    this.rows.set(name,new Map());
+    if(name==='LeadEvents')this.eventDedupe=new Set();
+    return true;
+  }
+  async startCurrentMonth(){
+    if(this.rotationRequired&&!this.sheetNameMatchesPeriod()){const e=new Error(`Сначала подключите НОВУЮ таблицу месяца ${this.analyticsPeriod} и назовите её с периодом ${this.analyticsPeriod.replace('-','_')}. Текущая таблица «${this.sheetName||this.sheetId}» не будет очищена.`);e.status=409;e.code='MONTH_SHEET_NAME_MISMATCH';throw e;}
+    // Intended for a COPY of the previous month's spreadsheet: preserve QuickPhrases,
+    // ClientsCache and settings, but erase monthly analytics before activation.
+    for(const name of ['Leads','LeadEvents','Notifications','Outbox','Bootstrap'])await this.clearSheetData(name);
+    // Reset only month-scoped runtime documents. Permanent configuration, users,
+    // QuickPhrases and ClientsCache stay intact.
+    for(const docName of ['dialog-bootstrap-v2819.json','notification-history-backfill-v2820.json']){
+      this.documents.delete(docName);
+      const runtimeKey='doc:'+docName;
+      if((this.rows.get('Runtime')||new Map()).has(runtimeKey))await this.remove('Runtime',runtimeKey);
+    }
+    for(const key of [...(this.rows.get('Runtime')||new Map()).keys()]){
+      if(String(key).startsWith('deletedJournal:'))await this.remove('Runtime',key);
+    }
+    this.sheetPeriod=this.analyticsPeriod;
+    this.rotationRequired=false;
+    await this.upsert('Runtime',{key:'analytics_period',value:this.analyticsPeriod,updated_at:Date.now(),description:'Active analytics month YYYY-MM'});
+    await this.upsert('Runtime',{key:'period_start',value:`${this.analyticsPeriod}-01`,updated_at:Date.now(),description:'Monthly analytics start'});
+    await this.upsert('Runtime',{key:'rotation_required',value:'false',updated_at:Date.now(),description:'Admin must connect a new monthly spreadsheet when true'});
+    return this.monthlyStatus();
+  }
+  inAnalyticsPeriod(sec){const n=num(sec);return Boolean(n&&n>=this.periodStartSec&&n<this.periodEndSec)}
   serializeRow(name,o){const headers=SHEETS[name]||[];const out={};for(const h of headers){const v=o?.[h];out[h]=v===undefined?'':(typeof v==='object'?json(v):v)}return out;}
   async upsertMany(name,objects=[]){
     const headers=SHEETS[name];if(!headers)throw new Error(`Unknown storage sheet: ${name}`);
@@ -153,7 +265,7 @@ class Storage{
     let written=0;for(let i=0;i<entries.length;i+=100){const chunk=entries.slice(i,i+100),rows=chunk.map(([,o])=>o);await this.call('upsertMany',{sheet:name,keyField:this.keyField(name),headers,rows},45000);const m=this.rows.get(name)||new Map();for(const [k,o] of chunk)m.set(k,{data:{...o}});this.rows.set(name,m);written+=chunk.length;}
     if(name==='Runtime')this.rebuildDocuments();return {written};
   }
-  keyField(name){return ({Leads:'lead_id',LeadEvents:'event_id',Notifications:'notification_id',Outbox:'request_id',SLASettings:'setting_id',NotificationRules:'rule_id',Managers:'manager_id',Statuses:'status_id',Users:'login',Bootstrap:'key',Runtime:'key'})[name]||'';}
+  keyField(name){return ({Leads:'lead_id',LeadEvents:'event_id',Notifications:'notification_id',Outbox:'request_id',SLASettings:'setting_id',NotificationRules:'rule_id',Managers:'manager_id',Statuses:'status_id',Users:'login',Bootstrap:'key',Runtime:'key',QuickPhrases:'phrase_id',ClientsCache:'client_key'})[name]||'';}
   async upsert(name,o){return this.upsertMany(name,[o])}
   async remove(name,key){const k=String(key||'');if(!k)return false;const m=this.rows.get(name)||new Map();if(!m.has(k))return false;const j=await this.call('delete',{sheet:name,keyField:this.keyField(name),value:k});if(j.deleted){m.delete(k);this.rows.set(name,m);if(name==='Runtime')this.rebuildDocuments();return true}return false;}
   sectionRows(section){if(section==='journal')return Object.fromEntries([...(this.rows.get('Leads')||new Map()).entries()].map(([k,x])=>[k,rowToLead(x.data)]));if(section==='rules')return [...(this.rows.get('NotificationRules')||new Map()).values()].map(x=>rowToRule(x.data));if(section==='outbox')return Object.fromEntries([...(this.rows.get('Outbox')||new Map()).entries()].map(([k,x])=>[k,rowToOutbox(x.data)]));if(section==='deliveryLog')return Object.fromEntries([...(this.rows.get('Notifications')||new Map()).entries()].map(([k,x])=>[k,rowToNotification(x.data)]));const prefix=section+':';const out={};for(const [k,x] of this.rows.get('Runtime')||[]){if(k.startsWith(prefix))out[k.slice(prefix.length)]=safeJsonParse(x.data.value,x.data.value)}return out;}
@@ -162,7 +274,7 @@ class Storage{
   async writeNotifications(store){const base=this.bases.get(store)||{},chosen=this.loadedSections.get(store)||new Set(['journal','rules','outbox','pairCodes','notified','deletedJournal','deliveryLog']),journalChanges=[],groups={NotificationRules:[],Outbox:[],Notifications:[],Runtime:[]};for(const s of chosen){if(s==='journal'){for(const [k,v] of Object.entries(store.journal||{}))if(!equal(base.journal?.[k],v))journalChanges.push(v);}else if(s==='rules'){for(const r of arr(store.rules))groups.NotificationRules.push(ruleToRow(r));}else if(s==='outbox'){for(const [k,v] of Object.entries(store.outbox||{}))if(!equal(base.outbox?.[k],v))groups.Outbox.push(outboxToRow(v));}else if(s==='deliveryLog'){for(const [k,v] of Object.entries(store.deliveryLog||{}))if(!equal(base.deliveryLog?.[k],v))groups.Notifications.push(notificationToRow(v));}else{for(const [k,v] of Object.entries(store[s]||{}))if(!equal(base[s]?.[k],v))groups.Runtime.push({key:`${s}:${k}`,value:json(v),updated_at:Date.now(),description:s});}}if(journalChanges.length)await this.upsertLeadJournalBatch(journalChanges);for(const [name,rows] of Object.entries(groups))if(rows.length)await this.upsertMany(name,rows);this.bases.set(store,clone(store));}
   async readLeadJournalByPeer(peerId){return [...(this.rows.get('Leads')||new Map()).entries()].map(([id,x])=>({id,payload:rowToLead(x.data)})).filter(x=>Number(x.payload.peerId)===Number(peerId)&&!this.sectionRows('deletedJournal')[x.id]);}
   async readDeletedJournalIdsByPeer(peerId){const p=`lead-${Math.trunc(num(peerId))}-`;return Object.keys(this.sectionRows('deletedJournal')).filter(x=>x.startsWith(p));}
-  async upsertLeadJournalBatch(rows=[]){let written=0,skipped=0;const leads=[],events=[];for(const r of rows){const id=String(r?.id||'');if(!id)continue;const curRow=(this.rows.get('Leads')||new Map()).get(id),before=curRow?rowToLead(curRow.data):null,value=mergeJournalLoose(before,r),changed=!before||!equal(leadBusinessSnapshot(before),leadBusinessSnapshot(value));if(before&&!changed)value.updatedAt=before.updatedAt;const nextRow=leadToRow(value);const rowChanged=!curRow||!equal({...curRow.data,updated_at:nextRow.updated_at,payload_json:nextRow.payload_json},nextRow);if(rowChanged){leads.push(nextRow);written++;}else skipped++;if(changed){const sig=eventSignature(value),dedupe=`lead:${id}:${sig}`;if(!this.eventDedupe.has(dedupe)){events.push({event_id:crypto.randomUUID(),event_type:leadEventType(before,value),lead_id:id,peer_id:num(value.peerId),client_name:text(value.name),manager:text(value.currentManager||value.manager),crm_status:text(value.currentCrmStatus||value.crmStatus),event_at:num(value.updatedAt)||Date.now(),details_json:json({before:before?leadBusinessSnapshot(before):null,after:leadBusinessSnapshot(value)}),dedupe_key:dedupe,created_at:Date.now()});this.eventDedupe.add(dedupe);}}}if(leads.length)await this.upsertMany('Leads',leads);if(events.length)await this.upsertMany('LeadEvents',events);return {written,skipped,events:events.length};}
+  async upsertLeadJournalBatch(rows=[]){let written=0,skipped=0,skippedPeriod=0;const leads=[],events=[];for(const r of rows){const id=String(r?.id||'');if(!id)continue;if(this.rotationRequired||!this.inAnalyticsPeriod(r?.receivedAt)){skippedPeriod++;continue;}const curRow=(this.rows.get('Leads')||new Map()).get(id),before=curRow?rowToLead(curRow.data):null,value=mergeJournalLoose(before,r),changed=!before||!equal(leadBusinessSnapshot(before),leadBusinessSnapshot(value));if(before&&!changed)value.updatedAt=before.updatedAt;const nextRow=leadToRow(value);const rowChanged=!curRow||!equal({...curRow.data,updated_at:nextRow.updated_at,payload_json:nextRow.payload_json},nextRow);if(rowChanged){leads.push(nextRow);written++;}else skipped++;if(changed){const sig=eventSignature(value),dedupe=`lead:${id}:${sig}`;if(!this.eventDedupe.has(dedupe)){events.push({event_id:crypto.randomUUID(),event_type:leadEventType(before,value),lead_id:id,peer_id:num(value.peerId),client_name:text(value.name),manager:text(value.currentManager||value.manager),crm_status:text(value.currentCrmStatus||value.crmStatus),event_at:num(value.updatedAt)||Date.now(),details_json:json({before:before?leadBusinessSnapshot(before):null,after:leadBusinessSnapshot(value)}),dedupe_key:dedupe,created_at:Date.now()});this.eventDedupe.add(dedupe);}}}if(leads.length)await this.upsertMany('Leads',leads);if(events.length)await this.upsertMany('LeadEvents',events);return {written,skipped,skippedPeriod,events:events.length};}
   async appendEvent(e){const id=e.event_id||crypto.randomUUID(),dedupe=e.dedupe_key||id;if(this.eventDedupe.has(String(dedupe)))return false;await this.upsert('LeadEvents',{event_id:id,...e,dedupe_key:dedupe,created_at:Date.now()});this.eventDedupe.add(String(dedupe));return true;}
   async scanLeadJournal(fn,{batchSize=750}={}){const rows=[...(this.rows.get('Leads')||new Map()).entries()].map(([id,x])=>({id,payload:rowToLead(x.data)})).filter(x=>!this.sectionRows('deletedJournal')[x.id]);for(let i=0;i<rows.length;i+=batchSize)await fn(rows.slice(i,i+batchSize));return {rows:rows.length,batches:Math.ceil(rows.length/batchSize)}}
   async readLeadJournalRecent(limit=2000){return [...(this.rows.get('Leads')||new Map()).entries()].map(([id,x])=>({id,payload:rowToLead(x.data)})).filter(x=>!this.sectionRows('deletedJournal')[x.id]).sort((a,b)=>num(b.payload.receivedAt)-num(a.payload.receivedAt)).slice(0,limit)}
@@ -175,7 +287,7 @@ class Storage{
   async getNotificationHistoryRows({names=[],admin=false,limit=1500}={}){const allowed=new Set(arr(names).map(x=>text(x).toLowerCase()));return [...(this.rows.get('Notifications')||new Map()).values()].map(x=>rowToNotification(x.data)).filter(x=>admin||allowed.has(text(x.recipientManager).toLowerCase())).sort((a,b)=>num(b.createdAt)-num(a.createdAt)).slice(0,limit)}
   async getNotificationHistorySummary({names=[],admin=false}={}){const rows=await this.getNotificationHistoryRows({names,admin,limit:1000000}),o={total:rows.length,actual:0,historical:0,sent:0,partial:0,pending:0,failed:0};for(const r of rows){if(r.historical||r.overallStatus==='historical')o.historical++;else o.actual++;if(r.overallStatus==='sent')o.sent++;else if(r.overallStatus==='partial')o.partial++;else if(r.overallStatus==='pending')o.pending++;else if(!r.historical)o.failed++;}return o}
   async getNotificationHistoryById(id){const x=(this.rows.get('Notifications')||new Map()).get(String(id));return x?rowToNotification(x.data):null}
-  async upsertNotificationHistoryRows(rows=[],{ignoreExisting=false}={}){const toWrite=[];for(const r of rows){if(ignoreExisting&&(this.rows.get('Notifications')||new Map()).has(String(r.id)))continue;toWrite.push(notificationToRow(r));}if(toWrite.length)await this.upsertMany('Notifications',toWrite);return {inserted:toWrite.length,ids:toWrite.map(x=>String(x.notification_id))}}
+  async upsertNotificationHistoryRows(rows=[],{ignoreExisting=false}={}){const toWrite=[];for(const r of rows){const sec=num(r?.createdAt)>100000000000?Math.floor(num(r.createdAt)/1000):num(r?.createdAt);if(this.rotationRequired||!this.inAnalyticsPeriod(sec))continue;if(ignoreExisting&&(this.rows.get('Notifications')||new Map()).has(String(r.id)))continue;toWrite.push(notificationToRow(r));}if(toWrite.length)await this.upsertMany('Notifications',toWrite);return {inserted:toWrite.length,ids:toWrite.map(x=>String(x.notification_id))}}
   async getBrowserPendingNotifications({names=[],admin=false,limit=30}={}){return (await this.getNotificationHistoryRows({names,admin,limit:1000000})).filter(x=>x.channels?.browser?.status==='pending').sort((a,b)=>num(a.createdAt)-num(b.createdAt)).slice(0,limit)}
   async expireStaleBrowserPending(cutoff=Date.now()-30*60*1000,limit=200){const rows=(await this.getNotificationHistoryRows({admin:true,limit:1000000})).filter(x=>x.channels?.browser?.status==='pending'&&num(x.createdAt)<cutoff).slice(0,limit),updates=[];for(const r of rows){r.channels.browser={...(r.channels.browser||{}),status:'missed',at:Date.now(),error:'Браузер не забрал уведомление в течение 30 минут'};r.updatedAt=Date.now();r.overallStatus='failed';updates.push(notificationToRow(r));}if(updates.length)await this.upsertMany('Notifications',updates);return rows.length}
   async pruneNotificationHistory(cutoff){const rows=(await this.getNotificationHistoryRows({admin:true,limit:1000000})).filter(x=>!x.historical&&num(x.createdAt)<cutoff);for(const r of rows)await this.remove('Notifications',r.id);return rows.length}
@@ -187,9 +299,25 @@ class Storage{
   async deleteSession(id){return this.remove('Runtime',`session:${this.sessionKey(id)}`)}
   async claimCreate(key){const k=`create:${key}`;if((this.rows.get('Runtime')||new Map()).has(k)||this.createClaims.has(k))return false;this.createClaims.add(k);await this.upsert('Runtime',{key:k,value:json({state:'pending'}),updated_at:Date.now(),description:'create guard'});return true}
   async confirmCreate(key,id){await this.upsert('Runtime',{key:`create:${key}`,value:json({state:'confirmed',clientId:String(id)}),updated_at:Date.now(),description:'create guard'})}
-  async observeClients(){return}
-  poolStats(){return {provider:'google-apps-script',cachedSheets:this.rows.size,documentsCached:this.documents.size,lastSyncAt:this.lastSyncAt,webappConfigured:Boolean(this.webappUrl)}}
-  async health(){const started=Date.now();if(!this.enabled)return {mode:'google-apps-script',ready:false,configured:false};const j=await this.call('health',{});return {mode:'google-apps-script',ready:Boolean(j.ok),latencyMs:Date.now()-started,spreadsheetId:this.sheetId,cache:this.poolStats()}}
+  async observeClients(login,customers=[]){
+    if(!this.enabled||!arr(customers).length)return {written:0};
+    const rows=arr(customers).map(c=>clientToRow(login,c)).filter(r=>r.client_id);
+    return this.upsertMany('ClientsCache',rows);
+  }
+  cachedClients({login='',limit=100,offset=0,q='',manager='',status='',tag=''}={}){
+    const account=text(login).toLowerCase(),mq=text(q).toLocaleLowerCase('ru-RU'),managers=text(manager).split(',').map(x=>x.trim().toLocaleLowerCase('ru-RU')).filter(Boolean),statuses=text(status).split(',').map(x=>x.trim().toLocaleLowerCase('ru-RU')).filter(Boolean),tags=text(tag).split(',').map(x=>x.trim().toLocaleLowerCase('ru-RU')).filter(Boolean);
+    let rows=[...(this.rows.get('ClientsCache')||new Map()).values()].map(x=>x.data).filter(r=>!account||text(r.account_login).toLowerCase()===account).map(rowToClient);
+    if(mq)rows=rows.filter(c=>[c.fullName,c.phone,c.email,c.city,c.crmStatus,c.manager,c.social?.vkId,...arr(c.tags).map(t=>t?.name||t)].some(v=>text(v).toLocaleLowerCase('ru-RU').includes(mq)));
+    if(managers.length)rows=rows.filter(c=>managers.some(m=>[c.manager,c.managerLogin].some(v=>text(v).toLocaleLowerCase('ru-RU')===m)));
+    if(statuses.length)rows=rows.filter(c=>statuses.includes(text(c.crmStatus).toLocaleLowerCase('ru-RU')));
+    if(tags.length)rows=rows.filter(c=>{const ct=arr(c.tags).map(t=>text(t?.name||t).toLocaleLowerCase('ru-RU'));return tags.some(t=>ct.includes(t))});
+    rows.sort((a,b)=>text(a.fullName).localeCompare(text(b.fullName),'ru'));const total=rows.length,start=Math.max(0,num(offset)),take=Math.min(100,Math.max(1,num(limit)||100));
+    return {customers:rows.slice(start,start+take),total,hasMore:start+take<total,source:'google-cache'};
+  }
+  cachedClientById(login,id){const key=`${text(login).toLowerCase()}:${text(id)}`,row=(this.rows.get('ClientsCache')||new Map()).get(key);return row?rowToClient(row.data):null}
+  cachedClientsByVkIds(login,ids=[]){const account=text(login).toLowerCase(),wanted=new Set(arr(ids).map(Number));return [...(this.rows.get('ClientsCache')||new Map()).values()].map(x=>x.data).filter(r=>(!account||text(r.account_login).toLowerCase()===account)&&wanted.has(num(r.vk_id))).map(rowToClient)}
+  poolStats(){return {provider:'google-apps-script',cachedSheets:this.rows.size,documentsCached:this.documents.size,lastSyncAt:this.lastSyncAt,webappConfigured:Boolean(this.webappUrl),monthly:this.monthlyStatus(),quickPhrases:(this.rows.get('QuickPhrases')||new Map()).size,clientsCached:(this.rows.get('ClientsCache')||new Map()).size}}
+  async health(){const started=Date.now();if(!this.enabled)return {mode:'google-apps-script',ready:false,configured:false};const j=await this.call('health',{});return {mode:'google-apps-script',ready:Boolean(j.ok),latencyMs:Date.now()-started,spreadsheetId:this.sheetId,monthly:this.monthlyStatus(),cache:this.poolStats()}}
   async close(){return}
 }
 module.exports={Storage,mergeJournalLoose,SHEETS};

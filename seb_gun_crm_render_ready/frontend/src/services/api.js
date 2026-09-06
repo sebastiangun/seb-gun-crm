@@ -176,6 +176,7 @@ export const api = {
   exportNotificationRules: () => request('/api/admin/notification-rules-export', { timeout: 15000, dedupe: false }),
   adminOverview: () => request('/api/admin/overview', { timeout: 60000, dedupe: false }),
   adminDiagnostics: () => request('/api/admin/diagnostics', { timeout: 15000, retries: 1, retryDelay: 2500 }),
+  startCurrentAnalyticsMonth: () => request('/api/admin/monthly/start', { method:'POST', timeout: 60000 }),
   adminUsers: () => request('/api/admin/users', { timeout: 60000, dedupe: false }),
   updateAdminUser: (key, payload) => request(`/api/admin/users/${encodeURIComponent(key)}`, { method: 'PUT', body: payload, timeout: 45000 }),
   adminPhrases: () => request('/api/admin/phrases', { timeout: 30000, dedupe: false }),

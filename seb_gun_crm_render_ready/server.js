@@ -61,7 +61,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.26';
+const VERSION = '28.27';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -2899,79 +2899,110 @@ async function buildSlaReport(session,{force=false}={}){
   const job=computeSlaReportDirect(session,settings).then(value=>{slaReportCache.set(key,{at:Date.now(),value});return value}).finally(()=>slaReportInflight.delete(key));slaReportInflight.set(key,job);return job;
 }
 
-// v28.19: one-time historical bootstrap. It scans every VK conversation once,
-// fills the SLA journal, then stores a durable completion marker in PostgreSQL.
+// v28.27: monthly analytics bootstrap. Only the active analytics month is scanned.
+// The ordinary VK dialog timeline remains full-history; only SLA/analytics are monthly.
 function dialogBootstrapPath(){return path.join(ROOT,'data','dialog-bootstrap-v2819.json')}
-function readDialogBootstrapState(){try{const x=readStoredJson(dialogBootstrapPath());return x&&typeof x==='object'?x:{status:'pending',version:1}}catch{return {status:'pending',version:1}}}
-async function writeDialogBootstrapState(value){await storage.writeDocument(dialogBootstrapPath(),{version:1,...value,updatedAt:Date.now()})}
+function readDialogBootstrapState(){try{const x=readStoredJson(dialogBootstrapPath());return x&&typeof x==='object'?x:{status:'pending',version:2}}catch{return {status:'pending',version:2}}}
+async function writeDialogBootstrapState(value){await storage.writeDocument(dialogBootstrapPath(),{version:2,...value,updatedAt:Date.now()})}
 let dialogBootstrapRunning=false;
 let dialogBootstrapResumeTimer=null;
+function analyticsMonth(){return storage.monthlyStatus?.()||{period:'',periodStartSec:0,periodEndSec:0,rotationRequired:false}}
 function scheduleDialogBootstrapResume(session,delayMs){
   if(dialogBootstrapResumeTimer)return;
   dialogBootstrapResumeTimer=setTimeout(()=>{dialogBootstrapResumeTimer=null;startDialogBootstrapOnce(session)},Math.max(1000,Number(delayMs)||1000));
 }
-async function loadDialogBootstrapPage(session,offset=0,count=100){
-  const safeCount=Math.min(100,Math.max(20,Number(count)||100));
+async function loadDialogBootstrapPage(session,offset=0,count=50){
+  const safeCount=Math.min(100,Math.max(20,Number(count)||50));
   const params={count:safeCount,offset:Math.max(0,Number(offset)||0),filter:'all',extended:1,fields:'photo_100,screen_name'};
   if(session.vkGroupId)params.group_id=session.vkGroupId;
   const raw=await vkCallPolite(session.vkToken,'messages.getConversations',params,{minGapMs:450,retries:6});
   const maps=vkIdentityMaps(raw||{}),rows=(raw?.items||[]).map(x=>normalizeVkDialog(x,maps));
+  // Never call BlueSales from the historical bootstrap. Reuse only the local/Google cache.
   const vkIds=rows.filter(d=>d.peerType==='user'&&d.peerId>0).map(d=>d.peerId);
-  if(vkIds.length){
+  if(storage.enabled&&vkIds.length){
     try{
-      const linked=await getCustomersByVkIds(session,vkIds),byVk=new Map(linked.filter(c=>c.social?.vkId).map(c=>[Number(c.social.vkId),c]));
+      const linked=storage.cachedClientsByVkIds?.(session.login,vkIds)||[],byVk=new Map(linked.filter(c=>c.social?.vkId).map(c=>[Number(c.social.vkId),c]));
       for(const d of rows){const c=byVk.get(d.peerId);if(c)d.crm={clientId:c.id,fullName:c.fullName,crmStatus:c.crmStatus,manager:c.manager,managerLogin:c.managerLogin,tags:c.tags}}
-    }catch(err){console.warn('[bootstrap crm link]',err?.message||err)}
+    }catch{}
   }
   return {rows,total:Math.max(0,Number(raw?.count||0))};
 }
+async function loadDialogMessagesForAnalyticsPeriod(session,peerId,startSec,endSec,{maxPages=5}={}){
+  const out=[];let offset=0;
+  for(let page=0;page<Math.max(1,Number(maxPages)||5);page++){
+    const params={peer_id:Number(peerId),count:200,offset,extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;
+    const raw=await vkCallPolite(session.vkToken,'messages.getHistory',params,{minGapMs:500,retries:6}),items=Array.isArray(raw?.items)?raw.items:[],maps=vkIdentityMaps(raw||{});
+    if(!items.length)break;
+    let reachedOlder=false;
+    for(const item of items){
+      const sec=Number(item?.date||0);if(sec&&sec<startSec){reachedOlder=true;continue}
+      if(sec>=startSec&&sec<endSec)out.push(normalizeVkMessage(item,maps));
+    }
+    offset+=items.length;
+    if(reachedOlder||offset>=Number(raw?.count||0))break;
+    await sleep(120);
+  }
+  return out;
+}
 async function runDialogBootstrapOnce(session){
   if(dialogBootstrapRunning)return readDialogBootstrapState();
-  const before=readDialogBootstrapState();
-  const legacyTruncated=before.status==='completed'&&(Boolean(before.possibleTruncation)||(Number(before.scanLimitDialogs||0)===10000&&Number(before.totalDialogs||0)>=10000));
-  if(before.status==='completed'&&!legacyTruncated)return before;
+  const monthly=analyticsMonth();
+  if(monthly.rotationRequired){
+    const state={status:'rotation_required',version:2,analyticsPeriod:monthly.period,sheetPeriod:monthly.sheetPeriod||'',lastError:`Подключите новую Google-таблицу для периода ${monthly.period}. Аналитика не смешивается между месяцами.`,storageMode:'google-sheets-monthly'};
+    await writeDialogBootstrapState(state);return state;
+  }
+  let before=readDialogBootstrapState();
+  if(String(before.analyticsPeriod||'')!==String(monthly.period||'')){
+    before={status:'pending',version:2,analyticsPeriod:monthly.period,processedDialogs:0,failedDialogs:0,currentBatchEnd:0,totalDialogs:0};
+  }
+  if(before.status==='completed')return before;
   dialogBootstrapRunning=true;
-  const hardLimit=100000,resumeAt=Math.max(0,Number(before.currentBatchEnd||0));
-  const state={...before,status:'running',startedAt:before.startedAt||Date.now(),lastError:'',processedDialogs:Math.max(0,Number(before.processedDialogs||0)),failedDialogs:Math.max(0,Number(before.failedDialogs||0)),totalDialogs:Math.max(0,Number(before.totalDialogs||0)),currentBatchEnd:resumeAt,scanLimitDialogs:hardLimit,possibleTruncation:false,storageMode:storage.enabled?'incremental-sql':'json-fallback'};
+  const hardLimit=10000,resumeAt=Math.max(0,Number(before.currentBatchEnd||0));
+  const state={...before,status:'running',analyticsPeriod:monthly.period,periodStartSec:monthly.periodStartSec,periodEndSec:monthly.periodEndSec,startedAt:before.startedAt||Date.now(),lastError:'',processedDialogs:Math.max(0,Number(before.processedDialogs||0)),failedDialogs:Math.max(0,Number(before.failedDialogs||0)),totalDialogs:Math.max(0,Number(before.totalDialogs||0)),currentBatchEnd:resumeAt,scanLimitDialogs:hardLimit,possibleTruncation:false,storageMode:storage.enabled?'google-sheets-monthly':'json-fallback'};
   await writeDialogBootstrapState(state);
   try{
     const settings={...slaReportSettingsFor(session),managerFilters:[],statuses:[]},rule={...settings,manager:'',warningAlerts:false,violationAlerts:false,outboxAlerts:false,dialogFilter:'unanswered'},legacyStore=storage.enabled?null:await readNotificationStore(['journal','deletedJournal']);
-    let offset=resumeAt,lastProgressPersisted=resumeAt,total=Math.max(resumeAt,state.totalDialogs||0);
-    while(offset<hardLimit){
-      const page=await loadDialogBootstrapPage(session,offset,100),reportedTotal=Math.max(0,Number(page.total||0));
+    let offset=resumeAt,lastProgressPersisted=resumeAt,total=Math.max(resumeAt,state.totalDialogs||0),reachedBeforePeriod=false;
+    while(offset<hardLimit&&!reachedBeforePeriod){
+      const page=await loadDialogBootstrapPage(session,offset,50),reportedTotal=Math.max(0,Number(page.total||0));
       if(reportedTotal)total=Math.min(hardLimit,reportedTotal);state.totalDialogs=total;state.possibleTruncation=reportedTotal>hardLimit;
       if(!page.rows.length||offset>=total)break;
       for(const d of page.rows){
         if(offset>=hardLimit)break;
+        const lastAt=Number(d.lastMessageAt||0);
+        if(lastAt&&lastAt<monthly.periodStartSec){reachedBeforePeriod=true;break}
         try{
-          const params={peer_id:Number(d.peerId),count:200,offset:0,extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;
-          const raw=await vkCallPolite(session.vkToken,'messages.getHistory',params,{minGapMs:500,retries:6}),maps=vkIdentityMaps(raw||{}),messages=(raw?.items||[]).map(m=>normalizeVkMessage(m,maps));
-          if(storage.enabled)await ingestNotificationJournalDirect({peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule});
-          else ingestNotificationJournalMessages(legacyStore,{peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule});
-          state.processedDialogs++;
-        }catch(err){if(err?.code==='VK_RATE_LIMIT')throw err;state.failedDialogs++;console.warn('[bootstrap dialogs]',d.peerId,err?.message||err)}
+          const messages=await loadDialogMessagesForAnalyticsPeriod(session,d.peerId,monthly.periodStartSec,monthly.periodEndSec,{maxPages:5});
+          if(messages.length){
+            if(storage.enabled)await ingestNotificationJournalDirect({peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule});
+            else ingestNotificationJournalMessages(legacyStore,{peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule});
+            state.processedDialogs++;
+          }
+        }catch(err){if(err?.code==='VK_RATE_LIMIT')throw err;state.failedDialogs++;console.warn('[monthly bootstrap]',d.peerId,err?.message||err)}
         offset++;state.currentBatchEnd=offset;
-        if(offset-lastProgressPersisted>=25){if(legacyStore)await writeNotificationStore(legacyStore);await writeDialogBootstrapState(state);lastProgressPersisted=offset}
+        if(offset-lastProgressPersisted>=10){if(legacyStore)await writeNotificationStore(legacyStore);await writeDialogBootstrapState(state);lastProgressPersisted=offset}
       }
       if(offset-lastProgressPersisted>0){if(legacyStore)await writeNotificationStore(legacyStore);await writeDialogBootstrapState(state);lastProgressPersisted=offset}
-      if(offset>=total)break;await sleep(900);
+      if(reachedBeforePeriod||offset>=total)break;
+      await sleep(700);
     }
     let folders;
     if(storage.enabled){slaReportCache.clear();const report=await buildSlaReport(session,{force:true});folders={waiting:report.totals.waiting||0,onTime:report.totals.onTime||0,violations:report.totals.violations||0,total:report.totals.total||0}}
     else{const rows=notificationJournalRows(legacyStore,{admin:true}).map(row=>slaReportRow(row,settings,Date.now()));folders={waiting:0,onTime:0,violations:0,total:rows.length};for(const row of rows){if(row.waiting)folders.waiting++;else if(row.violated)folders.violations++;else folders.onTime++};await writeNotificationStore(legacyStore)}
-    Object.assign(state,{status:'completed',completedAt:Date.now(),folders,currentBatchEnd:Math.min(offset,total||offset),totalDialogs:total||offset});await writeDialogBootstrapState(state);scheduleHistoricalNotificationBackfill(session,{delayMs:5000});return state;
+    Object.assign(state,{status:'completed',completedAt:Date.now(),folders,currentBatchEnd:offset,totalDialogs:Math.max(offset,state.processedDialogs),stoppedAtPeriodBoundary:reachedBeforePeriod});await writeDialogBootstrapState(state);return state;
   }catch(err){
     if(err?.code==='VK_RATE_LIMIT'){const retryAt=Date.now()+60000;Object.assign(state,{status:'paused_rate_limit',lastError:'VK временно ограничил частоту запросов. Проверка автоматически продолжится через минуту.',retryAt});await writeDialogBootstrapState(state);scheduleDialogBootstrapResume(session,61000);return state}
     Object.assign(state,{status:'failed',lastError:String(err?.message||err).slice(0,500),failedAt:Date.now()});await writeDialogBootstrapState(state);throw err;
   }finally{dialogBootstrapRunning=false}
 }
 function startDialogBootstrapOnce(session){
-  const state=readDialogBootstrapState();
-  const legacyTruncated=state.status==='completed'&&(Boolean(state.possibleTruncation)||(Number(state.scanLimitDialogs||0)===10000&&Number(state.totalDialogs||0)>=10000));
-  if((state.status==='completed'&&!legacyTruncated)||dialogBootstrapRunning)return state;
+  const monthly=analyticsMonth(),state=readDialogBootstrapState();
+  if(monthly.rotationRequired)return {...state,status:'rotation_required',analyticsPeriod:monthly.period,sheetPeriod:monthly.sheetPeriod||''};
+  if(state.status==='completed'&&String(state.analyticsPeriod||'')===String(monthly.period||''))return state;
+  if(dialogBootstrapRunning)return state;
   if(state.status==='paused_rate_limit'&&Number(state.retryAt||0)>Date.now()){scheduleDialogBootstrapResume(session,Number(state.retryAt)-Date.now()+500);return state}
   setTimeout(()=>storage.run(()=>runDialogBootstrapOnce(session)).catch(err=>console.warn('[dialog bootstrap]',err?.message||err)),400);
-  return {...state,status:'starting'};
+  return {...state,status:'starting',analyticsPeriod:monthly.period};
 }
 async function runScheduledNotificationCheck(){
   if(notificationCheckRunning||!NOTIFICATION_BS_LOGIN||!NOTIFICATION_BS_PASSWORD||!PRESET_VK_TOKEN)return;
@@ -3090,7 +3121,16 @@ async function apiRouter(req, res, url) {
   if (pathname === '/api/admin/diagnostics' && req.method === 'GET') {
     if(!requireAdminSession(s,res))return;
     const memory=process.memoryUsage(),database=await storage.health().catch(err=>({mode:storage.enabled?'google-sheets':'json',ready:false,error:String(err?.message||err)}));
-    return sendJson(res,200,{ok:true,version:VERSION,uptimeSeconds:Math.round(process.uptime()),memory:{rssMb:Math.round(memory.rss/1048576),heapUsedMb:Math.round(memory.heapUsed/1048576),heapTotalMb:Math.round(memory.heapTotal/1048576),externalMb:Math.round(memory.external/1048576)},database,bootstrap:readDialogBootstrapState(),notificationBackfill:readNotificationHistoryBackfillState(),background:{slaRecentSyncRunning,slaRecentSyncLastAt,notificationCheckRunning,notificationScheduler:{...notificationSchedulerState}},cache:{slaReports:slaReportCache.size,documents:storage.poolStats?.()?.documentsCached||0},timestamp:Date.now()});
+    return sendJson(res,200,{ok:true,version:VERSION,uptimeSeconds:Math.round(process.uptime()),memory:{rssMb:Math.round(memory.rss/1048576),heapUsedMb:Math.round(memory.heapUsed/1048576),heapTotalMb:Math.round(memory.heapTotal/1048576),externalMb:Math.round(memory.external/1048576)},database,monthly:storage.monthlyStatus?.()||null,bootstrap:readDialogBootstrapState(),notificationBackfill:readNotificationHistoryBackfillState(),background:{slaRecentSyncRunning,slaRecentSyncLastAt,notificationCheckRunning,notificationScheduler:{...notificationSchedulerState}},cache:{slaReports:slaReportCache.size,documents:storage.poolStats?.()?.documentsCached||0,clients:storage.poolStats?.()?.clientsCached||0,quickPhrases:storage.poolStats?.()?.quickPhrases||0},timestamp:Date.now()});
+  }
+
+  if(pathname==='/api/admin/monthly/start' && req.method==='POST'){
+    if(!requireAdminSession(s,res)||!requireCsrf(req,res,s))return;
+    try{
+      const monthly=await storage.startCurrentMonth();
+      slaReportCache.clear();
+      return sendJson(res,200,{ok:true,monthly,message:`Аналитика ${monthly.period} активирована. Leads, LeadEvents, Notifications, Outbox и Bootstrap очищены; быстрые фразы, настройки и кэш клиентов сохранены.`});
+    }catch(err){return handleApiError(res,err)}
   }
 
   if (pathname === '/api/bootstrap/dialogs-once' && req.method === 'GET') {
@@ -3900,8 +3940,15 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
         });
         customers=scan.slice(offset,offset+limit);hasMore=offset+limit<scan.length;totalHint=scan.length;
       }
-      return sendJson(res, 200, { ok: true, clients: customers, offset, limit, hasMore, totalHint });
-    } catch (err) { return handleApiError(res, err); }
+      return sendJson(res, 200, { ok: true, clients: customers, offset, limit, hasMore, totalHint, source:'bluesales' });
+    } catch (err) {
+      const fallbackCodes=new Set(['API_BUSY','QUEUE_BUSY','BUSY','TIMEOUT','HTTP','NETWORK']);
+      if(storage.enabled&&fallbackCodes.has(String(err?.code||''))){
+        const cached=storage.cachedClients?.({login:s.login,limit:Math.min(Math.max(Number(url.searchParams.get('limit')||20),1),100),offset:Math.max(Number(url.searchParams.get('offset')||0),0),q:String(url.searchParams.get('q')||'').trim(),manager:String(url.searchParams.get('manager')||'').trim(),status:String(url.searchParams.get('status')||'').trim(),tag:String(url.searchParams.get('tag')||'').trim()});
+        if(cached?.customers?.length)return sendJson(res,200,{ok:true,clients:cached.customers,offset:Math.max(Number(url.searchParams.get('offset')||0),0),limit:Math.min(Math.max(Number(url.searchParams.get('limit')||20),1),100),hasMore:cached.hasMore,totalHint:cached.total,source:'google-cache',stale:true,warning:'BlueSales временно занят. Показан последний сохранённый список клиентов.'});
+      }
+      return handleApiError(res, err);
+    }
   }
 
   const clientMatch = pathname.match(/^\/api\/clients\/([^/]+)$/);
@@ -3914,8 +3961,12 @@ if ((pathname === '/api/voice/transcribe/status' || pathname === '/api/stt/trans
         ? (await getCustomersPage(s, { count: 10, ids: [id] })).customers.find(c => Number(c.id) === Number(id)) || null
         : await getCustomerById(s, id);
       if (!client) return sendJson(res, 404, { ok: false, message: 'Клиент не найден' });
-      return sendJson(res, 200, { ok: true, client });
-    } catch (err) { return handleApiError(res, err); }
+      return sendJson(res, 200, { ok: true, client, source:'bluesales' });
+    } catch (err) {
+      const id=Number(decodeURIComponent(clientMatch[1])),cached=storage.enabled?storage.cachedClientById?.(s.login,id):null;
+      if(cached&&['API_BUSY','QUEUE_BUSY','BUSY','TIMEOUT','HTTP','NETWORK'].includes(String(err?.code||'')))return sendJson(res,200,{ok:true,client:cached,source:'google-cache',stale:true,warning:'BlueSales временно занят. Показана последняя сохранённая карточка.'});
+      return handleApiError(res, err);
+    }
   }
 
   if (clientMatch && req.method === 'PUT') {

@@ -1,0 +1,18 @@
+seb_gun CRM v28.27 — MONTHLY ANALYTICS + QUICK PHRASES + CLIENT CACHE
+
+Основа: GitHub main v28.26 (commit f1d7375325b1e6982fab99df367fb39381e95262).
+
+Главное:
+- Google Sheets остаётся единственным постоянным хранилищем приложения. PostgreSQL не используется.
+- Аналитика ограничена активным календарным месяцем Europe/Moscow.
+- Текущая таблица сентября: seb_gun_crm_storage_2026-09, ID 1lm0ajA6nFpQ5jXybxm3MY5pVp0gTjqP_oC_0rira7oI.
+- MONTHLY_AUTO_PREPARE=1 однократно очищает старую аналитику v28.26 только если название таблицы соответствует активному месяцу.
+- Помесячно очищаются Leads, LeadEvents, Notifications, Outbox и Bootstrap.
+- Bootstrap идёт только по сообщениям активного месяца и не вызывает BlueSales.
+- VK/BlueSales переписка и карточки остаются за весь период.
+- QuickPhrases: 185 фраз / 27 групп автоматически загружаются в Google Sheets.
+- ClientsCache: успешные ответы BlueSales зеркалируются в Sheets; /api/clients получает fallback вместо 503 при временном API_BUSY/QUEUE_BUSY/TIMEOUT.
+- В начале нового месяца администратор видит предупреждение о необходимости подключить новую таблицу.
+- Apps Script теперь принимает spreadsheetId из Render, поэтому ежемесячный redeploy Apps Script не нужен.
+
+Полная инструкция: GOOGLE_APPS_SCRIPT_STORAGE_SETUP.md

@@ -1,11 +1,14 @@
-// seb_gun CRM v28.26 — Google Sheets Web App storage
+// seb_gun CRM v28.27 — Google Sheets Web App storage
 // 1) Replace API_SECRET below with the same long secret you add to Render.
 // 2) Deploy -> Manage deployments -> Edit -> New version -> Web app.
 // 3) Execute as Me -> Who has access: Anyone.
 // 4) Keep the /exec URL in GOOGLE_SHEETS_WEBAPP_URL in Render.
+// 5) v28.27: the spreadsheet ID comes from Render on every request, so next month
+//    you only change GOOGLE_SPREADSHEET_ID in Render; Apps Script does NOT need redeploying.
 
-const SPREADSHEET_ID = '1lm0ajA6nFpQ5jXybxm3MY5pVp0gTjqP_oC_0rira7oI';
+const DEFAULT_SPREADSHEET_ID = ''; // optional fallback; normally leave blank
 const API_SECRET = 'CHANGE_THIS_TO_THE_SAME_LONG_SECRET_AS_RENDER';
+let ACTIVE_SPREADSHEET_ID = DEFAULT_SPREADSHEET_ID;
 
 // These columns must stay strings. Google Sheets otherwise converts 10:00/22:00
 // to fractional day numbers, which breaks SLA calculations when values are read back.
@@ -20,7 +23,9 @@ const TEXT_COLUMNS = {
   Statuses: ['status_id'],
   Users: ['login'],
   Bootstrap: ['key'],
-  Runtime: ['key']
+  Runtime: ['key'],
+  QuickPhrases: ['phrase_id','group_id','group_name','name','hotkey'],
+  ClientsCache: ['client_key','account_login','client_id','vk_id','phone','next_contact_date']
 };
 
 function response(data) {
@@ -36,10 +41,12 @@ function parseBody(e) {
 function authorize(body) {
   if (!API_SECRET || API_SECRET.startsWith('CHANGE_THIS_')) throw new Error('Apps Script API_SECRET is not configured');
   if (!body || String(body.secret || '') !== API_SECRET) throw new Error('Unauthorized');
-  if (body.spreadsheetId && String(body.spreadsheetId) !== SPREADSHEET_ID) throw new Error('Spreadsheet ID mismatch');
+  const requested = String(body.spreadsheetId || DEFAULT_SPREADSHEET_ID || '').trim();
+  if (!requested) throw new Error('spreadsheetId is required');
+  ACTIVE_SPREADSHEET_ID = requested;
 }
 
-function book() { return SpreadsheetApp.openById(SPREADSHEET_ID); }
+function book() { return SpreadsheetApp.openById(ACTIVE_SPREADSHEET_ID); }
 
 function textColumnIndexes(name, headers) {
   const wanted = new Set(TEXT_COLUMNS[name] || []);
@@ -183,7 +190,7 @@ function clearSheetRows(body) {
 function setup(body) {
   const schema = body.schema || {};
   Object.keys(schema).forEach(name => ensureSheet(name, schema[name], true));
-  return { ok: true, sheets: Object.keys(schema), storageVersion: '28.26' };
+  return { ok: true, sheets: Object.keys(schema), storageVersion: '28.27' };
 }
 
 function doGet() {
@@ -195,7 +202,7 @@ function doPost(e) {
     const body = parseBody(e);
     authorize(body);
     const action = String(body.action || '');
-    if (action === 'health') return response({ ok: true, storage: 'google-apps-script', storageVersion: '28.26', spreadsheetId: SPREADSHEET_ID, at: Date.now() });
+    if (action === 'health') return response({ ok: true, storage: 'google-apps-script', storageVersion: '28.27', spreadsheetId: ACTIVE_SPREADSHEET_ID, spreadsheetName: book().getName(), at: Date.now() });
     if (action === 'setup') return response(setup(body));
     if (action === 'read') return response({ ok: true, rows: readObjects(String(body.sheet || '')) });
     if (action === 'readMany') {
