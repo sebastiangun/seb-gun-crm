@@ -45,7 +45,7 @@ async function pollBootstrap(){
   finally{pollBusy.value=false}
   if(bootstrapRunning.value||['pending','starting','paused_rate_limit'].includes(String(bootstrap.value?.status||'')))pollTimer.value=window.setTimeout(pollBootstrap,delay)
 }
-async function save(){if(!form.workDays.length)return ui.toast('Выберите хотя бы один рабочий день','error');saving.value=true;try{const d=await api.saveSlaSettings({...form,timezone:'Europe/Moscow'});applySettings(d.settings);ui.toast('Фильтр и регламент сохранены в PostgreSQL','ok');await load()}catch(e){ui.toast(e.message,'error',7000)}finally{saving.value=false}}
+async function save(){if(!form.workDays.length)return ui.toast('Выберите хотя бы один рабочий день','error');saving.value=true;try{const d=await api.saveSlaSettings({...form,timezone:'Europe/Moscow'});applySettings(d.settings);ui.toast('Фильтр и регламент сохранены в Google Sheets','ok');await load()}catch(e){ui.toast(e.message,'error',7000)}finally{saving.value=false}}
 function openDialog(peerId){router.push({path:`/dialogs/${peerId}`,query:{from:route.fullPath}})}
 async function removeRow(row){if(!session.isAdmin||!confirm(`Удалить запись «${row.name}» из SLA-истории и статистики?`))return;try{await api.deleteAdminNotificationJournal(row.id);ui.toast('Запись удалена из статистики','ok');await load()}catch(e){ui.toast(e.message,'error')}}
 onMounted(async()=>{try{await load()}catch{};pollTimer.value=window.setTimeout(pollBootstrap,8000)})
@@ -57,7 +57,7 @@ onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
     <header class="page-header sticky-header"><div><small>SLA · МСК</small><h1>Менеджеры</h1></div><button class="header-action" :disabled="loading" @click="load()">↻</button></header>
 
     <section class="status-panel" :class="{running:bootstrapRunning,failed:bootstrap?.status==='failed'}">
-      <div class="status-panel-head"><div><small>ИСТОЧНИК ДАННЫХ</small><h3>{{bootstrapRunning?'Идёт первичная проверка диалогов':bootstrap?.status==='completed'?'История диалогов загружена':'История SLA'}}</h3></div><b>{{report.storage==='postgresql'?'PostgreSQL':'JSON'}}</b></div>
+      <div class="status-panel-head"><div><small>ИСТОЧНИК ДАННЫХ</small><h3>{{bootstrapRunning?'Идёт первичная проверка диалогов':bootstrap?.status==='completed'?'История диалогов загружена':'История SLA'}}</h3></div><b>{{report.storage==='google-sheets'?'Google Sheets':'JSON'}}</b></div>
       <p v-if="bootstrapRunning">Старые диалоги проверяются один раз. Уже обработанные записи сразу появляются в статистике — ждать окончания всей проверки не нужно.</p>
       <p v-else>Отчёт открывается из базы без тяжёлого запроса к VK. Обновление последних диалогов выполняется сервером в фоне.</p>
       <div v-if="bootstrap?.totalDialogs" class="progress-block"><div class="progress-track"><i :style="{width:`${bootstrapProgress}%`}"></i></div><div class="progress-meta"><b>{{bootstrapProgress}}%</b><span>{{bootstrap.currentBatchEnd||bootstrap.processedDialogs||0}} / {{bootstrap.totalDialogs}} диалогов</span><span v-if="bootstrap.failedDialogs">Ошибок: {{bootstrap.failedDialogs}}</span></div></div>

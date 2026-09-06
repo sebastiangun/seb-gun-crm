@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.22.0",
+  "version": "28.24.0",
   "private": true,
-  "description": "seb_gun CRM v28.22: direct PostgreSQL reads, incremental SLA journal/bootstrap, lightweight notification audit and diagnostics",
+  "description": "seb_gun CRM v28.24: Google Sheets file-like storage, no PostgreSQL/SQL database",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -31,7 +31,7 @@
     "test:v269": "node tests/integration-v269.js",
     "test:v270": "node tests/integration-v270.js",
     "build": "vite build --config frontend/vite.config.js",
-    "check:runtime": "node --check server.js && node --check lib/bluesales-web.js && node --check lib/vk-phrase-attachments.js && node --check lib/google-speech-stt.mjs && node --check lib/local-transformers-stt.mjs && node --check lib/transformers-stt-worker.mjs && node --check lib/postgres-storage.js && node --check scripts/database.js",
+    "check:runtime": "node --check server.js && node --check lib/google-sheets-storage.js && node --check lib/bluesales-web.js && node --check lib/vk-phrase-attachments.js && node --check lib/google-speech-stt.mjs && node --check lib/local-transformers-stt.mjs && node --check lib/transformers-stt-worker.mjs",
     "test:v280": "node tests/integration-v280.js",
     "test:v281": "node tests/integration-v281.js",
     "test:v282": "node tests/integration-v282.js",
@@ -51,14 +51,16 @@
     "db:migrate": "node scripts/database.js migrate",
     "db:import": "node scripts/database.js import",
     "db:status": "node scripts/database.js status",
-    "test:database": "node tests/postgres-storage.js && node tests/create-safety.js && node tests/phrase-source.js",
+    "test:database": "node tests/google-sheets-storage-v2824.js && node tests/create-safety.js && node tests/phrase-source.js",
     "test:v2817": "node tests/integration-v2817.js",
     "test:v2818": "node tests/integration-v2818.js",
-    "test:v2819": "node tests/integration-v2819.js && node tests/integration-v2820.js && node tests/integration-v2821.js && node tests/integration-v2822.js",
+    "test:v2819": "node tests/integration-v2824.js",
     "test:v2820": "node tests/integration-v2820.js",
-    "test:release": "node tests/integration-v2819.js && node tests/integration-v2820.js && node tests/integration-v2821.js && node tests/integration-v2822.js && npm run test:database",
+    "test:release": "npm run test:v2819 && npm run test:database",
     "test:v2821": "node tests/integration-v2821.js",
-    "test:v2822": "node tests/integration-v2822.js"
+    "test:v2822": "node tests/integration-v2822.js",
+    "test:v2823": "node tests/integration-v2823.js && node tests/event-state-v2823.js",
+    "test:v2824": "node tests/integration-v2824.js"
   },
   "engines": {
     "node": ">=18"
@@ -67,13 +69,10 @@
     "@huggingface/transformers": "^4.2.0",
     "@vitejs/plugin-vue": "^6.0.0",
     "ffmpeg-static": "^5.2.0",
-    "pg": "^8.16.3",
     "pinia": "^3.0.0",
     "vite": "^7.0.0",
     "vue": "^3.5.0",
     "vue-router": "^4.5.0"
   },
-  "devDependencies": {
-    "@electric-sql/pglite": "^0.5.8"
-  }
+  "devDependencies": {}
 }

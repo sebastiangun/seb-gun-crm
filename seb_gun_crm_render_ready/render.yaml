@@ -94,12 +94,14 @@ services:
       - key: VK_COMMUNITY_URL
         sync: false
 
-      # PostgreSQL secrets: enter in Render Environment.
-      - key: DATABASE_URL
+      # v28.24 Google Sheets storage. No PostgreSQL / DATABASE_URL is used.
+      - key: GOOGLE_SPREADSHEET_ID
         sync: false
-      - key: REQUIRE_DATABASE
+      - key: GOOGLE_SERVICE_ACCOUNT_EMAIL
+        sync: false
+      - key: GOOGLE_PRIVATE_KEY
+        sync: false
+      - key: REQUIRE_GOOGLE_STORAGE
         value: "1"
       - key: SESSION_SECRET
         sync: false
-      - key: DB_IMPORT_ON_START
-        value: "0"

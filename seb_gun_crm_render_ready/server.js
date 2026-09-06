@@ -38,7 +38,7 @@ function loadLocalEnv(file) {
   }
 }
 loadLocalEnv(path.join(ROOT, '.env.local'));
-const { Storage } = require('./lib/postgres-storage');
+const { Storage } = require('./lib/google-sheets-storage');
 const storage = new Storage(ROOT);
 function readStoredJson(file) { if(storage.enabled){const value=storage.readDocument(file);if(value!==undefined&&value!==null)return value;} return JSON.parse(fs.readFileSync(file,'utf8')); }
 
@@ -61,7 +61,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.22';
+const VERSION = '28.24';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -2830,7 +2830,7 @@ async function executeNotificationCheck(options,source){
 }
 
 // v28.17: SLA control/report settings are independent from Telegram recipients.
-// They are persisted in PostgreSQL app_documents when DATABASE_URL is enabled.
+// They are persisted in Google Sheets Runtime when DATABASE_URL is enabled.
 function slaReportSettingsPath(){return path.join(ROOT,'data','sla-report-settings.json')}
 function slaReportOwnerKey(session){return String(session?.login||notificationActorNames(session)[0]||'default').trim().toLowerCase()}
 function defaultSlaReportSettings(session){
@@ -3001,7 +3001,7 @@ async function apiRouter(req, res, url) {
   }
   if(pathname==='/api/admin/database/sync' && req.method==='POST'){
     const actor=await requireAuth(req,res);if(!actor||!requireAdminSession(actor,res)||!requireCsrf(req,res,actor))return;
-    if(!storage.enabled)return sendJson(res,503,{ok:false,message:'PostgreSQL не подключён'});
+    if(!storage.enabled)return sendJson(res,503,{ok:false,message:'Google Sheets не подключён'});
     const rows=await getAllCustomersComplete(actor);
     await storage.observeClients(String(actor.login).toLowerCase(),rows);
     return sendJson(res,200,{ok:true,clients:rows.length});
@@ -3087,7 +3087,7 @@ async function apiRouter(req, res, url) {
 
   if (pathname === '/api/admin/diagnostics' && req.method === 'GET') {
     if(!requireAdminSession(s,res))return;
-    const memory=process.memoryUsage(),database=await storage.health().catch(err=>({mode:storage.enabled?'postgresql':'json',ready:false,error:String(err?.message||err)}));
+    const memory=process.memoryUsage(),database=await storage.health().catch(err=>({mode:storage.enabled?'google-sheets':'json',ready:false,error:String(err?.message||err)}));
     return sendJson(res,200,{ok:true,version:VERSION,uptimeSeconds:Math.round(process.uptime()),memory:{rssMb:Math.round(memory.rss/1048576),heapUsedMb:Math.round(memory.heapUsed/1048576),heapTotalMb:Math.round(memory.heapTotal/1048576),externalMb:Math.round(memory.external/1048576)},database,bootstrap:readDialogBootstrapState(),notificationBackfill:readNotificationHistoryBackfillState(),background:{slaRecentSyncRunning,slaRecentSyncLastAt,notificationCheckRunning,notificationScheduler:{...notificationSchedulerState}},cache:{slaReports:slaReportCache.size,documents:storage.poolStats?.()?.documentsCached||0},timestamp:Date.now()});
   }
 
@@ -3098,7 +3098,7 @@ async function apiRouter(req, res, url) {
     if(!requireCsrf(req,res,s))return;const state=startDialogBootstrapOnce(s);return sendJson(res,202,{ok:true,state,running:true});
   }
   if (pathname === '/api/outbox/settings' && req.method === 'GET') {
-    return sendJson(res,200,{ok:true,settings:readOutboxWatchSettings(),storage:storage.enabled?'postgresql':'json'});
+    return sendJson(res,200,{ok:true,settings:readOutboxWatchSettings(),storage:storage.enabled?'google-sheets':'json'});
   }
   if (pathname === '/api/outbox/settings' && req.method === 'POST') {
     if(!requireAdminSession(s,res)||!requireCsrf(req,res,s))return;try{return sendJson(res,200,{ok:true,settings:await saveOutboxWatchSettings(await readJson(req))})}catch(err){return handleApiError(res,err)}
@@ -3108,7 +3108,7 @@ async function apiRouter(req, res, url) {
       const names=notificationActorNames(s),admin=isAdminSession(s),backfill=scheduleHistoricalNotificationBackfill(s,{delayMs:4000});
       if(storage.enabled){
         const started=Date.now();await storage.expireStaleBrowserPending(Date.now()-30*60*1000,200);const [rows,summary]=await Promise.all([storage.getNotificationHistoryRows({names,admin,limit:1500}),storage.getNotificationHistorySummary({names,admin})]);
-        return sendJson(res,200,{ok:true,rows,rowsTotal:summary.total,rowsLimited:summary.total>rows.length,summary,backfill,bootstrap:readDialogBootstrapState(),storage:'postgresql',performance:{mode:'direct-sql',queryMs:Date.now()-started,limit:1500}});
+        return sendJson(res,200,{ok:true,rows,rowsTotal:summary.total,rowsLimited:summary.total>rows.length,summary,backfill,bootstrap:readDialogBootstrapState(),storage:'google-sheets',performance:{mode:'direct-sql',queryMs:Date.now()-started,limit:1500}});
       }
       const store=await readNotificationStore(['deliveryLog']),allRows=notificationDeliveryRows(store,s,{admin}),rows=allRows.slice(0,1500);
       return sendJson(res,200,{ok:true,rows,rowsTotal:allRows.length,rowsLimited:allRows.length>rows.length,summary:notificationHistorySummary(allRows),backfill,bootstrap:readDialogBootstrapState(),storage:'json'});
@@ -3121,33 +3121,33 @@ async function apiRouter(req, res, url) {
     if(!requireCsrf(req,res,s))return;try{const body=await readJson(req),id=String(body.id||''),names=notificationActorNames(s).map(notificationRuleKey);if(storage.enabled){const row=await storage.getNotificationHistoryById(id);if(!row)return sendJson(res,404,{ok:false,message:'Уведомление не найдено'});if(!isAdminSession(s)&&!names.includes(notificationRuleKey(row.recipientManager)))return sendJson(res,403,{ok:false,message:'Нет доступа к этому уведомлению'});const temp=notificationDefaultStore();temp.deliveryLog[id]=row;const updated=notificationDeliveryChannel(temp,id,'browser',['sent','failed','blocked','missed'].includes(String(body.status))?String(body.status):'failed',body.error||'');await storage.upsertNotificationHistoryRows([updated]);return sendJson(res,200,{ok:true,row:updated})}const store=await readNotificationStore(['deliveryLog']),row=(store.deliveryLog||{})[id];if(!row)return sendJson(res,404,{ok:false,message:'Уведомление не найдено'});if(!isAdminSession(s)&&!names.includes(notificationRuleKey(row.recipientManager)))return sendJson(res,403,{ok:false,message:'Нет доступа к этому уведомлению'});notificationDeliveryChannel(store,row.id,'browser',['sent','failed','blocked','missed'].includes(String(body.status))?String(body.status):'failed',body.error||'');await writeNotificationStore(store);return sendJson(res,200,{ok:true,row:store.deliveryLog[row.id]})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/admin/sla/violations' && req.method === 'GET') {
-    if(!requireAdminSession(s,res))return;try{const settings={...slaReportSettingsFor(s),managerFilters:[],statuses:[]};if(storage.enabled){const rows=[];await storage.scanLeadJournal(async batch=>{for(const item of batch){const row=slaReportRow(item.payload,settings,Date.now());if(row.violated)rows.push(row)}if(rows.length>3000){rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0));rows.length=2500}},{batchSize:750});rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0));return sendJson(res,200,{ok:true,rows:rows.slice(0,2000),rowsTotal:rows.length,rowsLimited:rows.length>2000,deletedIds:await storage.readDeletedJournalIds(),bootstrap:readDialogBootstrapState(),storage:'postgresql'})}const store=await readNotificationStore(['journal','deletedJournal']),rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,Date.now())).filter(row=>row.violated).sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0));return sendJson(res,200,{ok:true,rows,deletedIds:Object.keys(store.deletedJournal||{}),bootstrap:readDialogBootstrapState(),storage:'json'})}catch(err){return handleApiError(res,err)}
+    if(!requireAdminSession(s,res))return;try{const settings={...slaReportSettingsFor(s),managerFilters:[],statuses:[]};if(storage.enabled){const rows=[];await storage.scanLeadJournal(async batch=>{for(const item of batch){const row=slaReportRow(item.payload,settings,Date.now());if(row.violated)rows.push(row)}if(rows.length>3000){rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0));rows.length=2500}},{batchSize:750});rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0));return sendJson(res,200,{ok:true,rows:rows.slice(0,2000),rowsTotal:rows.length,rowsLimited:rows.length>2000,deletedIds:await storage.readDeletedJournalIds(),bootstrap:readDialogBootstrapState(),storage:'google-sheets'})}const store=await readNotificationStore(['journal','deletedJournal']),rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,Date.now())).filter(row=>row.violated).sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0));return sendJson(res,200,{ok:true,rows,deletedIds:Object.keys(store.deletedJournal||{}),bootstrap:readDialogBootstrapState(),storage:'json'})}catch(err){return handleApiError(res,err)}
   }
   const adminSlaViolationRestore=pathname.match(/^\/api\/admin\/sla\/violations\/([^/]+)\/restore$/);
   if(adminSlaViolationRestore&&req.method==='POST'){
     if(!requireAdminSession(s,res)||!requireCsrf(req,res,s))return;const id=decodeURIComponent(adminSlaViolationRestore[1]);if(storage.enabled){if(!await storage.restoreLeadJournal(id))return sendJson(res,404,{ok:false,message:'Удалённая запись не найдена'});slaReportCache.clear();return sendJson(res,200,{ok:true,id})}const store=await readNotificationStore(['deletedJournal']);if(!store.deletedJournal?.[id])return sendJson(res,404,{ok:false,message:'Удалённая запись не найдена'});delete store.deletedJournal[id];await writeNotificationStore(store);return sendJson(res,200,{ok:true,id});
   }
   if (pathname === '/api/outbox/overview' && req.method === 'GET') {
-    try{if(storage.enabled){const rows=await storage.readOutboxRows(1500),store=notificationDefaultStore();store.outbox=Object.fromEntries(rows.map(row=>[String(row.requestId||row.id||crypto.randomUUID()),row]));return sendJson(res,200,{ok:true,outbox:notificationOutboxRows(store,s,{admin:isAdminSession(s)}),storage:'postgresql',performance:{mode:'direct-sql',limit:1500}})}const store=await readNotificationStore(['outbox']);return sendJson(res,200,{ok:true,outbox:notificationOutboxRows(store,s,{admin:isAdminSession(s)}),storage:'json'});}catch(err){return handleApiError(res,err)}
+    try{if(storage.enabled){const rows=await storage.readOutboxRows(1500),store=notificationDefaultStore();store.outbox=Object.fromEntries(rows.map(row=>[String(row.requestId||row.id||crypto.randomUUID()),row]));return sendJson(res,200,{ok:true,outbox:notificationOutboxRows(store,s,{admin:isAdminSession(s)}),storage:'google-sheets',performance:{mode:'direct-sql',limit:1500}})}const store=await readNotificationStore(['outbox']);return sendJson(res,200,{ok:true,outbox:notificationOutboxRows(store,s,{admin:isAdminSession(s)}),storage:'json'});}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/sla/settings' && req.method === 'GET') {
-    return sendJson(res,200,{ok:true,settings:slaReportSettingsFor(s),storage:storage.enabled?'postgresql':'json'});
+    return sendJson(res,200,{ok:true,settings:slaReportSettingsFor(s),storage:storage.enabled?'google-sheets':'json'});
   }
   if (pathname === '/api/sla/settings' && req.method === 'POST') {
-    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req),settings=await saveSlaReportSettings(s,body);return sendJson(res,200,{ok:true,settings,storage:storage.enabled?'postgresql':'json'});}catch(err){return handleApiError(res,err)}
+    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req),settings=await saveSlaReportSettings(s,body);return sendJson(res,200,{ok:true,settings,storage:storage.enabled?'google-sheets':'json'});}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/sla/report' && req.method === 'GET') {
     try{
       const data=await buildSlaReport(s);
       scheduleRecentSlaSync(s);
-      return sendJson(res,200,{ok:true,...data,storage:storage.enabled?'postgresql':'json'});
+      return sendJson(res,200,{ok:true,...data,storage:storage.enabled?'google-sheets':'json'});
     }catch(err){return handleApiError(res,err)}
   }
 
   if (pathname === '/api/notifications/settings' && req.method === 'GET') {
     const store=await readNotificationStore(['rules']);
     const visibleRules=(store.rules||[]).filter(r=>canManageNotificationManager(s,r.manager));
-    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:notificationMissingEnvironment().length===0,workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState},rules:visibleRules.map(notificationRulePublic),filesystemPersistent:storage.enabled,storage:storage.enabled?'postgresql':'json'});
+    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:notificationMissingEnvironment().length===0,workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState},rules:visibleRules.map(notificationRulePublic),filesystemPersistent:storage.enabled,storage:storage.enabled?'google-sheets':'json'});
   }
   if (pathname === '/api/notifications/settings' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
@@ -3183,7 +3183,7 @@ async function apiRouter(req, res, url) {
     } catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/admin/notification-journal' && req.method === 'GET') {
-    if(!requireAdminSession(s,res))return;if(storage.enabled){const rows=(await storage.readLeadJournalRecent(2000)).map(x=>x.payload);return sendJson(res,200,{ok:true,rows,rowsLimited:(await storage.countLeadJournal())>rows.length,storage:'postgresql'})}const store=await readNotificationStore(['journal','deletedJournal']);return sendJson(res,200,{ok:true,rows:notificationJournalRows(store,{admin:true}),storage:'json'});
+    if(!requireAdminSession(s,res))return;if(storage.enabled){const rows=(await storage.readLeadJournalRecent(2000)).map(x=>x.payload);return sendJson(res,200,{ok:true,rows,rowsLimited:(await storage.countLeadJournal())>rows.length,storage:'google-sheets'})}const store=await readNotificationStore(['journal','deletedJournal']);return sendJson(res,200,{ok:true,rows:notificationJournalRows(store,{admin:true}),storage:'json'});
   }
   const adminNotificationJournalMatch=pathname.match(/^\/api\/admin\/notification-journal\/([^/]+)$/);
   if(adminNotificationJournalMatch&&req.method==='DELETE'){
@@ -4118,7 +4118,7 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (url.pathname === '/api/health') return await apiRouter(req,res,url);
     // v28.22: do not reload app_documents before every API request. Individual
-    // routes query the exact PostgreSQL tables they need; document writes update the cache.
+    // routes query the exact Google Sheets tabs they need; document writes update the cache.
     if (url.pathname.startsWith('/api/')) return await apiRouter(req, res, url);
     return serveStatic(req, res, url.pathname);
   } catch (err) {
@@ -4127,11 +4127,11 @@ const server = http.createServer(async (req, res) => {
 });
 
 async function startServer(){
-if(storage.enabled&&String(process.env.SESSION_SECRET||'').length<32)throw new Error('SESSION_SECRET must contain at least 32 characters');
+if(String(process.env.SESSION_SECRET||'').length<32)throw new Error('SESSION_SECRET must contain at least 32 characters');
 await storage.init();
 await storage.applyPhraseUpdate();
 if(storage.enabled)await storage.refreshDocuments();
-console.log(storage.enabled?'[storage] PostgreSQL подключён; таблицы готовы':'[storage] JSON — PostgreSQL НЕ подключён. Проверьте DATABASE_URL и REQUIRE_DATABASE.');
+console.log(storage.enabled?'[storage] Google Sheets подключён; листы готовы':'[storage] Google Sheets НЕ подключён. Проверьте GOOGLE_SPREADSHEET_ID / GOOGLE_SERVICE_ACCOUNT_EMAIL / GOOGLE_PRIVATE_KEY.');
 server.listen(PORT, HOST, () => {
   console.log('');
   console.log(`seb_gun CRM + VK DIRECT v${VERSION}`);

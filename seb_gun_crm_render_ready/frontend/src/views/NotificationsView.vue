@@ -68,7 +68,7 @@ onMounted(()=>load().catch(e=>ui.toast(e.message,'error',7000)))
     </section>
 
     <section class="settings-card notification-settings">
-      <div class="section-title-row"><div><h3>Кому и по какому фильтру отправлять</h3><p>Здесь нет статистики нарушений и очереди сообщений — только маршрутизация уведомлений.</p></div><b class="storage-badge">{{notification?.storage==='postgresql'?'PostgreSQL':'JSON'}}</b></div>
+      <div class="section-title-row"><div><h3>Кому и по какому фильтру отправлять</h3><p>Здесь нет статистики нарушений и очереди сообщений — только маршрутизация уведомлений.</p></div><b class="storage-badge">{{notification?.storage==='google-sheets'?'Google Sheets':'JSON'}}</b></div>
       <div v-if="notification&&!botConfigured" class="telegram-setup-warning"><b>Telegram-бот не настроен</b><span>Добавьте TELEGRAM_BOT_TOKEN в Render → Environment.</span></div>
       <div class="telegram-readiness"><div class="setting-row"><span>Фоновая проверка</span><b :class="backgroundReady?'connected-text':'muted-text'">{{backgroundReady?'Готова':'Не готова'}}</b></div><div class="setting-row"><span>Последняя проверка</span><b>{{checkTime(notification?.lastCheck?.lastAt)}}</b></div></div>
 

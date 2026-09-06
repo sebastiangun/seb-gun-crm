@@ -1,0 +1,14 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {Storage,mergeJournalLoose}=require('../lib/google-sheets-storage');
+const root=require('path').join(__dirname,'..');
+const db=new Storage(root);
+assert.equal(db.enabled,false,'tests do not require live Google credentials');
+const x=mergeJournalLoose({id:'a',managerHistory:[{manager:'A'}],statusHistory:[],incomingTexts:['one'],updatedAt:1},{id:'a',managerHistory:[{manager:'B'}],statusHistory:[{status:'New'}],incomingTexts:['two'],updatedAt:2,currentManager:'B'});
+assert.equal(x.currentManager,'B');
+assert.equal(x.managerHistory.length,2);
+assert.deepEqual(x.incomingTexts,['one','two']);
+assert.equal(typeof db.readLeadJournalByPeer,'function');
+assert.equal(typeof db.getNotificationHistorySummary,'function');
+assert.equal(typeof db.health,'function');
+console.log('PASS: v28.24 Google Sheets storage adapter API and merge semantics');

@@ -49,7 +49,7 @@ onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
     <section class="settings-card control-links-card"><button class="control-link" @click="router.push('/notifications')"><span>⚙️</span><div><b>Настройка уведомлений</b><small>Получатели, менеджеры, статусы, дни, время и каналы доставки</small></div><em>›</em></button></section>
 
     <section class="status-panel notification-audit-status">
-      <div class="status-panel-head"><div><small>ЧТО ХРАНИТСЯ</small><h3>Фактическая доставка + восстановленная история</h3></div><b>{{storage==='postgresql'?'PostgreSQL':'JSON'}}</b></div>
+      <div class="status-panel-head"><div><small>ЧТО ХРАНИТСЯ</small><h3>Фактическая доставка + восстановленная история</h3></div><b>{{storage==='google-sheets'?'Google Sheets':'JSON'}}</b></div>
       <p>Новые события фиксируются с результатом Telegram и браузера. Старые SLA-события до появления этого журнала восстанавливаются из истории диалогов, но CRM честно помечает их как «доставка неизвестна».</p>
       <div class="data-status-grid four"><span><small>Всего записей</small><b>{{summary.total}}</b></span><span><small>Фактических</small><b>{{summary.actual}}</b></span><span><small>Исторических</small><b>{{summary.historical}}</b></span><span><small>Доставлено</small><b>{{summary.sent}}</b></span></div>
       <div v-if="bootstrapRunning" class="progress-block"><div class="progress-track"><i :style="{width:`${bootstrapProgress}%`}"></i></div><div class="progress-meta"><b>{{bootstrapProgress}}%</b><span>История диалогов: {{bootstrap.currentBatchEnd||bootstrap.processedDialogs||0}} / {{bootstrap.totalDialogs||0}}</span></div></div>

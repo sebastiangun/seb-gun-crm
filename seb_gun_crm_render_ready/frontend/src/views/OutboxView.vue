@@ -27,7 +27,7 @@ onMounted(()=>{outbox.init(session.loginName);load()})
   <main class="page page-with-nav notifications-page">
     <header class="page-header sticky-header"><div><small>VK · ОЧЕРЕДЬ ОТПРАВКИ</small><h1>Неотправленные</h1></div><button class="header-action" :disabled="loading" @click="load">↻</button></header>
 
-    <section class="settings-card"><div class="section-title-row"><div><h3>Серверный контроль зависших сообщений</h3><p>Это отдельная логика и она не зависит от времени ответа менеджеров. Сервер хранит очередь и сам определяет, когда сообщение считать зависшим.</p></div><b class="storage-badge">{{storage==='postgresql'?'PostgreSQL':'JSON'}}</b></div>
+    <section class="settings-card"><div class="section-title-row"><div><h3>Серверный контроль зависших сообщений</h3><p>Это отдельная логика и она не зависит от времени ответа менеджеров. Сервер хранит очередь и сам определяет, когда сообщение считать зависшим.</p></div><b class="storage-badge">{{storage==='google-sheets'?'Google Sheets':'JSON'}}</b></div>
       <label class="toggle-row"><input v-model="settings.enabled" type="checkbox" :disabled="!session.isAdmin"><span>Контроль включён</span></label>
       <div class="form-grid"><label>Считать зависшим через, минут<input v-model.number="settings.stuckMinutes" type="number" min="1" max="240" :disabled="!session.isAdmin"></label><label>Повтор уведомления, минут<input v-model.number="settings.repeatMinutes" type="number" min="0" max="1440" :disabled="!session.isAdmin"><small>0 — не повторять</small></label></div>
       <p class="settings-hint">После {{settings.stuckMinutes}} мин. сервер создаёт событие «Зависшее сообщение». Кому его отправлять и по каким менеджерам/статусам — задаётся отдельно в «Настройке уведомлений».</p>

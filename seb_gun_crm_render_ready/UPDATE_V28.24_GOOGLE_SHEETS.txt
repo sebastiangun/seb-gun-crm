@@ -1,0 +1,24 @@
+seb_gun CRM v28.24 — Google Sheets storage, no PostgreSQL
+
+Хранилище:
+- Leads — текущее состояние SLA/лидов
+- LeadEvents — append-only история
+- Notifications — журнал уведомлений
+- Outbox — зависшие исходящие
+- SLASettings — настройки SLA
+- NotificationRules — правила уведомлений
+- Managers / Statuses / Users — справочники
+- Bootstrap — прогресс первичной проверки
+- Runtime — сессии, small-state и JSON-документы
+
+Render Environment:
+GOOGLE_SPREADSHEET_ID=<id Google Sheet>
+GOOGLE_SERVICE_ACCOUNT_EMAIL=<service account email>
+GOOGLE_PRIVATE_KEY=<private key with \\n or multiline secret>
+REQUIRE_GOOGLE_STORAGE=1
+SESSION_SECRET=<32+ chars>
+
+ВАЖНО: Google Sheet нужно дать право Редактор сервисному аккаунту.
+ChatGPT-подключение к Google Drive не передаётся в Render автоматически.
+
+PostgreSQL, DATABASE_URL, pg pool и SQL migrations в runtime не используются.

@@ -1,0 +1,27 @@
+seb_gun CRM v28.23 — append-only event log + materialized lead state
+
+Основа: v28.22 / текущий рабочий BlueSales + VK + Telegram + Vue.
+
+Главное:
+- старый server.js сохранён;
+- запуск идёт через server-v2823.js;
+- добавлен crm_event_log: события только дописываются;
+- добавлен lead_state: готовая проекция SLA по каждому эпизоду;
+- добавлен event_projection_state: курсоры фоновой миграции;
+- старый lead_journal мигрируется маленькими пакетами с resume;
+- новые изменения lead_events догоняются фоновым tail;
+- /api/sla/report читает lead_state вместо полного scanLeadJournal;
+- /api/notifications/history не запускает UPDATE/backfill при обычном GET;
+- summary истории кэшируется;
+- managerHistory/statusHistory/incomingTexts нормализуются;
+- stale browser pending обрабатываются фоновым worker;
+- SLA_RECENT_SYNC_MIN_MS по умолчанию 5 минут.
+
+Render Build Command менять не нужно:
+cd seb_gun_crm_render_ready && npm ci --include=dev && npm run build && npm run check:runtime && npm run test:v2819 && npm run test:database
+
+Ожидаемые проверки:
+v28.23 integration checks: OK
+PASS: v28.23 append-only event log, lead_state projection, cached SLA/history reads
+
+Rollback: вернуть start на node server.js или откатить этот релиз.
