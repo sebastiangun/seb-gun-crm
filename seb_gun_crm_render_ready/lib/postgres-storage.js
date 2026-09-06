@@ -49,7 +49,8 @@ function mergeJournalLoose(current,next){
 }
 function selectedSections(value){
   if(!value)return new Set(allSections);
-  const input=Array.isArray(value)?value:[value];return new Set(input.filter(x=>Object.prototype.hasOwnProperty.call(sections,x)));
+  const input=value instanceof Set?[...value]:(Array.isArray(value)?value:[value]);
+  return new Set(input.filter(x=>Object.prototype.hasOwnProperty.call(sections,x)));
 }
 function numericJsonExpr(field){return `CASE WHEN payload->>'${field}' ~ '^[0-9]+$' THEN (payload->>'${field}')::bigint ELSE 0 END`}
 function deliveryOverall(row={}){const values=Object.values(row.channels||{}).map(x=>String(x?.status||''));if(values.includes('sent'))return values.every(x=>x==='sent'||x==='not_requested')?'sent':'partial';if(values.includes('pending'))return'pending';if(values.includes('failed')||values.includes('missed')||values.includes('blocked'))return'failed';return'not_sent'}

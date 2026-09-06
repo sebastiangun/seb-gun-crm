@@ -1,0 +1,7 @@
+v28.22 storage hotfix
+
+Render database test failed because selectedSections() did not accept Set values.
+readNotifications() passed a Set into flatten(), flatten() called selectedSections(Set), and the function treated the whole Set as one invalid section name. The resulting base/next snapshots were empty, so writeNotifications() silently wrote nothing.
+
+Fix: selectedSections() now expands Set via [...value] before filtering section names.
+This restores three-way merge persistence and makes the postgres-storage stale snapshot test pass logically.
