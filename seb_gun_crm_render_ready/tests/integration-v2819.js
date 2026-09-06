@@ -1,0 +1,24 @@
+'use strict';
+const fs=require('fs'),path=require('path');
+const root=path.join(__dirname,'..'),read=p=>fs.readFileSync(path.join(root,p),'utf8'),pkg=require('../package.json');
+const server=read('server.js'),storage=read('lib/postgres-storage.js'),sql=read('db/001-storage.sql'),app=read('frontend/src/App.vue'),api=read('frontend/src/services/api.js'),browser=read('frontend/src/stores/browserNotifications.js'),notifications=read('frontend/src/views/NotificationsView.vue'),history=read('frontend/src/views/NotificationHistoryView.vue'),outbox=read('frontend/src/views/OutboxView.vue'),sla=read('frontend/src/views/ManagersView.vue'),admin=read('frontend/src/views/AdminView.vue'),more=read('frontend/src/views/MoreView.vue'),bottom=read('frontend/src/components/BottomNav.vue'),router=read('frontend/src/router/index.js'),render=read('render.yaml');
+function must(v,m){if(!v)throw new Error(m)}
+must(pkg.version==='28.19.0'&&server.includes("const VERSION = '28.19'"),'version mismatch');
+must(server.includes('runDialogBootstrapOnce')&&server.includes("maxPages:50,filter:'all'")&&server.includes("status:'completed'"),'one-time dialog bootstrap missing');
+must(server.includes('const resumeAt=')&&server.includes('const startAt=Math.min(resumeAt,dialogs.length)'),'dialog bootstrap does not resume from durable progress');
+must(app.includes('api.bootstrapDialogsOnce()'),'bootstrap is not started after authentication');
+must(server.includes("'/api/bootstrap/dialogs-once'")&&api.includes('bootstrapDialogsOnce'),'bootstrap endpoint wiring missing');
+must(server.includes('Changing today\'s admin settings must not rewrite yesterday\'s violation history'),'historical SLA settings are not snapshotted');
+must(sla.includes('sla-folder-tabs')&&sla.includes("dialogFolder==='violations'")&&sla.includes("dialogFolder==='on_time'")&&sla.includes("dialogFolder==='waiting'"),'SLA folders missing');
+must(admin.includes("section==='violations'")&&admin.includes('Удалить нарушение')&&admin.includes('restoreAdminSlaViolation'),'admin violation controls missing');
+must(server.includes("'/api/admin/sla/violations'")&&server.includes('adminSlaViolationRestore'),'admin violation API missing');
+must(server.includes('safeOutboxWatchSettings')&&server.includes('outbox_stuck')&&server.includes('server-side watchdog'),'server outbox watchdog missing');
+must(outbox.includes('Считать зависшим через')&&outbox.includes('saveOutboxSettings'),'separate outbox watchdog settings UI missing');
+must(sql.includes('CREATE TABLE IF NOT EXISTS notification_history')&&storage.includes("deliveryLog:'notification_history'"),'durable notification history table missing');
+must(server.includes('deliverNotificationEvent')&&server.includes('notificationDeliveryChannel')&&server.includes("eventType:event"),'notification audit writer missing');
+must(browser.includes('browserPendingNotifications')&&browser.includes('browserDelivery'),'browser delivery acknowledgement missing');
+must(history.includes('История уведомлений')&&history.includes('Telegram + браузер')&&history.includes('Не отправлено'),'separate notification history UI missing');
+must(router.includes("path: '/notification-history'")&&more.includes("router.push('/notification-history')")&&bottom.includes("['/notification-history', '🔔'"),'notification history is not a separate section');
+must(notifications.includes('Пороги настраиваются в других разделах')&&notifications.includes('Настройка уведомлений'),'notification routing was not separated from SLA/outbox settings');
+must(render.includes('npm run test:v2819'),'Render does not run v28.19 checks');
+console.log('v28.19 integration checks: OK');

@@ -1,4 +1,4 @@
-> Версия 28.16: сначала прочитайте [START_HERE_POSTGRESQL.md](START_HERE_POSTGRESQL.md). Не обновляйте Render до экспорта действующего журнала.
+> Версия 28.19: сначала прочитайте [START_HERE_POSTGRESQL.md](START_HERE_POSTGRESQL.md), затем UPDATE_V28.19.txt. PostgreSQL обязателен для устойчивой истории SLA, одноразового сканирования и аудита уведомлений.
 
 # seb_gun CRM v28.3 — Vue workspace
 

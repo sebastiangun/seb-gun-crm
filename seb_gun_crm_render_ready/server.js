@@ -40,7 +40,7 @@ function loadLocalEnv(file) {
 loadLocalEnv(path.join(ROOT, '.env.local'));
 const { Storage } = require('./lib/postgres-storage');
 const storage = new Storage(ROOT);
-function readStoredJson(file) { if(storage.enabled)return storage.readDocument(file);return JSON.parse(fs.readFileSync(file,'utf8')); }
+function readStoredJson(file) { if(storage.enabled){const value=storage.readDocument(file);if(value!==undefined&&value!==null)return value;} return JSON.parse(fs.readFileSync(file,'utf8')); }
 
 const PORT = Number(process.env.PORT || 9050);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -61,7 +61,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.16';
+const VERSION = '28.19';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -2177,10 +2177,18 @@ const ADMIN_SECTION_KEYS = [
 
 function userAccessPath(){ return path.join(ROOT,'data','user-access.json'); }
 function loadUserAccess(){
-  try{
-    const raw=readStoredJson(userAccessPath());
-    return Array.isArray(raw?.users)?raw:{version:1,users:[]};
-  }catch{return {version:1,users:[]};}
+  // PostgreSQL may have been connected after the bundled access seed was added.
+  // Merge the bundled seed with DB overrides so admin access does not disappear
+  // merely because app_documents has no/stale user-access.json yet.
+  let seed={version:1,users:[]},persisted=null;
+  try{const raw=JSON.parse(fs.readFileSync(userAccessPath(),'utf8'));if(Array.isArray(raw?.users))seed=raw}catch{}
+  try{if(storage.enabled){const raw=storage.readDocument(userAccessPath());if(Array.isArray(raw?.users))persisted=raw}}catch{}
+  if(!storage.enabled)return seed;
+  if(!persisted)return seed;
+  const merged=(seed.users||[]).map(x=>({...x}));
+  const sameUser=(a,b)=>[a?.id,a?.login,a?.email,a?.name].filter(Boolean).some(x=>[b?.id,b?.login,b?.email,b?.name].some(y=>String(x).trim().toLowerCase()===String(y).trim().toLowerCase()));
+  for(const row of persisted.users||[]){const i=merged.findIndex(x=>sameUser(x,row));if(i>=0)merged[i]={...merged[i],...row};else merged.push({...row})}
+  return {...seed,...persisted,version:Math.max(Number(seed.version||1),Number(persisted.version||1)),users:merged};
 }
 async function saveUserAccess(raw){
   const out={version:Number(raw?.version||1),source:raw?.source||'mobile-admin',updatedAt:new Date().toISOString(),users:Array.isArray(raw?.users)?raw.users:[]};
@@ -2301,7 +2309,7 @@ async function adminUsersForSession(session){
 }
 
 
-function notificationDefaultStore(){return {version:3,rules:[],pairCodes:{},notified:{},outbox:{},journal:{},deletedJournal:{},updatedAt:0}}
+function notificationDefaultStore(){return {version:4,rules:[],pairCodes:{},notified:{},outbox:{},journal:{},deletedJournal:{},deliveryLog:{},updatedAt:0}}
 let parsedNotificationEnvironmentRules;
 function notificationEnvironmentRuleInputs(){
   if(parsedNotificationEnvironmentRules)return parsedNotificationEnvironmentRules;
@@ -2314,6 +2322,7 @@ function notificationEnvironmentRuleInputs(){
         if(!manager||!telegramChatId)continue;
         rows.push({...raw,manager,telegramChatId,enabled:raw.enabled!==false,dialogFilter:raw.dialogFilter||'unanswered',queueAlerts:raw.queueAlerts!==false,
           managerFilters:Object.prototype.hasOwnProperty.call(raw,'managerFilters')?raw.managerFilters:[manager],
+          strictFilters:raw.strictFilters!==false,violationMinutes:raw.violationMinutes||20,workDays:Array.isArray(raw.workDays)?raw.workDays:[1,2,3,4,5,6,7],
           slaMinutes:raw.slaMinutes||8,workStart:raw.workStart||'10:00',workEnd:raw.workEnd||'22:00',timezone:raw.timezone||'Europe/Moscow'});
       }
     }catch(err){console.warn('[NOTIFICATION_RULES_JSON]',err?.message||err)}
@@ -2331,6 +2340,7 @@ function hydrateNotificationStoreFromEnvironment(input){
   store.rules=Array.isArray(store.rules)?store.rules:[];
   store.journal=store.journal&&typeof store.journal==='object'&&!Array.isArray(store.journal)?store.journal:{};
   store.deletedJournal=store.deletedJournal&&typeof store.deletedJournal==='object'&&!Array.isArray(store.deletedJournal)?store.deletedJournal:{};
+  store.deliveryLog=store.deliveryLog&&typeof store.deliveryLog==='object'&&!Array.isArray(store.deliveryLog)?store.deliveryLog:{};
   for(const raw of notificationEnvironmentRuleInputs()){
     const existing=findNotificationRule(store,raw.manager),stableId=String(raw.id||`env-${crypto.createHash('sha1').update(notificationRuleKey(raw.manager)).digest('hex').slice(0,12)}`);
     const envRule=safeNotificationRule({...raw,...(existing||{}),id:existing?.id||stableId,manager:raw.manager,telegramChatId:existing?.telegramChatId||raw.telegramChatId});
@@ -2342,8 +2352,8 @@ function hydrateNotificationStoreFromEnvironment(input){
 function notificationEnvironmentRuleCount(){return notificationEnvironmentRuleInputs().length}
 function notificationRulesExportValue(store){
   return JSON.stringify((store.rules||[]).map(safeNotificationRule).filter(r=>r.manager&&r.telegramChatId).map(r=>({
-    id:r.id,manager:r.manager,enabled:r.enabled,dialogFilter:r.dialogFilter,managerFilters:r.managerFilters,statuses:r.statuses,queueAlerts:r.queueAlerts,
-    slaMinutes:r.slaMinutes,workStart:r.workStart,workEnd:r.workEnd,timezone:r.timezone,repeatMinutes:r.repeatMinutes,telegramChatId:r.telegramChatId
+    id:r.id,manager:r.manager,enabled:r.enabled,warningAlerts:r.warningAlerts,violationAlerts:r.violationAlerts,dialogFilter:r.dialogFilter,managerFilters:r.managerFilters,statuses:r.statuses,queueAlerts:r.queueAlerts,outboxAlerts:r.outboxAlerts,strictFilters:r.strictFilters,
+    slaMinutes:r.slaMinutes,violationMinutes:r.violationMinutes,workDays:r.workDays,workStart:r.workStart,workEnd:r.workEnd,timezone:r.timezone,repeatMinutes:r.repeatMinutes,telegramChatId:r.telegramChatId
   })));
 }
 async function readNotificationStore(){
@@ -2363,7 +2373,12 @@ function safeNotificationRule(rule={}){
     dialogFilter:['unanswered','unread'].includes(String(rule.dialogFilter||rule.filter||''))?String(rule.dialogFilter||rule.filter):'unanswered',
     managerFilters:selectedManagers.length?selectedManagers:(manager?[manager]:[]),
     statuses:multiParamValues(Array.isArray(rule.statuses)?rule.statuses.join(','):rule.statuses),
-    queueAlerts:rule.queueAlerts!==false,
+    warningAlerts:Boolean(Object.prototype.hasOwnProperty.call(rule,'warningAlerts')?rule.warningAlerts:rule.enabled),
+    violationAlerts:Boolean(Object.prototype.hasOwnProperty.call(rule,'violationAlerts')?rule.violationAlerts:rule.enabled),
+    outboxAlerts:Boolean(Object.prototype.hasOwnProperty.call(rule,'outboxAlerts')?rule.outboxAlerts:rule.queueAlerts!==false),
+    enabled:Boolean(Object.prototype.hasOwnProperty.call(rule,'warningAlerts')?rule.warningAlerts:rule.enabled),
+    queueAlerts:Boolean(Object.prototype.hasOwnProperty.call(rule,'outboxAlerts')?rule.outboxAlerts:rule.queueAlerts!==false),
+    strictFilters:true,
     slaMinutes:Math.min(Math.max(Number(rule.slaMinutes||8),1),240),
     violationMinutes:Math.min(Math.max(Number(rule.violationMinutes||20),1),1440),
     workDays:Array.isArray(rule.workDays)&&rule.workDays.length?[...new Set(rule.workDays.map(Number).filter(d=>d>=1&&d<=7))]:[1,2,3,4,5,6,7],
@@ -2387,6 +2402,41 @@ function upsertNotificationRule(store,input={}){
 }
 function notificationActorNames(session){return [session?.currentUser?.name,session?.currentUser?.login,session?.login].map(x=>String(x||'').trim()).filter(Boolean)}
 function canManageNotificationManager(session,manager){return isAdminSession(session)||notificationActorNames(session).some(n=>notificationRuleKey(n)===notificationRuleKey(manager))}
+function notificationRuleHasExplicitFilters(rule={}){return (rule.managerFilters||[]).length>0&&(rule.statuses||[]).length>0}
+function notificationRuleMatchesCustomer(rule={},customer={}){if(!notificationRuleHasExplicitFilters(rule))return false;return customerMatchesManager(customer,(rule.managerFilters||[]).join(','))&&customerMatchesStatus(customer,(rule.statuses||[]).join(','))}
+
+function notificationDeliveryId(eventType,ruleId,subjectKey,occurrence=0){
+  const raw=[eventType,ruleId,subjectKey,occurrence].join('|');return `delivery-${crypto.createHash('sha1').update(raw).digest('hex').slice(0,28)}`
+}
+function notificationDeliveryOverall(row={}){
+  const values=Object.values(row.channels||{}).map(x=>String(x?.status||''));
+  if(values.includes('sent'))return values.every(x=>x==='sent'||x==='not_requested')?'sent':'partial';
+  if(values.includes('pending'))return 'pending';
+  if(values.includes('failed')||values.includes('missed')||values.includes('blocked'))return 'failed';
+  return 'not_sent';
+}
+function notificationDeliveryUpsert(store,input={}){
+  store.deliveryLog=store.deliveryLog&&typeof store.deliveryLog==='object'?store.deliveryLog:{};
+  const id=String(input.id||notificationDeliveryId(input.eventType||'event',input.ruleId||'',input.subjectKey||input.peerId||Date.now(),input.occurrence||0));
+  const current=store.deliveryLog[id]||{},channels={...(current.channels||{}),...(input.channels||{})};
+  const row={...current,...input,id,eventType:String(input.eventType||current.eventType||'event'),ruleId:String(input.ruleId||current.ruleId||''),recipientManager:String(input.recipientManager||current.recipientManager||''),peerId:Number(input.peerId??current.peerId??0),clientName:String(input.clientName||current.clientName||'').slice(0,180),leadManager:String(input.leadManager||current.leadManager||'').slice(0,180),crmStatus:String(input.crmStatus||current.crmStatus||'').slice(0,180),snippet:String(input.snippet||current.snippet||'').slice(0,500),createdAt:Number(current.createdAt||input.createdAt||Date.now()),updatedAt:Date.now(),channels,filterSnapshot:input.filterSnapshot||current.filterSnapshot||null};
+  row.overallStatus=notificationDeliveryOverall(row);store.deliveryLog[id]=row;return row
+}
+function notificationDeliveryChannel(store,id,channel,status,error=''){
+  const row=store.deliveryLog?.[id];if(!row)return null;row.channels=row.channels||{};row.channels[channel]={...(row.channels[channel]||{}),status:String(status||'failed'),at:Date.now(),error:String(error||'').slice(0,400)};row.updatedAt=Date.now();row.overallStatus=notificationDeliveryOverall(row);return row
+}
+function expirePendingBrowserDeliveries(store,now=Date.now()){
+  let changed=0;for(const row of Object.values(store.deliveryLog||{})){const b=row?.channels?.browser;if(b?.status==='pending'&&now-Number(row.createdAt||0)>30*60*1000){notificationDeliveryChannel(store,row.id,'browser','missed','Браузер не забрал уведомление в течение 30 минут');changed++}}return changed
+}
+function notificationDeliveryRows(store,session,{admin=false}={}){
+  expirePendingBrowserDeliveries(store);const names=notificationActorNames(session).map(notificationRuleKey);return Object.values(store.deliveryLog||{}).filter(row=>admin||names.includes(notificationRuleKey(row.recipientManager))).sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0))
+}
+function notificationFilterSnapshot(rule={}){return {managerFilters:[...(rule.managerFilters||[])],statuses:[...(rule.statuses||[])],workDays:[...(rule.workDays||[])],workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone,dialogFilter:rule.dialogFilter,slaMinutes:rule.slaMinutes,violationMinutes:rule.violationMinutes}}
+async function deliverNotificationEvent(store,rule,event,{peerId=0,clientName='',leadManager='',crmStatus='',snippet='',subjectKey='',text=''}){
+  const id=notificationDeliveryId(event,rule.id,subjectKey||peerId);let row=notificationDeliveryUpsert(store,{id,eventType:event,ruleId:rule.id,recipientManager:rule.manager,peerId,clientName,leadManager,crmStatus,snippet,subjectKey,filterSnapshot:notificationFilterSnapshot(rule),channels:{browser:{status:'pending',requested:true,at:0,error:''},telegram:{status:rule.telegramChatId?'pending':'not_requested',requested:Boolean(rule.telegramChatId),at:0,error:rule.telegramChatId?'':'Telegram не подключён'}}});
+  if(rule.telegramChatId){try{await sendTelegramText(rule.telegramChatId,text,{url:notificationDialogUrl(peerId)});row=notificationDeliveryChannel(store,id,'telegram','sent')||row}catch(err){row=notificationDeliveryChannel(store,id,'telegram','failed',err?.message||err)||row}}
+  return row
+}
 function notificationOutboxKey(value=''){return String(value||'').replace(/[^A-Za-z0-9:_-]/g,'').slice(0,160)}
 function upsertNotificationOutbox(store,input={},session){
   store.outbox=store.outbox&&typeof store.outbox==='object'?store.outbox:{};
@@ -2395,10 +2445,10 @@ function upsertNotificationOutbox(store,input={},session){
   const row={...current,requestId,peerId:Number(input.peerId||current.peerId||0),peerName:String(input.peerName||current.peerName||'').slice(0,160),snippet:String(input.text||input.snippet||current.snippet||'').trim().replace(/\s+/g,' ').slice(0,240),manager:String(current.manager||notificationActorNames(session)[0]||''),status,attempts:Math.max(0,Number(input.attempts??current.attempts??0)),error:String(input.error||'').slice(0,300),createdAt:Number(current.createdAt||input.createdAt||Date.now()),updatedAt:Date.now(),alerted:Boolean(current.alerted)};
   store.outbox[requestId]=row;return row
 }
-function notificationOutboxRows(store,session){
+function notificationOutboxRows(store,session,{admin=false}={}){
   const names=notificationActorNames(session).map(notificationRuleKey),cutoff=Date.now()-7*24*60*60*1000;store.outbox=store.outbox&&typeof store.outbox==='object'?store.outbox:{};
   for(const[k,row]of Object.entries(store.outbox))if(Number(row?.updatedAt||0)<cutoff||row?.status==='removed'||(row?.status==='sent'&&Date.now()-Number(row.updatedAt||0)>60*60*1000))delete store.outbox[k];
-  return Object.values(store.outbox).filter(row=>['queued','sending','error'].includes(row.status)&&(!names.length||names.includes(notificationRuleKey(row.manager)))).sort((a,b)=>Number(a.createdAt||0)-Number(b.createdAt||0))
+  return Object.values(store.outbox).filter(row=>['queued','sending','error'].includes(row.status)&&(admin||!names.length||names.includes(notificationRuleKey(row.manager)))).sort((a,b)=>Number(a.createdAt||0)-Number(b.createdAt||0))
 }
 function notificationJournalId(peerId,since){return `lead-${Math.trunc(Number(peerId||0))}-${Math.trunc(Number(since||0))}`}
 function notificationJournalUpsert(store,input={}){
@@ -2419,12 +2469,15 @@ function notificationJournalUpsert(store,input={}){
   const incomingTexts=[...(Array.isArray(current.incomingTexts)?current.incomingTexts:[])];
   for(const value of (Array.isArray(input.incomingTexts)?input.incomingTexts:[])){const text=String(value||'').trim();if(text&&!incomingTexts.includes(text))incomingTexts.push(text.slice(0,1000))}
   const answeredAt=Number(input.answeredAt||current.answeredAt||0);
-  const row={...current,id,peerId,receivedAt,name:String(input.name||current.name||`VK ${peerId}`).slice(0,180),manager:manager||previousManager,managerAtReceipt:String(current.managerAtReceipt??input.managerAtReceipt??manager??''),currentManager:manager||previousManager,managerHistory,crmStatus:crmStatus||previousStatus,statusAtReceipt:String(current.statusAtReceipt??input.statusAtReceipt??crmStatus??''),currentCrmStatus:crmStatus||previousStatus,statusHistory,incomingTexts,snippet:String(input.snippet||current.snippet||incomingTexts.join(' · ')).trim().replace(/\s+/g,' ').slice(0,500),status:(current.status==='answered'||answeredAt)?'answered':'waiting',recordedAt:Number(current.recordedAt||Date.now()),updatedAt:Date.now(),answeredAt,responseText:String(input.responseText??current.responseText??'').trim().slice(0,2000),responseAuthor:String(input.responseAuthor??current.responseAuthor??'').trim().slice(0,180),responseMessageId:String(input.responseMessageId??current.responseMessageId??''),responseStartAt:Number(input.responseStartAt||current.responseStartAt||receivedAt),dueAt:Number(input.dueAt||current.dueAt||0),outsideHoursAtReceipt:Boolean(input.outsideHoursAtReceipt??current.outsideHoursAtReceipt),violationMinutes:Number(current.violationMinutes||input.violationMinutes||20),workDays:current.workDays||input.workDays||[1,2,3,4,5,6,7],slaMinutes:Number(input.slaMinutes||current.slaMinutes||8),workStart:String(input.workStart||current.workStart||'10:00'),workEnd:String(input.workEnd||current.workEnd||'22:00'),timezone:String(input.timezone||current.timezone||'Europe/Moscow')};
+  const row={...current,id,peerId,receivedAt,name:String(input.name||current.name||`VK ${peerId}`).slice(0,180),manager:manager||previousManager,managerAtReceipt:String(current.managerAtReceipt??input.managerAtReceipt??manager??''),currentManager:manager||previousManager,managerHistory,crmStatus:crmStatus||previousStatus,statusAtReceipt:String(current.statusAtReceipt??input.statusAtReceipt??crmStatus??''),currentCrmStatus:crmStatus||previousStatus,statusHistory,incomingTexts,snippet:String(input.snippet||current.snippet||incomingTexts.join(' · ')).trim().replace(/\s+/g,' ').slice(0,500),status:(current.status==='answered'||answeredAt)?'answered':'waiting',recordedAt:Number(current.recordedAt||Date.now()),updatedAt:Date.now(),answeredAt,responseText:String(input.responseText??current.responseText??'').trim().slice(0,2000),responseAuthor:String(input.responseAuthor??current.responseAuthor??'').trim().slice(0,180),responseMessageId:String(input.responseMessageId??current.responseMessageId??''),responseStartAt:Number(current.responseStartAt||input.responseStartAt||receivedAt),dueAt:Number(current.dueAt||input.dueAt||0),outsideHoursAtReceipt:Boolean(input.outsideHoursAtReceipt??current.outsideHoursAtReceipt),violationMinutes:Number(current.violationMinutes||input.violationMinutes||20),workDays:current.workDays||input.workDays||[1,2,3,4,5,6,7],slaMinutes:Number(current.slaMinutes||input.slaMinutes||8),workStart:String(current.workStart||input.workStart||'10:00'),workEnd:String(current.workEnd||input.workEnd||'22:00'),timezone:String(current.timezone||input.timezone||'Europe/Moscow')};
   store.journal[id]=row;return row
 }
 function notificationJournalRows(store,{rule=null,admin=false}={}){
   store.journal=store.journal&&typeof store.journal==='object'?store.journal:{};
-  const rows=Object.values(store.journal).filter(row=>admin||(!rule||((!(rule.managerFilters||[]).length||(rule.managerFilters||[]).some(value=>[row.manager,row.currentManager,row.managerAtReceipt,...(row.managerHistory||[]).flatMap(x=>[x.manager,x.fromManager,x.toManager])].some(name=>sameText(name,value))))&&(!(rule.statuses||[]).length||(rule.statuses||[]).some(value=>[row.crmStatus,row.currentCrmStatus,row.statusAtReceipt,...(row.statusHistory||[]).flatMap(x=>[x.status,x.fromStatus,x.toStatus])].some(name=>sameText(name,value)))))));
+  // Recipient notifications are based on the lead's CURRENT CRM manager/status.
+  // Historical manager/status values remain available to the SLA/admin report, but
+  // must never make a lead pass a recipient filter after it has moved elsewhere.
+  const rows=Object.values(store.journal).filter(row=>admin||!rule||notificationRuleMatchesCustomer(rule,{manager:row.currentManager||row.manager||'',managerLogin:row.currentManager||row.manager||'',crmStatus:row.currentCrmStatus||row.crmStatus||''}));
   return rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0))
 }
 async function firstOutgoingReplyAfter(session,peerId,receivedAt){
@@ -2536,31 +2589,53 @@ async function loadDialogsForNotifications(session,{maxPages=5,filter='unanswere
   return all
 }
 function notificationDialogUrl(peerId){const base=PUBLIC_BASE_URL||'';return base?`${base}/#/dialogs/${encodeURIComponent(peerId)}`:''}
+
+function outboxWatchSettingsPath(){return path.join(ROOT,'data','outbox-watch-settings.json')}
+function safeOutboxWatchSettings(input={}){return {enabled:input.enabled!==false,stuckMinutes:Math.min(Math.max(Number(input.stuckMinutes||3),1),240),repeatMinutes:Math.min(Math.max(Number(input.repeatMinutes||0),0),1440),updatedAt:Number(input.updatedAt||Date.now())}}
+function readOutboxWatchSettings(){try{return safeOutboxWatchSettings(readStoredJson(outboxWatchSettingsPath())||{})}catch{return safeOutboxWatchSettings({})}}
+async function saveOutboxWatchSettings(input={}){const value=safeOutboxWatchSettings({...input,updatedAt:Date.now()});await storage.writeDocument(outboxWatchSettingsPath(),value);return value}
 async function runNotificationCheck({session=null,manual=false}={}){
-  const store=await readNotificationStore(),configuredRules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager),fallbackRule=safeNotificationRule({manager:'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered',workStart:'10:00',workEnd:'22:00',timezone:'Europe/Moscow'});
+  const store=await readNotificationStore(),configuredRules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.manager),fallbackRule=safeNotificationRule({manager:'',warningAlerts:false,violationAlerts:false,outboxAlerts:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered',workStart:'10:00',workEnd:'22:00',timezone:'Europe/Moscow'});
   const s=session||notificationServiceSession();if(!s)throw Object.assign(new Error('Для фоновой проверки задайте BLUESALES_NOTIFICATION_LOGIN и BLUESALES_NOTIFICATION_PASSWORD в Render'),{status:503,code:'NOTIFICATION_CREDENTIALS'});
-  const nowMs=Date.now(),activeRules=configuredRules.filter(r=>notificationWorkingNow(nowMs,r)),fallbackActive=notificationWorkingNow(nowMs,fallbackRule);if(!activeRules.length&&!fallbackActive)return {ok:true,checked:0,sent:0,outsideWorkingHours:true};
-  const filters=[...new Set([...activeRules.map(r=>r.dialogFilter),fallbackRule.dialogFilter])],dialogs=[];
-  for(const filter of filters){const rows=await loadDialogsForNotifications(s,{filter});for(const row of rows)dialogs.push({...row,notificationFilter:filter})}
-  let sent=0,checked=0;const activeJournalIds=new Set();
-  for(const d of dialogs){
-    const configuredMatching=activeRules.filter(r=>r.dialogFilter===d.notificationFilter&&customerMatchesManager(d.crm||{},(r.managerFilters||[]).join(','))&&customerMatchesStatus(d.crm||{},(r.statuses||[]).join(','))),matching=configuredMatching.length?configuredMatching:(fallbackActive&&fallbackRule.dialogFilter===d.notificationFilter?[fallbackRule]:[]);if(!matching.length)continue;
-    let since=0;try{since=await unansweredSinceForPeer(s,d.peerId)}catch(err){console.warn('[notifications history]',d.peerId,err?.message||err);continue}if(!since)continue;checked++;
-    const startMs=since*1000;
-    for(const r of matching){
-      const worked=workingMinutesUntilThreshold(startMs,nowMs,r,r.slaMinutes);if(worked<r.slaMinutes)continue;
-      const responseWindow=WorkingSla.responseWindow(startMs,r),journalRow=notificationJournalUpsert(store,{peerId:d.peerId,receivedAt:since,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',snippet:d.lastMessage||'',responseStartAt:Math.floor(responseWindow.responseStartAt/1000),dueAt:Math.floor(responseWindow.dueAt/1000),outsideHoursAtReceipt:responseWindow.outsideHoursAtReceipt,slaMinutes:r.slaMinutes,workStart:r.workStart,workEnd:r.workEnd,timezone:r.timezone});if(journalRow)activeJournalIds.add(journalRow.id);
-      if(!r.enabled||!r.telegramChatId)continue;
-      const key=`${r.id}:${d.peerId}:${since}`,prev=store.notified?.[key]||null;
-      if(prev){if(!r.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<r.repeatMinutes*60000)continue}
-      const client=d.crm?.fullName||d.name||`VK ${d.peerId}`,leadManager=String(d.crm?.manager||d.crm?.managerLogin||'Не назначен'),crmStatus=String(d.crm?.crmStatus||'Не указан'),snippet=String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180),text=`🔴 Просрочен ответ\n\nКлиент: ${client}\nМенеджер лида: ${leadManager}\nCRM-статус: ${crmStatus}\nПолучатель уведомления: ${r.manager}\nБез ответа: больше ${r.slaMinutes} рабочих минут\n${snippet?`\n«${snippet}»`:''}`;
-      await sendTelegramText(r.telegramChatId,text,{url:notificationDialogUrl(d.peerId)});store.notified[key]={sentAt:nowMs,manager:r.manager,peerId:d.peerId,since};sent++
+  const nowMs=Date.now(),activeRules=configuredRules.filter(r=>notificationWorkingNow(nowMs,r));
+  let sent=0,checked=0,deliveryEvents=0;const activeJournalIds=new Set(),dialogRules=activeRules.filter(r=>r.warningAlerts||r.violationAlerts);
+  if(dialogRules.length){
+    const filters=[...new Set(dialogRules.map(r=>r.dialogFilter))],dialogs=[];
+    for(const filter of filters){const rows=await loadDialogsForNotifications(s,{filter});for(const row of rows)dialogs.push({...row,notificationFilter:filter})}
+    for(const d of dialogs){
+      const matching=dialogRules.filter(r=>r.dialogFilter===d.notificationFilter&&notificationRuleMatchesCustomer(r,d.crm||{}));if(!matching.length)continue;
+      let since=0;try{since=await unansweredSinceForPeer(s,d.peerId)}catch(err){console.warn('[notifications history]',d.peerId,err?.message||err);continue}if(!since)continue;checked++;
+      const startMs=since*1000,client=d.crm?.fullName||d.name||`VK ${d.peerId}`,leadManager=String(d.crm?.manager||d.crm?.managerLogin||'Не назначен'),crmStatus=String(d.crm?.crmStatus||'Не указан'),snippet=String(d.lastMessage||'').trim().replace(/\s+/g,' ').slice(0,180);
+      for(const r of matching){
+        const worked=workingMinutesUntilThreshold(startMs,nowMs,r,r.slaMinutes),responseWindow=WorkingSla.responseWindow(startMs,r),journalRow=notificationJournalUpsert(store,{peerId:d.peerId,receivedAt:since,name:client,manager:leadManager,crmStatus,snippet,responseStartAt:Math.floor(responseWindow.responseStartAt/1000),dueAt:Math.floor(responseWindow.dueAt/1000),outsideHoursAtReceipt:responseWindow.outsideHoursAtReceipt,slaMinutes:r.slaMinutes,violationMinutes:r.violationMinutes,workDays:r.workDays,workStart:r.workStart,workEnd:r.workEnd,timezone:r.timezone});if(journalRow)activeJournalIds.add(journalRow.id);
+        const phases=[];if(r.warningAlerts&&worked>=r.slaMinutes)phases.push(['sla_warning',r.slaMinutes,`🟡 Нужно ответить клиенту\n\nКлиент: ${client}\nМенеджер лида: ${leadManager}\nCRM-статус: ${crmStatus}\nПолучатель уведомления: ${r.manager}\nБез ответа: ${worked} рабочих минут\nПорог предупреждения: ${r.slaMinutes} мин.${snippet?`\n\n«${snippet}»`:''}`]);
+        if(r.violationAlerts&&worked>=r.violationMinutes)phases.push(['sla_violation',r.violationMinutes,`🔴 Нарушен регламент ответа\n\nКлиент: ${client}\nОтветственный менеджер: ${leadManager}\nCRM-статус: ${crmStatus}\nПолучатель уведомления: ${r.manager}\nБез ответа: ${worked} рабочих минут\nНарушение после: ${r.violationMinutes} мин.${snippet?`\n\n«${snippet}»`:''}`]);
+        for(const [eventType,threshold,text] of phases){
+          const key=`${eventType}:${r.id}:${d.peerId}:${since}`,prev=store.notified?.[key]||null;if(prev){if(!r.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<r.repeatMinutes*60000)continue}
+          const occurrence=prev?Number(prev.count||1):0,subjectKey=`${d.peerId}:${since}:${threshold}:${occurrence}`;const delivery=await deliverNotificationEvent(store,r,eventType,{peerId:d.peerId,clientName:client,leadManager,crmStatus,snippet,subjectKey,text});
+          store.notified=store.notified||{};store.notified[key]={sentAt:nowMs,manager:r.manager,peerId:d.peerId,since,count:occurrence+1,deliveryId:delivery.id};deliveryEvents++;if(delivery.channels?.telegram?.status==='sent')sent++;
+        }
+      }
     }
   }
-  await resolveNotificationJournalReplies(store,s,activeJournalIds,20);
-  // Keep the small JSON store bounded on Render's ephemeral filesystem.
-  const cutoff=nowMs-14*24*60*60*1000;for(const[k,v]of Object.entries(store.notified||{}))if(Number(v?.sentAt||0)<cutoff)delete store.notified[k];await writeNotificationStore(store);
-  return {ok:true,checked,sent,dialogs:dialogs.length,manual}
+  await resolveNotificationJournalReplies(store,s,activeJournalIds,30);
+
+  // v28.19: server-side watchdog for outgoing messages. It is independent from SLA.
+  const outboxSettings=readOutboxWatchSettings();
+  if(outboxSettings.enabled){
+    const candidates=notificationOutboxRows(store,s,{admin:true}).filter(row=>nowMs-Number(row.createdAt||row.updatedAt||nowMs)>=outboxSettings.stuckMinutes*60000);
+    const ids=[...new Set(candidates.map(x=>Number(x.peerId||0)).filter(x=>x>0&&x<2000000000))],crmMap=new Map();
+    if(ids.length){try{for(const c of await getCustomersByVkIds(s,ids))if(c?.social?.vkId)crmMap.set(Number(c.social.vkId),c)}catch(err){console.warn('[outbox watchdog crm]',err?.message||err)}}
+    for(const row of candidates){const crm=crmMap.get(Number(row.peerId))||{},matching=activeRules.filter(r=>r.outboxAlerts&&notificationRuleMatchesCustomer(r,crm));if(!matching.length)continue;
+      const client=String(crm.fullName||row.peerName||`VK ${row.peerId}`),leadManager=String(crm.manager||crm.managerLogin||row.manager||'Не назначен'),crmStatus=String(crm.crmStatus||'Не указан');
+      for(const r of matching){const key=`outbox_stuck:${r.id}:${row.requestId}`,prev=store.notified?.[key]||null;if(prev){if(!outboxSettings.repeatMinutes)continue;if(nowMs-Number(prev.sentAt||0)<outboxSettings.repeatMinutes*60000)continue}
+        const occurrence=prev?Number(prev.count||1):0,text=`🟠 Исходящее сообщение зависло\n\nКлиент: ${client}\nМенеджер лида: ${leadManager}\nCRM-статус: ${crmStatus}\nОтправлял: ${row.manager||'Не определён'}\nВ очереди: ${Math.max(1,Math.floor((nowMs-Number(row.createdAt||nowMs))/60000))} мин.\nПопыток: ${row.attempts||0}\nПричина: ${row.error||'ожидает отправки'}`;
+        const delivery=await deliverNotificationEvent(store,r,'outbox_stuck',{peerId:row.peerId,clientName:client,leadManager,crmStatus,snippet:row.snippet,subjectKey:`${row.requestId}:${occurrence}`,text});store.notified=store.notified||{};store.notified[key]={sentAt:nowMs,manager:r.manager,requestId:row.requestId,count:occurrence+1,deliveryId:delivery.id};deliveryEvents++;if(delivery.channels?.telegram?.status==='sent')sent++;row.alerted=true;row.alertedAt=nowMs;row.alertedRuleIds=[...(new Set([...(row.alertedRuleIds||[]),r.id]))]
+      }
+    }
+  }
+  const cutoff=nowMs-30*24*60*60*1000;for(const[k,v]of Object.entries(store.notified||{}))if(Number(v?.sentAt||0)<cutoff)delete store.notified[k];for(const[k,v]of Object.entries(store.deliveryLog||{}))if(Number(v?.createdAt||0)<nowMs-90*24*60*60*1000)delete store.deliveryLog[k];
+  await writeNotificationStore(store);return {ok:true,checked,sent,deliveryEvents,manual,outboxStuckMinutes:outboxSettings.stuckMinutes}
 }
 let notificationCheckRunning=false;
 const notificationSchedulerState={lastAt:0,lastSuccessAt:0,lastError:'',checked:0,sent:0,source:''};
@@ -2580,6 +2655,70 @@ async function executeNotificationCheck(options,source){
     return result;
   }catch(err){notificationSchedulerState.lastError=String(err?.message||err).slice(0,400);throw err}
 }
+
+// v28.17: SLA control/report settings are independent from Telegram recipients.
+// They are persisted in PostgreSQL app_documents when DATABASE_URL is enabled.
+function slaReportSettingsPath(){return path.join(ROOT,'data','sla-report-settings.json')}
+function slaReportOwnerKey(session){return String(session?.login||notificationActorNames(session)[0]||'default').trim().toLowerCase()}
+function defaultSlaReportSettings(session){
+  const own=notificationActorNames(session)[0]||'';
+  return {managerFilters:isAdminSession(session)?[]:(own?[own]:[]),statuses:[],workDays:[1,2,3,4,5,6,7],workStart:'10:00',workEnd:'22:00',slaMinutes:8,violationMinutes:20,timezone:'Europe/Moscow'};
+}
+function safeSlaReportSettings(input={},session){
+  const base=defaultSlaReportSettings(session),managerFilters=multiParamValues(Array.isArray(input.managerFilters)?input.managerFilters.join(','):input.managerFilters),statuses=multiParamValues(Array.isArray(input.statuses)?input.statuses.join(','):input.statuses);
+  const allowedManagers=isAdminSession(session)?managerFilters:(base.managerFilters||[]);
+  return {managerFilters:allowedManagers,statuses,workDays:Array.isArray(input.workDays)&&input.workDays.length?[...new Set(input.workDays.map(Number).filter(d=>d>=1&&d<=7))]:base.workDays,workStart:/^\d{2}:\d{2}$/.test(String(input.workStart||''))?String(input.workStart):base.workStart,workEnd:/^\d{2}:\d{2}$/.test(String(input.workEnd||''))?String(input.workEnd):base.workEnd,slaMinutes:Math.min(Math.max(Number(input.slaMinutes||base.slaMinutes),1),240),violationMinutes:Math.min(Math.max(Number(input.violationMinutes||base.violationMinutes),1),1440),timezone:'Europe/Moscow'};
+}
+function readSlaReportStore(){try{const raw=readStoredJson(slaReportSettingsPath());return raw&&typeof raw==='object'&&!Array.isArray(raw)?{version:1,profiles:{},...raw,profiles:raw.profiles&&typeof raw.profiles==='object'?raw.profiles:{}}:{version:1,profiles:{}}}catch{return {version:1,profiles:{}}}}
+function slaReportSettingsFor(session){const store=readSlaReportStore(),raw=store.profiles?.[slaReportOwnerKey(session)]||{};return safeSlaReportSettings(raw,session)}
+async function saveSlaReportSettings(session,input){const store=readSlaReportStore(),key=slaReportOwnerKey(session),next=safeSlaReportSettings(input,session);store.profiles={...(store.profiles||{}),[key]:next};store.updatedAt=Date.now();await storage.writeDocument(slaReportSettingsPath(),store);return next}
+function managerAtEpoch(row,epochSeconds){
+  let manager=String(row.managerAtReceipt||row.manager||row.currentManager||'');const at=Number(epochSeconds||0);
+  for(const entry of [...(row.managerHistory||[])].sort((a,b)=>Number(a.fromAt||0)-Number(b.fromAt||0))){if(Number(entry.fromAt||0)<=at)manager=String(entry.toManager||entry.manager||manager)}
+  return manager||String(row.currentManager||row.manager||'Не назначен');
+}
+function slaReportStatusMatches(row,settings){if(!(settings.statuses||[]).length)return true;const values=[row.statusAtReceipt,row.crmStatus,row.currentCrmStatus,...(row.statusHistory||[]).flatMap(x=>[x.status,x.fromStatus,x.toStatus])].filter(Boolean);return settings.statuses.some(x=>values.some(v=>sameText(v,x)))}
+function slaReportManagerMatches(manager,settings){return !(settings.managerFilters||[]).length||(settings.managerFilters||[]).some(x=>sameText(x,manager))}
+function slaReportRow(row,settings,nowMs=Date.now()){
+  // Historical rows keep the SLA/work-schedule snapshot that was active when the episode was recorded.
+  // Changing today's admin settings must not rewrite yesterday's violation history.
+  const eventSettings={...settings,workDays:Array.isArray(row.workDays)&&row.workDays.length?row.workDays:settings.workDays,workStart:row.workStart||settings.workStart,workEnd:row.workEnd||settings.workEnd,timezone:row.timezone||settings.timezone,slaMinutes:Number(row.slaMinutes||settings.slaMinutes),violationMinutes:Number(row.violationMinutes||settings.violationMinutes)};
+  const receivedAt=Number(row.receivedAt||0),answeredAt=Number(row.answeredAt||0),endMs=answeredAt?answeredAt*1000:nowMs,worked=WorkingSla.workingMinutesBetween(receivedAt*1000,endMs,eventSettings),violationAtMs=WorkingSla.workingDeadline(receivedAt*1000,eventSettings,eventSettings.violationMinutes),notificationAtMs=WorkingSla.workingDeadline(receivedAt*1000,eventSettings,eventSettings.slaMinutes),violated=worked>=eventSettings.violationMinutes,notified=worked>=eventSettings.slaMinutes;
+  const responsibilityAt=violated&&violationAtMs?Math.floor(violationAtMs/1000):(answeredAt||Math.floor(nowMs/1000)),responsibleManager=managerAtEpoch(row,responsibilityAt);
+  return {...row,workingResponseMinutes:worked,violated,notified,responsibleManager,notificationAt:notificationAtMs?Math.floor(notificationAtMs/1000):0,violationAt:violationAtMs?Math.floor(violationAtMs/1000):0,onTime:Boolean(answeredAt)&&!violated,waiting:!answeredAt};
+}
+async function buildSlaReport(session){
+  const settings=slaReportSettingsFor(session),store=await readNotificationStore();
+  // Refresh recent history so answered/on-time rows remain in the report instead of vanishing.
+  try{const dialogs=await loadDialogsForNotifications(session,{maxPages:2,filter:'all'});await syncRecentLeadJournal(session,store,dialogs,{...settings,enabled:false,dialogFilter:'unanswered',manager:'',queueAlerts:false},{limit:60});await resolveNotificationJournalReplies(store,session,new Set(),30)}catch(err){console.warn('[sla report sync]',err?.message||err)}
+  const nowMs=Date.now(),rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,nowMs)).filter(row=>slaReportStatusMatches(row,settings)&&slaReportManagerMatches(row.responsibleManager,settings));
+  const map=new Map();for(const row of rows){const key=row.responsibleManager||'Не назначен',stat=map.get(key)||{manager:key,total:0,answered:0,onTime:0,violations:0,waiting:0,responseTotal:0,responseCount:0,maxResponseMinutes:0};stat.total++;if(row.waiting)stat.waiting++;else{stat.answered++;stat.responseTotal+=row.workingResponseMinutes;stat.responseCount++;stat.maxResponseMinutes=Math.max(stat.maxResponseMinutes,row.workingResponseMinutes);if(row.onTime)stat.onTime++}if(row.violated)stat.violations++;map.set(key,stat)}
+  const managers=[...map.values()].map(x=>({...x,averageResponseMinutes:x.responseCount?Math.round(x.responseTotal/x.responseCount):0,responseTotal:undefined,responseCount:undefined})).sort((a,b)=>b.violations-a.violations||b.total-a.total||a.manager.localeCompare(b.manager,'ru'));
+  const totals=managers.reduce((a,x)=>({total:a.total+x.total,answered:a.answered+x.answered,onTime:a.onTime+x.onTime,violations:a.violations+x.violations,waiting:a.waiting+x.waiting}),{total:0,answered:0,onTime:0,violations:0,waiting:0});
+  await writeNotificationStore(store);
+  return {settings,rows:rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0)),managers,totals,checkedAt:Date.now()};
+}
+
+// v28.19: one-time historical bootstrap. It scans every VK conversation once,
+// fills the SLA journal, then stores a durable completion marker in PostgreSQL.
+function dialogBootstrapPath(){return path.join(ROOT,'data','dialog-bootstrap-v2819.json')}
+function readDialogBootstrapState(){try{const x=readStoredJson(dialogBootstrapPath());return x&&typeof x==='object'?x:{status:'pending',version:1}}catch{return {status:'pending',version:1}}}
+async function writeDialogBootstrapState(value){await storage.writeDocument(dialogBootstrapPath(),{version:1,...value,updatedAt:Date.now()})}
+let dialogBootstrapRunning=false;
+async function runDialogBootstrapOnce(session){
+  if(dialogBootstrapRunning)return readDialogBootstrapState();const before=readDialogBootstrapState();if(before.status==='completed')return before;dialogBootstrapRunning=true;
+  const resumeAt=Math.max(0,Number(before.currentBatchEnd||0));
+  const state={...before,status:'running',startedAt:before.startedAt||Date.now(),lastError:'',processedDialogs:Math.max(0,Number(before.processedDialogs||0)),failedDialogs:Math.max(0,Number(before.failedDialogs||0)),totalDialogs:Math.max(0,Number(before.totalDialogs||0)),currentBatchEnd:resumeAt};await writeDialogBootstrapState(state);
+  try{
+    const dialogs=await loadDialogsForNotifications(session,{maxPages:50,filter:'all'});state.totalDialogs=dialogs.length;const store=await readNotificationStore(),settings={...slaReportSettingsFor(session),managerFilters:[],statuses:[]},rule={...settings,manager:'',warningAlerts:false,violationAlerts:false,outboxAlerts:false,dialogFilter:'unanswered'};
+    // A crashed deploy resumes from the last committed batch instead of rescanning old dialogs.
+    const startAt=Math.min(resumeAt,dialogs.length);
+    for(let i=startAt;i<dialogs.length;i+=4){const batch=dialogs.slice(i,i+4);const results=await Promise.all(batch.map(async d=>{try{const params={peer_id:Number(d.peerId),count:200,offset:0,extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;const raw=await vkCall(session.vkToken,'messages.getHistory',params),maps=vkIdentityMaps(raw||{}),messages=(raw?.items||[]).map(m=>normalizeVkMessage(m,maps));ingestNotificationJournalMessages(store,{peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule});return true}catch(err){console.warn('[bootstrap dialogs]',d.peerId,err?.message||err);return false}}));state.processedDialogs+=results.filter(Boolean).length;state.failedDialogs+=results.filter(x=>!x).length;await writeNotificationStore(store);await writeDialogBootstrapState({...state,currentBatchEnd:Math.min(i+batch.length,dialogs.length)});if(i+4<dialogs.length)await sleep(220)}
+    const rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,Date.now())),folders={waiting:0,onTime:0,violations:0,total:rows.length};for(const row of rows){if(row.waiting)folders.waiting++;else if(row.violated)folders.violations++;else folders.onTime++}
+    Object.assign(state,{status:'completed',completedAt:Date.now(),folders,currentBatchEnd:dialogs.length});await writeDialogBootstrapState(state);return state
+  }catch(err){Object.assign(state,{status:'failed',lastError:String(err?.message||err).slice(0,500),failedAt:Date.now()});await writeDialogBootstrapState(state);throw err}finally{dialogBootstrapRunning=false}
+}
+function startDialogBootstrapOnce(session){const state=readDialogBootstrapState();if(state.status==='completed'||dialogBootstrapRunning)return state;setTimeout(()=>storage.run(()=>runDialogBootstrapOnce(session)).catch(err=>console.warn('[dialog bootstrap]',err?.message||err)),50);return {...state,status:'starting'}}
 async function runScheduledNotificationCheck(){
   if(notificationCheckRunning||!NOTIFICATION_BS_LOGIN||!NOTIFICATION_BS_PASSWORD||!PRESET_VK_TOKEN)return;
   notificationCheckRunning=true;try{await executeNotificationCheck({manual:false},'internal')}catch(err){console.warn('[notifications scheduler]',err?.message||err)}finally{notificationCheckRunning=false}
@@ -2594,7 +2733,7 @@ async function handleTelegramWebhook(req,res){
   if(m){const code=String(m[1]||'');const pair=store.pairCodes?.[code];if(pair&&Number(pair.expiresAt||0)>Date.now()){
       const rule=findNotificationRule(store,pair.manager)||upsertNotificationRule(store,{manager:pair.manager,enabled:false});rule.telegramChatId=chatId;rule.telegramUsername=String(msg.from?.username||'');rule.telegramFirstName=String(msg.from?.first_name||'');delete store.pairCodes[code];await writeNotificationStore(store);await sendTelegramText(chatId,`✅ seb_gun CRM подключена.\nМенеджер: ${rule.manager}\nУведомления: ${rule.enabled?'включены':'пока выключены'}`);return sendJson(res,200,{ok:true})
     }
-    await sendTelegramText(chatId,'Откройте «CRM → Ещё → Telegram-уведомления» и нажмите «Подключить Telegram».');return sendJson(res,200,{ok:true})
+    await sendTelegramText(chatId,'Откройте «CRM → Уведомления» и нажмите «Подключить Telegram».');return sendJson(res,200,{ok:true})
   }
   if(/^\/status/i.test(text)){const rule=(store.rules||[]).find(r=>String(r.telegramChatId||'')===chatId);await sendTelegramText(chatId,rule?`CRM подключена: ${rule.manager}. SLA ${rule.slaMinutes} мин, ${rule.workStart}–${rule.workEnd}.`:'Этот Telegram ещё не привязан к менеджеру.');return sendJson(res,200,{ok:true})}
   return sendJson(res,200,{ok:true})
@@ -2692,14 +2831,56 @@ async function apiRouter(req, res, url) {
   const s = await requireAuth(req, res);
   if (!s) return;
 
+
+  if (pathname === '/api/bootstrap/dialogs-once' && req.method === 'GET') {
+    return sendJson(res,200,{ok:true,state:readDialogBootstrapState(),running:dialogBootstrapRunning});
+  }
+  if (pathname === '/api/bootstrap/dialogs-once' && req.method === 'POST') {
+    if(!requireCsrf(req,res,s))return;const state=startDialogBootstrapOnce(s);return sendJson(res,202,{ok:true,state,running:true});
+  }
+  if (pathname === '/api/outbox/settings' && req.method === 'GET') {
+    return sendJson(res,200,{ok:true,settings:readOutboxWatchSettings(),storage:storage.enabled?'postgresql':'json'});
+  }
+  if (pathname === '/api/outbox/settings' && req.method === 'POST') {
+    if(!requireAdminSession(s,res)||!requireCsrf(req,res,s))return;try{return sendJson(res,200,{ok:true,settings:await saveOutboxWatchSettings(await readJson(req))})}catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/notifications/history' && req.method === 'GET') {
+    try{const store=await readNotificationStore(),rows=notificationDeliveryRows(store,s,{admin:isAdminSession(s)});await writeNotificationStore(store);return sendJson(res,200,{ok:true,rows,storage:storage.enabled?'postgresql':'json'})}catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/notifications/browser-pending' && req.method === 'GET') {
+    try{const store=await readNotificationStore(),rows=notificationDeliveryRows(store,s).filter(row=>row?.channels?.browser?.status==='pending').slice(0,30);await writeNotificationStore(store);return sendJson(res,200,{ok:true,rows})}catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/notifications/browser-delivery' && req.method === 'POST') {
+    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req),store=await readNotificationStore(),row=(store.deliveryLog||{})[String(body.id||'')];if(!row)return sendJson(res,404,{ok:false,message:'Уведомление не найдено'});const names=notificationActorNames(s).map(notificationRuleKey);if(!isAdminSession(s)&&!names.includes(notificationRuleKey(row.recipientManager)))return sendJson(res,403,{ok:false,message:'Нет доступа к этому уведомлению'});notificationDeliveryChannel(store,row.id,'browser',['sent','failed','blocked','missed'].includes(String(body.status))?String(body.status):'failed',body.error||'');await writeNotificationStore(store);return sendJson(res,200,{ok:true,row:store.deliveryLog[row.id]})}catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/admin/sla/violations' && req.method === 'GET') {
+    if(!requireAdminSession(s,res))return;try{const store=await readNotificationStore(),settings={...slaReportSettingsFor(s),managerFilters:[],statuses:[]},rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,Date.now())).filter(row=>row.violated).sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0));return sendJson(res,200,{ok:true,rows,deletedIds:Object.keys(store.deletedJournal||{}),bootstrap:readDialogBootstrapState()})}catch(err){return handleApiError(res,err)}
+  }
+  const adminSlaViolationRestore=pathname.match(/^\/api\/admin\/sla\/violations\/([^/]+)\/restore$/);
+  if(adminSlaViolationRestore&&req.method==='POST'){
+    if(!requireAdminSession(s,res)||!requireCsrf(req,res,s))return;const id=decodeURIComponent(adminSlaViolationRestore[1]),store=await readNotificationStore();if(!store.deletedJournal?.[id])return sendJson(res,404,{ok:false,message:'Удалённая запись не найдена'});delete store.deletedJournal[id];await writeNotificationStore(store);return sendJson(res,200,{ok:true,id});
+  }
+  if (pathname === '/api/outbox/overview' && req.method === 'GET') {
+    try{const store=await readNotificationStore();return sendJson(res,200,{ok:true,outbox:notificationOutboxRows(store,s,{admin:isAdminSession(s)}),storage:storage.enabled?'postgresql':'json'});}catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/sla/settings' && req.method === 'GET') {
+    return sendJson(res,200,{ok:true,settings:slaReportSettingsFor(s),storage:storage.enabled?'postgresql':'json'});
+  }
+  if (pathname === '/api/sla/settings' && req.method === 'POST') {
+    if(!requireCsrf(req,res,s))return;try{const body=await readJson(req),settings=await saveSlaReportSettings(s,body);return sendJson(res,200,{ok:true,settings,storage:storage.enabled?'postgresql':'json'});}catch(err){return handleApiError(res,err)}
+  }
+  if (pathname === '/api/sla/report' && req.method === 'GET') {
+    try{return sendJson(res,200,{ok:true,...await buildSlaReport(s),storage:storage.enabled?'postgresql':'json'});}catch(err){return handleApiError(res,err)}
+  }
+
   if (pathname === '/api/notifications/settings' && req.method === 'GET') {
     const store=await readNotificationStore();
     const visibleRules=(store.rules||[]).filter(r=>canManageNotificationManager(s,r.manager));
-    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:notificationMissingEnvironment().length===0,workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState},rules:visibleRules.map(notificationRulePublic),filesystemPersistent:false});
+    return sendJson(res,200,{ok:true,botConfigured:Boolean(TELEGRAM_BOT_TOKEN),botUsername:activeTelegramBotUsername,schedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),internalSchedulerConfigured:notificationMissingEnvironment().length===0,workerCredentialsConfigured:Boolean(NOTIFICATION_BS_LOGIN&&NOTIFICATION_BS_PASSWORD),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState},rules:visibleRules.map(notificationRulePublic),filesystemPersistent:storage.enabled,storage:storage.enabled?'postgresql':'json'});
   }
   if (pathname === '/api/notifications/settings' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
-    try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно настроить только свой Telegram'});const store=await readNotificationStore(),rule=upsertNotificationRule(store,body);await writeNotificationStore(store);return sendJson(res,200,{ok:true,rule:notificationRulePublic(rule)})}catch(err){return handleApiError(res,err)}
+    try{const body=await readJson(req);if(!canManageNotificationManager(s,body.manager))return sendJson(res,403,{ok:false,message:'Можно настроить только свой Telegram'});const candidate=safeNotificationRule(body);if((candidate.warningAlerts||candidate.violationAlerts||candidate.outboxAlerts)&&!notificationRuleHasExplicitFilters(candidate))return sendJson(res,400,{ok:false,message:'Для строгих уведомлений выберите хотя бы одного менеджера лида и хотя бы один CRM-статус'});const store=await readNotificationStore(),rule=upsertNotificationRule(store,body);await writeNotificationStore(store);return sendJson(res,200,{ok:true,rule:notificationRulePublic(rule)})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/pair' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
@@ -2725,7 +2906,7 @@ async function apiRouter(req, res, url) {
       const rule=saved||safeNotificationRule({manager:names[0]||'',enabled:false,slaMinutes:8,managerFilters:[],statuses:[],dialogFilter:'unanswered'});
       const allDialogs=await loadDialogsForNotifications(s,{maxPages:2,filter:'all'});
       await syncRecentLeadJournal(s,store,allDialogs,rule,{limit:40});
-      const dialogs=allDialogs.filter(d=>!d.lastMessageOut);
+      const dialogs=allDialogs.filter(d=>!d.lastMessageOut&&notificationRuleMatchesCustomer(rule,d.crm||{}));
       const now=Math.floor(Date.now()/1000);
       const activeRows=dialogs.filter(d=>!d.lastMessageOut).map(d=>{const since=Number(d.lastMessageAt||0),window=WorkingSla.responseWindow(since*1000,rule);return{
         peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,
@@ -2736,7 +2917,7 @@ async function apiRouter(req, res, url) {
       }}).filter(d=>d.workingWaitMinutes>=rule.slaMinutes).sort((a,b)=>b.workingWaitMinutes-a.workingWaitMinutes);
       const activeJournalIds=new Set();for(const row of activeRows){const savedRow=notificationJournalUpsert(store,{...row,receivedAt:row.since});if(savedRow)activeJournalIds.add(savedRow.id)}
       await resolveNotificationJournalReplies(store,s,activeJournalIds,20);
-      const rows=notificationJournalRows(store,{admin:true}).map(row=>({...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0,workingWaitMinutes:row.status==='waiting'?workingMinutesUntilThreshold(row.receivedAt*1000,Date.now(),row,row.slaMinutes):workingMinutesUntilThreshold(row.receivedAt*1000,(row.answeredAt||row.receivedAt)*1000,row,row.slaMinutes)}));
+      const rows=notificationJournalRows(store,{rule}).map(row=>({...row,since:row.receivedAt,waitMinutes:row.status==='waiting'?Math.max(0,Math.floor((now-row.receivedAt)/60)):0,workingWaitMinutes:row.status==='waiting'?workingMinutesUntilThreshold(row.receivedAt*1000,Date.now(),rule,rule.slaMinutes):workingMinutesUntilThreshold(row.receivedAt*1000,(row.answeredAt||row.receivedAt)*1000,rule,rule.slaMinutes)}));
       const outbox=notificationOutboxRows(store,s);await writeNotificationStore(store);
       return sendJson(res,200,{ok:true,dialogs:rows,outbox,checkedAt:Date.now(),violationMinutes:rule.violationMinutes,workDays:rule.workDays,slaMinutes:rule.slaMinutes,workStart:rule.workStart,workEnd:rule.workEnd,timezone:rule.timezone,dialogFilter:rule.dialogFilter,background:{ready:notificationMissingEnvironment().length===0,externalSchedulerConfigured:Boolean(NOTIFICATION_CHECK_SECRET),environmentPairingConfigured:notificationEnvironmentRuleCount()>0,durableRuleCount:notificationEnvironmentRuleCount(),missingEnvironment:notificationMissingEnvironment(),lastCheck:{...notificationSchedulerState}},filters:{managers:rule.managerFilters,statuses:rule.statuses},historySync:{dialogs:Math.min(40,allDialogs.length),mode:'recent-vk-history'}});
     } catch(err){return handleApiError(res,err)}
@@ -2756,14 +2937,11 @@ async function apiRouter(req, res, url) {
   if (pathname === '/api/notifications/queue-alert' && req.method === 'POST') {
     if(!requireCsrf(req,res,s))return;
     try {
-      const body=await readJson(req),store=await readNotificationStore(),row=upsertNotificationOutbox(store,{...body,status:'error',attempts:body.attempts||2},s);
-      const names=notificationActorNames(s);
-      const rules=(store.rules||[]).map(safeNotificationRule).filter(r=>r.queueAlerts&&r.telegramChatId&&names.some(n=>notificationRuleKey(n)===notificationRuleKey(r.manager)));
-      const who=String(body.peerName||'').trim()||`VK ${Number(body.peerId||0)}`;
-      const text=`🟠 Сообщение стоит в очереди\n\nКлиент: ${who}\nМенеджер: ${row.manager||names[0]||'Не определён'}\nПричина: ${String(body.error||'сервер временно недоступен').slice(0,250)}\nCRM продолжит повторять отправку.`;
-      for(const r of rules)await sendTelegramText(r.telegramChatId,text,{url:notificationDialogUrl(Number(body.peerId||0))});
-      row.alerted=true;await writeNotificationStore(store);
-      return sendJson(res,200,{ok:true,sent:rules.length});
+      // v28.19: the browser only reports the failed send. The server watchdog
+      // decides when it is truly "stuck" using /api/outbox/settings and then
+      // sends Telegram/browser notifications exactly once per configured rule.
+      const body=await readJson(req),store=await readNotificationStore(),row=upsertNotificationOutbox(store,{...body,status:'error',attempts:body.attempts||2},s);row.alerted=false;await writeNotificationStore(store);
+      return sendJson(res,200,{ok:true,queuedForWatchdog:true,stuckMinutes:readOutboxWatchSettings().stuckMinutes});
     } catch(err){return handleApiError(res,err)}
   }
 

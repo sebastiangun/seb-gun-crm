@@ -8,6 +8,11 @@ CREATE INDEX IF NOT EXISTS lead_journal_received ON lead_journal ((payload->>'re
 CREATE TABLE IF NOT EXISTS sla_settings (id text PRIMARY KEY, payload jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS notification_deliveries (id text PRIMARY KEY, payload jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS notification_state (id text PRIMARY KEY, payload jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
+
+CREATE TABLE IF NOT EXISTS notification_history (id text PRIMARY KEY, payload jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS notification_history_created ON notification_history ((payload->>'createdAt'));
+CREATE INDEX IF NOT EXISTS notification_history_recipient ON notification_history ((payload->>'recipientManager'));
+CREATE INDEX IF NOT EXISTS notification_history_type ON notification_history ((payload->>'eventType'));
 CREATE TABLE IF NOT EXISTS lead_events (
  id bigserial PRIMARY KEY, lead_id text NOT NULL REFERENCES lead_journal(id) ON DELETE RESTRICT,
  event_type text NOT NULL, payload jsonb NOT NULL, recorded_at timestamptz NOT NULL DEFAULT now()

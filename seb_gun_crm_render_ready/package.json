@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.16.0",
+  "version": "28.19.0",
   "private": true,
-  "description": "seb_gun CRM v28.15: safe client creation and complete lead journal history",
+  "description": "seb_gun CRM v28.19: one-time dialog bootstrap, admin SLA controls, server outbox watchdog and notification delivery audit",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -51,7 +51,10 @@
     "db:migrate": "node scripts/database.js migrate",
     "db:import": "node scripts/database.js import",
     "db:status": "node scripts/database.js status",
-    "test:database": "node tests/postgres-storage.js && node tests/create-safety.js && node tests/phrase-source.js"
+    "test:database": "node tests/postgres-storage.js && node tests/create-safety.js && node tests/phrase-source.js",
+    "test:v2817": "node tests/integration-v2817.js",
+    "test:v2818": "node tests/integration-v2818.js",
+    "test:v2819": "node tests/integration-v2819.js"
   },
   "engines": {
     "node": ">=18"

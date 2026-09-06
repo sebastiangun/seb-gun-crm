@@ -1,53 +1,92 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '../services/api'
-import { useOutboxStore } from '../stores/outbox'
+import { useMetaStore } from '../stores/meta'
 import { useSessionStore } from '../stores/session'
 import { useUiStore } from '../stores/ui'
 import { useBrowserNotificationsStore } from '../stores/browserNotifications'
-import { useMetaStore } from '../stores/meta'
+import SingleSelectSheet from '../components/SingleSelectSheet.vue'
 import MultiFilterSheet from '../components/MultiFilterSheet.vue'
+import NotificationRuleConfirmSheet from '../components/NotificationRuleConfirmSheet.vue'
+import NotificationChannelsSheet from '../components/NotificationChannelsSheet.vue'
+import { copyText } from '../utils/clipboard'
 
-const route=useRoute(),router=useRouter(),outbox=useOutboxStore(),session=useSessionStore(),ui=useUiStore()
-const browserNotifications=useBrowserNotificationsStore()
-const meta=useMetaStore()
-const loading=ref(false),checking=ref(false),rows=ref([]),serverQueue=ref([]),slaMinutes=ref(8),workStart=ref('10:00'),workEnd=ref('22:00'),background=ref(null),journalFilter=ref('all')
-const filterSheet=ref(''),managerFilter=ref([]),statusFilter=ref([]),dateFrom=ref(''),dateTo=ref('')
-const queue=computed(()=>{const map=new Map();for(const m of serverQueue.value)map.set(String(m.requestId||m.localId),m);for(const m of outbox.active)map.set(String(m.clientRequestId||m.localId),{...map.get(String(m.clientRequestId||m.localId)),...m});return [...map.values()].sort((a,b)=>Number(a.createdAt||0)-Number(b.createdAt||0))})
-const waitingCount=computed(()=>rows.value.filter(row=>row.status!=='answered').length)
-const answeredCount=computed(()=>rows.value.filter(row=>row.status==='answered').length)
-const managerOptions=computed(()=>meta.users.map(u=>({value:u.name||u.login,label:u.name||u.login})).filter(x=>x.value))
+const session=useSessionStore(),meta=useMetaStore(),ui=useUiStore(),router=useRouter(),browserNotifications=useBrowserNotificationsStore()
+const notification=ref(null),sla=ref({slaMinutes:8,violationMinutes:20}),outboxSettings=ref({stuckMinutes:3}),manager=ref(''),saving=ref(false),checking=ref(false),exporting=ref(false)
+const managerSheet=ref(false),filterSheet=ref(''),confirmSheet=ref(false),channelsSheet=ref(false),channelBusy=ref('')
+const days=['Пн','Вт','Ср','Чт','Пт','Сб','Вс']
+const form=reactive({warningAlerts:false,violationAlerts:false,outboxAlerts:false,dialogFilter:'unanswered',managerFilters:[],statuses:[],strictFilters:true,workDays:[1,2,3,4,5,6,7],workStart:'10:00',workEnd:'22:00',repeatMinutes:0,timezone:'Europe/Moscow'})
+const managers=computed(()=>session.isAdmin?meta.users.map(u=>u.name||u.login):[session.account?.name||session.loginName].filter(Boolean))
+const managerOptions=computed(()=>managers.value.map(m=>({value:m,label:m})).filter(x=>x.value))
+const leadManagerOptions=computed(()=>meta.users.map(u=>({value:u.name||u.login,label:u.name||u.login})).filter(x=>x.value))
 const statusOptions=computed(()=>meta.statuses.map(s=>({value:s.name||s,label:s.name||s})).filter(x=>x.value))
-const rowManagers=row=>[row.manager,row.currentManager,row.managerAtReceipt,...(row.managerHistory||[]).flatMap(x=>[x.manager,x.fromManager,x.toManager])].filter(Boolean)
-const rowStatuses=row=>[row.crmStatus,row.currentCrmStatus,row.statusAtReceipt,...(row.statusHistory||[]).flatMap(x=>[x.status,x.fromStatus,x.toStatus])].filter(Boolean)
-const visibleRows=computed(()=>rows.value.filter(row=>{
-  if(journalFilter.value==='violations'&&!(Number(row.workingWaitMinutes)>Number(row.violationMinutes||20)))return false
-  if(!['all','violations'].includes(journalFilter.value)&&(journalFilter.value==='answered'?(row.status!=='answered'):(row.status==='answered')))return false
-  if(managerFilter.value.length&&!managerFilter.value.some(v=>rowManagers(row).includes(v)))return false
-  if(statusFilter.value.length&&!statusFilter.value.some(v=>rowStatuses(row).includes(v)))return false
-  const day=new Date(Number(row.receivedAt||0)*1000).toLocaleDateString('en-CA',{timeZone:'Europe/Moscow'})
-  return(!dateFrom.value||day>=dateFrom.value)&&(!dateTo.value||day<=dateTo.value)
-}))
-function waitLabel(minutes){const m=Math.max(0,Number(minutes||0));if(m<60)return`${m} мин`;return`${Math.floor(m/60)} ч ${m%60} мин`}
-function statusLabel(m){return m.status==='error'?'Не отправлено':m.status==='sending'?'Отправляется':'Стоит в очереди'}
-function dateTime(seconds){return seconds?new Date(Number(seconds)*1000).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—'}
-async function load(){loading.value=true;try{await meta.load();const d=await api.notificationOverview();rows.value=d.dialogs||[];serverQueue.value=d.outbox||[];slaMinutes.value=Number(d.slaMinutes||8);workStart.value=d.workStart||'10:00';workEnd.value=d.workEnd||'22:00';background.value=d.background||null}catch(e){ui.toast(e.message,'error')}finally{loading.value=false}}
-async function checkNow(){checking.value=true;try{await load();if(browserNotifications.enabled)await browserNotifications.check(true);ui.toast(`Проверено: ждут ответа — ${waitingCount.value}`,'ok',5000)}catch(e){ui.toast(e.message,'error',6000)}finally{checking.value=false}}
+const botConfigured=computed(()=>!!notification.value?.botConfigured)
+const backgroundReady=computed(()=>!!notification.value?.internalSchedulerConfigured)
+const strictReady=computed(()=>form.managerFilters.length>0&&form.statuses.length>0)
+const ruleEnabled=computed(()=>form.warningAlerts||form.violationAlerts||form.outboxAlerts)
+const browserReady=computed(()=>browserNotifications.supported&&browserNotifications.enabled&&browserNotifications.permission==='granted')
+const deliveryReady=computed(()=>!!selectedRule()?.telegramConnected&&browserReady.value)
+const selectedDaysText=computed(()=>form.workDays.slice().sort((a,b)=>a-b).map(d=>days[d-1]).filter(Boolean).join(', ')||'не выбраны')
+const eventText=computed(()=>[form.warningAlerts?`предупреждение SLA (${sla.value.slaMinutes} мин)`:null,form.violationAlerts?`нарушение (${sla.value.violationMinutes} мин)`:null,form.outboxAlerts?`зависшее сообщение (${outboxSettings.value.stuckMinutes} мин)`:null].filter(Boolean).join(' + ')||'правило выключено')
+const filterDescription=computed(()=>`Уведомлять получателя «${manager.value||'—'}» только по менеджерам: ${form.managerFilters.join(', ')||'не выбраны'}; CRM-статусы: ${form.statuses.join(', ')||'не выбраны'}; ${selectedDaysText.value}, ${form.workStart}–${form.workEnd} МСК. События: ${eventText.value}. Порог ответа и нарушения берётся из раздела «Менеджеры», порог зависшего сообщения — из «Неотправленные».`)
+const confirmationRows=computed(()=>[
+  {label:'Получатель',value:manager.value||'не выбран'},{label:'События',value:eventText.value},{label:'Менеджеры лидов',value:form.managerFilters.join(', ')||'не выбраны'},{label:'CRM-статусы',value:form.statuses.join(', ')||'не выбраны'},{label:'Диалоги',value:form.dialogFilter==='unread'?'непрочитанные':'неотвеченные'},{label:'Рабочие дни',value:selectedDaysText.value},{label:'Период доставки',value:`${form.workStart}–${form.workEnd} МСК`},{label:'SLA / нарушение',value:`${sla.value.slaMinutes} / ${sla.value.violationMinutes} рабочих мин.`},{label:'Зависшее сообщение',value:`после ${outboxSettings.value.stuckMinutes} мин.`},{label:'Повтор',value:Number(form.repeatMinutes||0)>0?`через ${Number(form.repeatMinutes)} мин.`:'не повторять'},
+])
+
+function selectedRule(){return notification.value?.rules?.find(r=>r.manager===manager.value)}
+function syncRule(){const r=selectedRule();Object.assign(form,{warningAlerts:Boolean(r?.warningAlerts??r?.enabled),violationAlerts:Boolean(r?.violationAlerts??r?.enabled),outboxAlerts:Boolean(r?.outboxAlerts??r?.queueAlerts),dialogFilter:r?.dialogFilter||'unanswered',managerFilters:r?[...(r.managerFilters||[])]:(manager.value?[manager.value]:[]),statuses:[...(r?.statuses||[])],strictFilters:true,workDays:[...(r?.workDays||[1,2,3,4,5,6,7])],workStart:r?.workStart||'10:00',workEnd:r?.workEnd||'22:00',repeatMinutes:Number(r?.repeatMinutes||0),timezone:'Europe/Moscow'})}
+function chooseManager(value){manager.value=value;syncRule()}
+async function load(){await meta.load();const [n,s,o]=await Promise.all([api.notificationSettings(),api.slaSettings(),api.outboxSettings()]);notification.value=n;sla.value=s.settings||sla.value;outboxSettings.value=o.settings||outboxSettings.value;manager.value=manager.value||managers.value[0]||'';syncRule()}
+function validateRule(){if(!form.workDays.length){ui.toast('Выберите хотя бы один день доставки','error');return false}if(ruleEnabled.value&&!strictReady.value){ui.toast('Выберите менеджеров лидов и CRM-статусы. Пустой фильтр не означает «все».','error',8000);return false}if(!manager.value){ui.toast('Выберите получателя правила','error');return false}return true}
+function requestSave(){if(validateRule())confirmSheet.value=true}
+async function saveConfirmed(){if(!validateRule())return;saving.value=true;try{await api.saveNotificationSettings({manager:manager.value,...form,enabled:form.warningAlerts,queueAlerts:form.outboxAlerts,slaMinutes:Number(sla.value.slaMinutes||8),violationMinutes:Number(sla.value.violationMinutes||20),timezone:'Europe/Moscow'});confirmSheet.value=false;ui.toast('Настройка доставки сохранена','ok');await load();if(ruleEnabled.value&&(!selectedRule()?.telegramConnected||!browserReady.value))channelsSheet.value=true}catch(e){ui.toast(e.message,'error',8000)}finally{saving.value=false}}
+async function pair(){if(!botConfigured.value)return ui.toast('Сначала добавьте TELEGRAM_BOT_TOKEN в Render Environment','error',7000);channelBusy.value='telegram';try{const d=await api.pairTelegram(manager.value);window.open(d.pairUrl,'_blank','noopener');ui.toast(`Откройте @${d.botUsername||notification.value?.botUsername} и нажмите START, затем «Проверить подключение»`,'ok',9000)}catch(e){ui.toast(e.message,'error',7000)}finally{channelBusy.value=''}}
+async function refreshPair(){channelBusy.value='refresh';try{notification.value=await api.notificationSettings();ui.toast(selectedRule()?.telegramConnected?'Telegram подключён':'Подключение пока не найдено',selectedRule()?.telegramConnected?'ok':'error',6500)}catch(e){ui.toast(e.message,'error',7000)}finally{channelBusy.value=''}}
+async function test(){try{await api.testTelegram(manager.value);ui.toast('Тест отправлен в Telegram','ok')}catch(e){ui.toast(e.message,'error')}}
+async function enableBrowser(){channelBusy.value='browser';try{await browserNotifications.enable();await browserNotifications.test();ui.toast('Уведомления на этом устройстве включены','ok',7000)}catch(e){ui.toast(e.message,'error',8000)}finally{channelBusy.value=''}}
+async function testBrowser(){channelBusy.value='browser-test';try{await browserNotifications.test();ui.toast('Тестовое уведомление отправлено','ok')}catch(e){ui.toast(e.message,'error',7000)}finally{channelBusy.value=''}}
+async function checkNow(){checking.value=true;try{const d=await api.checkNotifications();ui.toast(`Проверено: ${d.checked||0}, событий: ${d.deliveryEvents||0}, Telegram: ${d.sent||0}`,'ok',6000);await load();browserNotifications.check()}catch(e){ui.toast(e.message,'error',8000)}finally{checking.value=false}}
+async function exportRules(){exporting.value=true;try{const d=await api.exportNotificationRules();if(!d.count)return ui.toast('Сначала подключите Telegram хотя бы одному получателю','error',7000);await copyText(d.value);ui.toast(`Скопировано правил: ${d.count}`,'ok',7000)}catch(e){ui.toast(e.message,'error',7000)}finally{exporting.value=false}}
 function checkTime(value){return value?new Date(Number(value)).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'}):'ещё не запускалась'}
-function openDialog(peerId){router.push({path:`/dialogs/${peerId}`,query:{from:route.fullPath}})}
-function managerPath(row){const values=[row.managerAtReceipt,...(row.managerHistory||[]).flatMap(x=>[x.fromManager,x.toManager]),row.currentManager||row.manager].filter(Boolean);return[...new Set(values)].join(' → ')||'Менеджер не назначен'}
-function resetJournalFilters(){managerFilter.value=[];statusFilter.value=[];dateFrom.value='';dateTo.value=''}
-async function dismiss(m){if(m.localId)outbox.remove(m.localId);else await api.outboxEvent({requestId:m.requestId,peerId:m.peerId,status:'removed'});await load()}
-onMounted(()=>{outbox.init(session.loginName);load()})
+onMounted(()=>load().catch(e=>ui.toast(e.message,'error',7000)))
 </script>
-<template><main class="page page-with-nav notifications-page">
-  <header class="page-header sticky-header"><div><small>VK · ЖУРНАЛ SLA</small><h1>Уведомления</h1></div><button class="header-action" :disabled="loading" @click="load">↻</button></header>
-  <section class="settings-card notification-summary"><div><b>Ждут ответа: {{waitingCount}}</b><span>SLA: {{slaMinutes}} рабочих минут · график {{workStart}}–{{workEnd}} МСК. Вне графика отсчёт начнётся с начала следующего рабочего дня.</span></div><button class="secondary-btn" :disabled="checking" @click="checkNow">{{checking?'Проверяю…':'Проверить сейчас'}}</button></section>
-  <section v-if="background" class="settings-card background-status"><div class="setting-row"><span>Фоновая проверка</span><b :class="background.ready?'connected-text':'muted-text'">{{background.ready?'Сервер настроен':'Не настроена'}}</b></div><div class="setting-row"><span>Внешний запуск</span><b :class="background.externalSchedulerConfigured?'connected-text':'muted-text'">{{background.externalSchedulerConfigured?'Ключ готов':'Нет ключа'}}</b></div><div class="setting-row"><span>Связь после перезапуска</span><b :class="background.environmentPairingConfigured?'connected-text':'muted-text'">{{background.environmentPairingConfigured?'Сохранена':'Нужно настроить'}}</b></div><p v-if="background.missingEnvironment?.length" class="settings-hint"><b>Не хватает в Render:</b> {{background.missingEnvironment.join(', ')}}</p><p v-if="!background.ready" class="settings-hint">Для работы при закрытом телефоне и компьютере заполните эти переменные в Render → Environment. Для внешнего запуска значение NOTIFICATION_CHECK_SECRET должно совпадать с секретом CRM_NOTIFICATION_SECRET в GitHub Actions.</p><p class="settings-hint">Последняя проверка: {{checkTime(background.lastCheck?.lastAt)}}<template v-if="background.lastCheck?.lastError"> · Ошибка: {{background.lastCheck.lastError}}</template></p></section>
-  <section class="notification-block"><h3>Зависшие исходящие <b>{{queue.length}}</b></h3><article v-for="m in queue" :key="m.requestId||m.localId" class="notification-row queue-row"><button @click="openDialog(m.peerId)"><strong>{{m.peerName||`VK ${m.peerId}`}}</strong><span>{{m.text||m.snippet||'Сообщение с вложением'}}</span><small :class="`queue-${m.status}`">{{statusLabel(m)}}</small></button><div><button v-if="m.localId&&m.status!=='sending'" @click="outbox.retry(m.localId)">Повторить</button><button v-if="m.status!=='sending'" class="danger-link" @click="dismiss(m)">Убрать</button></div></article><div v-if="!queue.length" class="empty-mini">Зависших сообщений нет</div></section>
-  <div v-if="loading" class="list-status"><span class="tiny-spinner"></span> Проверяю диалоги…</div>
-  <section class="notification-block lead-journal"><h3>Журнал лидов <b>{{rows.length}}</b></h3><div class="segmented journal-tabs"><button :class="{active:journalFilter==='all'}" @click="journalFilter='all'">Все {{rows.length}}</button><button :class="{active:journalFilter==='waiting'}" @click="journalFilter='waiting'">Без ответа {{waitingCount}}</button><button :class="{active:journalFilter==='answered'}" @click="journalFilter='answered'">Отвечено {{answeredCount}}</button><button :class="{active:journalFilter==='violations'}" @click="journalFilter='violations'">Нарушения</button></div><div class="journal-filters"><button class="select-sheet-trigger" @click="filterSheet='manager'"><span>Менеджеры</span><b>{{managerFilter.length||'Все'}} ▾</b></button><button class="select-sheet-trigger" @click="filterSheet='status'"><span>Статусы</span><b>{{statusFilter.length||'Все'}} ▾</b></button><label>Дата от<input v-model="dateFrom" type="date"></label><label>Дата до<input v-model="dateTo" type="date"></label><button v-if="managerFilter.length||statusFilter.length||dateFrom||dateTo" class="danger-link" @click="resetJournalFilters">Сбросить фильтры</button></div><article v-for="d in visibleRows" :key="d.id" class="notification-row journal-row"><button @click="openDialog(d.peerId)"><strong>{{d.name}}</strong><span><b>Клиент:</b> {{d.snippet||'Входящее сообщение'}}</span><span v-if="d.status==='answered'&&d.responseText"><b>{{d.responseAuthor||'Менеджер'}}:</b> {{d.responseText}}</span><small>Менеджеры: {{managerPath(d)}}<template v-if="d.crmStatus"> · Статус: {{d.crmStatus}}</template></small><em>Написал: {{dateTime(d.receivedAt)}}</em><em v-if="d.status==='answered'">Ответили: {{dateTime(d.answeredAt)}}</em><em v-if="d.outsideHoursAtReceipt">Вне рабочего времени · отсчёт с {{dateTime(d.responseStartAt)}}</em><em>Срок ответа: {{dateTime(d.dueAt)}}</em></button><div class="journal-state"><b :class="d.status==='answered'?'answered-badge':'waiting-badge'">{{d.status==='answered'?'Отвечено':'Без ответа'}}</b><time v-if="d.status==='answered'">{{waitLabel(d.workingWaitMinutes)}} до ответа</time><time v-else>{{waitLabel(d.workingWaitMinutes)}} рабочего времени</time></div></article><div v-if="!loading&&!visibleRows.length" class="empty-state"><b>Записей нет</b><span>Измените фильтры или дождитесь нового обращения.</span></div></section>
-  <MultiFilterSheet :open="filterSheet==='manager'" title="Менеджеры лидов" :options="managerOptions" v-model="managerFilter" @apply="filterSheet=''" @close="filterSheet=''"/>
-  <MultiFilterSheet :open="filterSheet==='status'" title="CRM-статусы" :options="statusOptions" v-model="statusFilter" @apply="filterSheet=''" @close="filterSheet=''"/>
-</main></template>
+
+<template>
+  <main class="page page-with-nav notifications-page">
+    <header class="page-header sticky-header"><div><small>НАСТРОЙКА ДОСТАВКИ · МСК</small><h1>Настройка уведомлений</h1></div><button class="header-action" @click="load">↻</button></header>
+
+    <section class="settings-card control-links-card"><button @click="router.push('/notification-history')"><span>🧾</span><div><b>История уведомлений</b><small>Отдельный журнал: кому, когда, Telegram/браузер/оба/не доставлено</small></div><em>›</em></button></section>
+
+    <section class="settings-card notification-channel-banner" :class="{ready:deliveryReady}"><div class="channel-banner-copy"><small>КАНАЛЫ ДОСТАВКИ</small><h3>{{deliveryReady?'Telegram и это устройство подключены':'Настройте каналы'}}</h3><p>Каналы подключаются отдельно от фильтра и отдельно от журналов SLA/неотправленных.</p></div><div class="channel-banner-statuses"><span :class="selectedRule()?.telegramConnected?'ready':'warn'">✈️ Telegram: {{selectedRule()?.telegramConnected?'да':'нет'}}</span><span :class="browserReady?'ready':'warn'">🔔 Устройство: {{browserReady?'да':'нет'}}</span></div><button class="primary-btn" @click="channelsSheet=true">{{deliveryReady?'Проверить каналы':'Подключить каналы'}}</button></section>
+
+    <section class="settings-card notification-settings">
+      <div class="section-title-row"><div><h3>Кому и по какому фильтру отправлять</h3><p>Здесь нет статистики нарушений и очереди сообщений — только маршрутизация уведомлений.</p></div><b class="storage-badge">{{notification?.storage==='postgresql'?'PostgreSQL':'JSON'}}</b></div>
+      <div v-if="notification&&!botConfigured" class="telegram-setup-warning"><b>Telegram-бот не настроен</b><span>Добавьте TELEGRAM_BOT_TOKEN в Render → Environment.</span></div>
+      <div class="telegram-readiness"><div class="setting-row"><span>Фоновая проверка</span><b :class="backgroundReady?'connected-text':'muted-text'">{{backgroundReady?'Готова':'Не готова'}}</b></div><div class="setting-row"><span>Последняя проверка</span><b>{{checkTime(notification?.lastCheck?.lastAt)}}</b></div></div>
+
+      <label>Получатель<button type="button" class="select-sheet-trigger" @click="managerSheet=true"><span>{{manager||'Выберите получателя'}}</span><b>▾</b></button></label>
+      <label class="toggle-row"><input v-model="form.warningAlerts" type="checkbox"><span>Предупреждение о времени ответа ({{sla.slaMinutes}} мин)</span></label>
+      <label class="toggle-row"><input v-model="form.violationAlerts" type="checkbox"><span>Уведомление о нарушении регламента ({{sla.violationMinutes}} мин)</span></label>
+      <label class="toggle-row"><input v-model="form.outboxAlerts" type="checkbox"><span>Уведомление о зависшем исходящем ({{outboxSettings.stuckMinutes}} мин)</span></label>
+      <div class="source-settings-box"><b>Пороги настраиваются в других разделах</b><span>Время ответа/нарушение → «Менеджеры». Зависшее сообщение → «Неотправленные». Здесь выбираются только получатель, фильтр и период доставки.</span></div>
+
+      <div class="strict-filter-box" :class="{ready:strictReady}"><b>{{strictReady?'Строгий фильтр заполнен':'Фильтр не заполнен'}}</b><span>{{strictReady?`Менеджеров: ${form.managerFilters.length} · статусов: ${form.statuses.length}`:'Выберите хотя бы одного менеджера лида и один CRM-статус.'}}</span></div>
+      <div class="filter-buttons"><button type="button" @click="filterSheet='manager'"><span>Менеджеры лидов</span><b>{{form.managerFilters.length||'Не выбраны'}}</b><span>▾</span></button><button type="button" @click="filterSheet='status'"><span>CRM-статусы</span><b>{{form.statuses.length||'Не выбраны'}}</b><span>▾</span></button></div>
+      <div class="segmented two"><button :class="{active:form.dialogFilter==='unanswered'}" @click="form.dialogFilter='unanswered'">Неотвеченные</button><button :class="{active:form.dialogFilter==='unread'}" @click="form.dialogFilter='unread'">Непрочитанные</button></div>
+      <div class="weekday-grid"><label v-for="(day,i) in days" :key="day" :class="{active:form.workDays.includes(i+1)}"><input v-model="form.workDays" type="checkbox" :value="i+1"><span>{{day}}</span></label></div>
+      <div class="form-grid"><label>Доставка от, МСК<input v-model="form.workStart" type="time"></label><label>Доставка до, МСК<input v-model="form.workEnd" type="time"></label></div>
+      <label>Повторить уведомление через, минут<input v-model.number="form.repeatMinutes" type="number" min="0" max="1440"><small>0 — одно уведомление каждого типа</small></label>
+      <button class="primary-btn" :disabled="saving||!manager" @click="requestSave">{{saving?'Сохраняю…':'Проверить и сохранить фильтр'}}</button>
+      <div class="button-row"><button class="secondary-btn" :disabled="!manager" @click="channelsSheet=true">Подключение каналов</button><button class="secondary-btn" :disabled="!manager||!selectedRule()?.telegramConnected" @click="test">Тест Telegram</button></div><button class="secondary-btn" :disabled="checking" @click="checkNow">{{checking?'Проверяю…':'Проверить сейчас'}}</button>
+    </section>
+
+    <section v-if="session.isAdmin" class="settings-card"><h3>Резерв правил для Render</h3><button class="secondary-btn" :disabled="exporting" @click="exportRules">{{exporting?'Подготовка…':'Скопировать NOTIFICATION_RULES_JSON'}}</button></section>
+
+    <SingleSelectSheet :open="managerSheet" title="Получатель уведомлений" :options="managerOptions" :model-value="manager" empty-label="Выберите получателя" @update:model-value="chooseManager" @close="managerSheet=false"/>
+    <MultiFilterSheet :open="filterSheet==='manager'" title="Каких менеджеров контролировать" :options="leadManagerOptions" v-model="form.managerFilters" @apply="filterSheet=''" @close="filterSheet=''"/>
+    <MultiFilterSheet :open="filterSheet==='status'" title="Какие CRM-статусы контролировать" :options="statusOptions" v-model="form.statuses" @apply="filterSheet=''" @close="filterSheet=''"/>
+    <NotificationRuleConfirmSheet :open="confirmSheet" :rows="confirmationRows" :saving="saving" :enabled="ruleEnabled" :description="filterDescription" @close="confirmSheet=false" @confirm="saveConfirmed"/>
+    <NotificationChannelsSheet :open="channelsSheet" :manager="manager" :bot-configured="botConfigured" :bot-username="notification?.botUsername||''" :telegram-connected="!!selectedRule()?.telegramConnected" :browser-supported="browserNotifications.supported" :browser-enabled="browserNotifications.enabled" :browser-permission="browserNotifications.permission" :busy="channelBusy" @close="channelsSheet=false" @pair="pair" @refresh="refreshPair" @enable-browser="enableBrowser" @test-browser="testBrowser"/>
+  </main>
+</template>

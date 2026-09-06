@@ -4,7 +4,7 @@ const path = require('path');
 const { isDeepStrictEqual: equal } = require('util');
 const { AsyncLocalStorage } = require('async_hooks');
 const clone = x => x === undefined ? undefined : JSON.parse(JSON.stringify(x));
-const sections = { journal:'lead_journal', rules:'sla_settings', outbox:'notification_deliveries', pairCodes:'notification_state', notified:'notification_state', deletedJournal:'notification_state' };
+const sections = { journal:'lead_journal', rules:'sla_settings', outbox:'notification_deliveries', pairCodes:'notification_state', notified:'notification_state', deletedJournal:'notification_state', deliveryLog:'notification_history' };
 const object = x => x && typeof x === 'object' && !Array.isArray(x);
 function conflict() { return Object.assign(new Error('Данные изменились в другом запросе. Обновите раздел и повторите действие.'), {status:409,code:'STORAGE_CONFLICT'}); }
 // Three-way merge: disjoint changes survive concurrent writes; conflicting scalar
@@ -71,7 +71,7 @@ class Storage {
     if(!this.enabled){const file=path.join(this.root,'data/notification-settings.json');if(!fs.existsSync(file))return defaults;return JSON.parse(await fs.promises.readFile(file,'utf8'));}
     const store=clone(defaults);
     // One consistent snapshot across tables, even while another request commits.
-    await this.transaction(async c=>{await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');for(const table of new Set(Object.values(sections))){const {rows}=await c.query(`SELECT id,payload FROM ${table}`);for(const {id,payload}of rows){if(table==='notification_state'){const pos=id.indexOf(':');store[id.slice(0,pos)][id.slice(pos+1)]=payload;}else if(table==='sla_settings')store.rules.push(payload);else store[table==='lead_journal'?'journal':'outbox'][id]=payload;}}});
+    await this.transaction(async c=>{await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');for(const table of new Set(Object.values(sections))){const {rows}=await c.query(`SELECT id,payload FROM ${table}`);for(const {id,payload}of rows){if(table==='notification_state'){const pos=id.indexOf(':');store[id.slice(0,pos)][id.slice(pos+1)]=payload;}else if(table==='sla_settings')store.rules.push(payload);else if(table==='notification_history')store.deliveryLog[id]=payload;else store[table==='lead_journal'?'journal':'outbox'][id]=payload;}}});
     for(const id of Object.keys(store.deletedJournal||{}))delete store.journal[id];
     this.bases.set(store,this.flatten(store));return store;
   }
@@ -95,10 +95,10 @@ class Storage {
   async projectJournal(c,id,row){
     for(const entry of row.managerHistory||[]){const hash=require('crypto').createHash('sha256').update(id+JSON.stringify(entry)).digest('hex');await c.query('INSERT INTO lead_assignments(id,lead_id,from_manager,to_manager,changed_at,payload) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING',[hash,id,entry.fromManager||null,entry.toManager||entry.manager||'',entry.fromAt?new Date(Number(entry.fromAt)*1000):null,JSON.stringify(entry)]);}
     const sla=require('./working-sla');const threshold=Number(row.violationMinutes||20),end=row.answeredAt?Number(row.answeredAt)*1000:Date.now();
-    if(row.receivedAt&&sla.workingMillisecondsBetween(Number(row.receivedAt)*1000,end,row)>threshold*60000){
+    if(row.receivedAt&&sla.workingMillisecondsBetween(Number(row.receivedAt)*1000,end,row)>=threshold*60000){
       const deadline=sla.workingDeadline(Number(row.receivedAt)*1000,row,threshold);let manager=row.managerAtReceipt||row.manager||'';
       for(const entry of [...(row.managerHistory||[])].sort((a,b)=>Number(a.fromAt)-Number(b.fromAt)))if(Number(entry.fromAt)*1000<=deadline)manager=entry.toManager||entry.manager||manager;
-      await c.query('INSERT INTO sla_violations(lead_id,manager_at_detection,threshold_minutes,payload) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[id,manager,threshold,JSON.stringify({violationAt:deadline,answeredAt:row.answeredAt||null,attribution:'observed_manager_history'})]);
+      await c.query('INSERT INTO sla_violations(lead_id,manager_at_detection,threshold_minutes,payload) VALUES($1,$2,$3,$4) ON CONFLICT(lead_id) DO UPDATE SET threshold_minutes=excluded.threshold_minutes,payload=excluded.payload',[id,manager,threshold,JSON.stringify({violationAt:deadline,answeredAt:row.answeredAt||null,attribution:'observed_manager_history'})]);
     }
   }
   async importDirectory(dir){
