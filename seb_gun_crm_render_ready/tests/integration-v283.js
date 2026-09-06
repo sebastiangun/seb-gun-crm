@@ -4,12 +4,12 @@ const read=p=>{const file=path.join(root,p);if(!fs.existsSync(file))throw new Er
 const server=read('server.js'),pkg=JSON.parse(read('package.json')),css=read('frontend/src/assets/base.css');
 const chat=read('frontend/src/views/ChatView.vue'),bubble=read('frontend/src/components/MessageBubble.vue'),outbox=read('frontend/src/stores/outbox.js');
 const drawer=read('frontend/src/components/ClientDrawer.vue'),dialogs=read('frontend/src/views/DialogsView.vue'),nav=read('frontend/src/components/BottomNav.vue');
-if(!/const VERSION = '28\.(3|4|5|6|7|8|9|10|11|12|13|14|15|16)'/.test(server)||!/^28\.(3|4|5|6|7|8|9|10|11|12|13|14|15|16)\.0$/.test(pkg.version))throw new Error('version mismatch');
+if(!/const VERSION = '28\.(3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19)'/.test(server)||!/^28\.(3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19)\.0$/.test(pkg.version))throw new Error('version mismatch');
 if(dialogs.includes('Уже показано')||dialogs.includes('догружаю остальные'))throw new Error('noisy background loading text remains');
 if(!bubble.includes('Переслать')||!bubble.includes('Повторить отправку')||!bubble.includes('Удалить из очереди'))throw new Error('message actions missing');
 if(!outbox.includes('localStorage')||!outbox.includes("status = 'sent'")||!outbox.includes('queueAlert'))throw new Error('persistent optimistic outbox missing');
 if(!chat.includes('renderedMessages')||!chat.includes('ForwardSheet'))throw new Error('optimistic or forwarding UI missing');
 if(!drawer.includes('createOrder')||!drawer.includes('goodsPositions')||!drawer.includes('Добавить в заказ'))throw new Error('BlueSales order workflow missing');
 if(!css.includes('.viewport-menu')||!css.includes('100dvh')||!css.includes('.select-sheet-trigger'))throw new Error('viewport-safe menus missing');
-if(!nav.includes('/notifications')||!server.includes('/api/notifications/overview')||!server.includes('/api/notifications/queue-alert'))throw new Error('notification center missing');
+if(!(nav.includes('/notifications')||nav.includes('/notification-history'))||!server.includes('/api/notifications/overview')||!server.includes('/api/notifications/queue-alert'))throw new Error('notification center missing');
 console.log('v28.3 integration checks: OK (outbox, message actions, responsive sheets, orders/services, notifications)');

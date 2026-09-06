@@ -1,0 +1,12 @@
+Render build hotfix for v28.19
+
+Problem:
+The legacy regression test tests/integration-v283.js accepted versions only through 28.16.
+If Render still had the old service Build Command with `npm run test:v283`, v28.19 failed with `Error: version mismatch` even though Vite build and runtime syntax checks passed.
+
+Fix:
+- integration-v283.js now accepts 28.17, 28.18 and 28.19 as compatible later versions.
+- render.yaml already uses the correct v28.19 gate: `npm run test:v2819`.
+
+Recommended Render Build Command:
+cd seb_gun_crm_render_ready && npm ci --include=dev && npm run build && npm run check:runtime && npm run test:v2819 && npm run test:database
