@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.19.0",
+  "version": "28.20.0",
   "private": true,
-  "description": "seb_gun CRM v28.19: one-time dialog bootstrap, admin SLA controls, server outbox watchdog and notification delivery audit",
+  "description": "seb_gun CRM v28.20: observable SLA progress, fast DB reports, historical notification backfill and control-area UX",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -54,7 +54,9 @@
     "test:database": "node tests/postgres-storage.js && node tests/create-safety.js && node tests/phrase-source.js",
     "test:v2817": "node tests/integration-v2817.js",
     "test:v2818": "node tests/integration-v2818.js",
-    "test:v2819": "node tests/integration-v2819.js"
+    "test:v2819": "node tests/integration-v2819.js && node tests/integration-v2820.js",
+    "test:v2820": "node tests/integration-v2820.js",
+    "test:release": "node tests/integration-v2819.js && node tests/integration-v2820.js && npm run test:database"
   },
   "engines": {
     "node": ">=18"

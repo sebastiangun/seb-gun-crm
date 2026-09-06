@@ -3,8 +3,8 @@ const fs=require('fs'),path=require('path');
 const root=path.join(__dirname,'..'),read=p=>fs.readFileSync(path.join(root,p),'utf8'),pkg=require('../package.json');
 const server=read('server.js'),storage=read('lib/postgres-storage.js'),sql=read('db/001-storage.sql'),app=read('frontend/src/App.vue'),api=read('frontend/src/services/api.js'),browser=read('frontend/src/stores/browserNotifications.js'),notifications=read('frontend/src/views/NotificationsView.vue'),history=read('frontend/src/views/NotificationHistoryView.vue'),outbox=read('frontend/src/views/OutboxView.vue'),sla=read('frontend/src/views/ManagersView.vue'),admin=read('frontend/src/views/AdminView.vue'),more=read('frontend/src/views/MoreView.vue'),bottom=read('frontend/src/components/BottomNav.vue'),router=read('frontend/src/router/index.js'),render=read('render.yaml');
 function must(v,m){if(!v)throw new Error(m)}
-must(pkg.version==='28.19.0'&&server.includes("const VERSION = '28.19'"),'version mismatch');
-must(server.includes('runDialogBootstrapOnce')&&server.includes("maxPages:50,filter:'all'")&&server.includes("status:'completed'"),'one-time dialog bootstrap missing');
+must(['28.19.0','28.20.0'].includes(pkg.version)&&/const VERSION = '28\.(19|20)'/.test(server),'version mismatch');
+must(server.includes('runDialogBootstrapOnce')&&server.includes("maxPages:0,filter:'all'")&&server.includes("status:'completed'"),'one-time dialog bootstrap missing');
 must(server.includes('const resumeAt=')&&server.includes('const startAt=Math.min(resumeAt,dialogs.length)'),'dialog bootstrap does not resume from durable progress');
 must(app.includes('api.bootstrapDialogsOnce()'),'bootstrap is not started after authentication');
 must(server.includes("'/api/bootstrap/dialogs-once'")&&api.includes('bootstrapDialogsOnce'),'bootstrap endpoint wiring missing');

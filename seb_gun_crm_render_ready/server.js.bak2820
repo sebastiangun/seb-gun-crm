@@ -61,7 +61,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.20';
+const VERSION = '28.19';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -2437,80 +2437,6 @@ async function deliverNotificationEvent(store,rule,event,{peerId=0,clientName=''
   if(rule.telegramChatId){try{await sendTelegramText(rule.telegramChatId,text,{url:notificationDialogUrl(peerId)});row=notificationDeliveryChannel(store,id,'telegram','sent')||row}catch(err){row=notificationDeliveryChannel(store,id,'telegram','failed',err?.message||err)||row}}
   return row
 }
-
-function notificationHistoryBackfillPath(){return path.join(ROOT,'data','notification-history-backfill-v2820.json')}
-function readNotificationHistoryBackfillState(){try{const x=readStoredJson(notificationHistoryBackfillPath());return x&&typeof x==='object'?x:{status:'pending',version:1}}catch{return {status:'pending',version:1}}}
-async function writeNotificationHistoryBackfillState(value){await storage.writeDocument(notificationHistoryBackfillPath(),{version:1,...value,updatedAt:Date.now()})}
-function historicalDeliveryRow(store,row,eventType,eventAt,settings){
-  if(!eventAt)return null;
-  const id=`historical-${crypto.createHash('sha1').update(`${eventType}|${row.id}`).digest('hex').slice(0,28)}`;
-  if(store.deliveryLog?.[id])return null;
-  const leadManager=String(row.responsibleManager||row.currentManager||row.manager||'');
-  const crmStatus=String(row.currentCrmStatus||row.crmStatus||'');
-  const created=Number(eventAt)*1000;
-  const item=notificationDeliveryUpsert(store,{
-    id,eventType,ruleId:'historical-backfill-v2820',recipientManager:'',peerId:row.peerId,
-    clientName:row.name||`VK ${row.peerId}`,leadManager,crmStatus,snippet:row.snippet||'',
-    subjectKey:`historical:${row.id}:${eventType}`,createdAt:created,
-    filterSnapshot:{managerFilters:[],statuses:[],workDays:[...(row.workDays||settings.workDays||[])],workStart:row.workStart||settings.workStart,workEnd:row.workEnd||settings.workEnd,timezone:row.timezone||settings.timezone,dialogFilter:'historical',slaMinutes:Number(row.slaMinutes||settings.slaMinutes),violationMinutes:Number(row.violationMinutes||settings.violationMinutes)},
-    channels:{
-      telegram:{status:'not_available',requested:false,at:0,error:'До v28.19 журнал фактической доставки не существовал'},
-      browser:{status:'not_available',requested:false,at:0,error:'До v28.19 журнал фактической доставки не существовал'}
-    }
-  });
-  item.historical=true;
-  item.source='historical_backfill_v2820';
-  item.deliveryKnown=false;
-  item.sourceLeadId=row.id;
-  item.overallStatus='historical';
-  item.explanation='Событие восстановлено из истории SLA. Нельзя достоверно утверждать, отправлялось ли тогда Telegram/браузерное уведомление.';
-  return item;
-}
-async function ensureHistoricalNotificationBackfill(store,session){
-  const prior=readNotificationHistoryBackfillState();
-  if(prior.status==='completed')return prior;
-  const bootstrap=readDialogBootstrapState();
-  if(bootstrap.status!=='completed')return {...prior,status:'waiting_for_dialog_bootstrap',bootstrap};
-  const settings={...slaReportSettingsFor(session),managerFilters:[],statuses:[]},now=Date.now();
-  // Stable oldest-first order makes a numeric cursor safe enough for this one-time
-  // post-bootstrap pass. The history page processes a small batch per request so
-  // Render never has to insert thousands of reconstructed rows in one HTTP call.
-  const rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,now)).sort((a,b)=>Number(a.receivedAt||0)-Number(b.receivedAt||0)||String(a.id).localeCompare(String(b.id)));
-  const batchSize=50,cursor=Math.min(Math.max(0,Number(prior.cursor||0)),rows.length),batch=rows.slice(cursor,cursor+batchSize);
-  let warnings=Number(prior.created?.warnings||0),violations=Number(prior.created?.violations||0),outbox=Number(prior.created?.outbox||0);
-  for(const row of batch){
-    if(row.notified&&row.notificationAt&&historicalDeliveryRow(store,row,'sla_warning',row.notificationAt,settings))warnings++;
-    if(row.violated&&row.violationAt&&historicalDeliveryRow(store,row,'sla_violation',row.violationAt,settings))violations++;
-  }
-  let nextCursor=cursor+batch.length,status=nextCursor>=rows.length?'completed':'running';
-  if(status==='completed'&&!prior.outboxDone){
-    // Existing outbox rows can explain old stuck-message incidents. We only
-    // reconstruct rows actually observed by the server; no delivery is invented.
-    for(const row of Object.values(store.outbox||{})){
-      if(!row?.createdAt||!['queued','error'].includes(String(row.status||'')))continue;
-      const eventAt=Math.max(Number(row.createdAt||0),Number(row.alertedAt||0)||Number(row.createdAt||0));
-      const fake={id:`outbox:${row.requestId}`,peerId:row.peerId,name:row.peerName||`VK ${row.peerId}`,responsibleManager:row.manager||'',currentManager:row.manager||'',currentCrmStatus:'',crmStatus:'',snippet:row.snippet||'',workDays:settings.workDays,workStart:settings.workStart,workEnd:settings.workEnd,timezone:settings.timezone,slaMinutes:settings.slaMinutes,violationMinutes:settings.violationMinutes};
-      if(historicalDeliveryRow(store,fake,'outbox_stuck',Math.floor(eventAt/1000),settings))outbox++;
-    }
-  }
-  await writeNotificationStore(store);
-  const state={status,cursor:nextCursor,sourceRows:rows.length,processedRows:nextCursor,progress:rows.length?Math.min(100,Math.round(nextCursor/rows.length*100)):100,created:{warnings,violations,outbox,total:warnings+violations+outbox},bootstrapStatus:bootstrap.status,outboxDone:status==='completed'};
-  if(status==='completed')state.completedAt=Date.now();
-  await writeNotificationHistoryBackfillState(state);
-  return state;
-}
-function notificationHistorySummary(rows=[]){
-  const out={total:rows.length,actual:0,historical:0,sent:0,partial:0,pending:0,failed:0};
-  for(const row of rows){
-    if(row.historical||row.overallStatus==='historical')out.historical++;else out.actual++;
-    if(row.overallStatus==='sent')out.sent++;
-    else if(row.overallStatus==='partial')out.partial++;
-    else if(row.overallStatus==='pending')out.pending++;
-    else if(!row.historical)out.failed++;
-  }
-  return out;
-}
-
 function notificationOutboxKey(value=''){return String(value||'').replace(/[^A-Za-z0-9:_-]/g,'').slice(0,160)}
 function upsertNotificationOutbox(store,input={},session){
   store.outbox=store.outbox&&typeof store.outbox==='object'?store.outbox:{};
@@ -2654,10 +2580,7 @@ async function loadUnansweredDialogsForNotifications(session,{maxPages=5}={}){
   return loadDialogsForNotifications(session,{maxPages,filter:'unanswered'});
 }
 async function loadDialogsForNotifications(session,{maxPages=5,filter='unanswered'}={}){
-  // maxPages=0 means: load every page VK reports, with a generous hard safety cap.
-  // The one-time bootstrap uses this mode so a round 10,000-dialog ceiling cannot silently hide older conversations.
-  const pageLimit=Number(maxPages)>0?Math.max(1,Number(maxPages)):500;
-  const all=[];let offset=0;for(let page=0;page<pageLimit;page++){
+  const all=[];let offset=0;for(let page=0;page<maxPages;page++){
     const params={count:200,offset,filter:['all','unanswered','unread'].includes(filter)?filter:'unanswered',extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;
     const raw=await vkCall(session.vkToken,'messages.getConversations',params),maps=vkIdentityMaps(raw||{}),rows=(raw?.items||[]).map(x=>normalizeVkDialog(x,maps));all.push(...rows);offset+=rows.length;if(!rows.length||offset>=Number(raw?.count||0))break
   }
@@ -2711,12 +2634,7 @@ async function runNotificationCheck({session=null,manual=false}={}){
       }
     }
   }
-  const cutoff=nowMs-30*24*60*60*1000;for(const[k,v]of Object.entries(store.notified||{}))if(Number(v?.sentAt||0)<cutoff)delete store.notified[k];for(const[k,v]of Object.entries(store.deliveryLog||{})){
-    // v28.20: historical reconstruction is audit evidence and is never auto-pruned.
-    // Real delivery attempts are retained for a year so the separate audit screen stays useful.
-    if(v?.historical)continue;
-    if(Number(v?.createdAt||0)<nowMs-365*24*60*60*1000)delete store.deliveryLog[k];
-  }
+  const cutoff=nowMs-30*24*60*60*1000;for(const[k,v]of Object.entries(store.notified||{}))if(Number(v?.sentAt||0)<cutoff)delete store.notified[k];for(const[k,v]of Object.entries(store.deliveryLog||{}))if(Number(v?.createdAt||0)<nowMs-90*24*60*60*1000)delete store.deliveryLog[k];
   await writeNotificationStore(store);return {ok:true,checked,sent,deliveryEvents,manual,outboxStuckMinutes:outboxSettings.stuckMinutes}
 }
 let notificationCheckRunning=false;
@@ -2769,33 +2687,16 @@ function slaReportRow(row,settings,nowMs=Date.now()){
   const responsibilityAt=violated&&violationAtMs?Math.floor(violationAtMs/1000):(answeredAt||Math.floor(nowMs/1000)),responsibleManager=managerAtEpoch(row,responsibilityAt);
   return {...row,workingResponseMinutes:worked,violated,notified,responsibleManager,notificationAt:notificationAtMs?Math.floor(notificationAtMs/1000):0,violationAt:violationAtMs?Math.floor(violationAtMs/1000):0,onTime:Boolean(answeredAt)&&!violated,waiting:!answeredAt};
 }
-let slaRecentSyncRunning=false;
-function scheduleRecentSlaSync(session){
-  const bootstrap=readDialogBootstrapState();
-  if(slaRecentSyncRunning||bootstrap.status==='running'||bootstrap.status==='starting')return false;
-  slaRecentSyncRunning=true;
-  setTimeout(()=>storage.run(async()=>{
-    try{
-      const settings=slaReportSettingsFor(session),store=await readNotificationStore();
-      const dialogs=await loadDialogsForNotifications(session,{maxPages:1,filter:'all'});
-      await syncRecentLeadJournal(session,store,dialogs,{...settings,enabled:false,dialogFilter:'unanswered',manager:'',queueAlerts:false},{limit:20});
-      await resolveNotificationJournalReplies(store,session,new Set(),10);
-      await writeNotificationStore(store);
-    }catch(err){console.warn('[sla background sync]',err?.message||err)}
-    finally{slaRecentSyncRunning=false}
-  }),80);
-  return true;
-}
 async function buildSlaReport(session){
   const settings=slaReportSettingsFor(session),store=await readNotificationStore();
-  // v28.20: the report endpoint is intentionally DB-only and fast.
-  // VK history refresh is scheduled separately so a slow VK/BlueSales request
-  // cannot reset the browser connection while the user opens the SLA screen.
+  // Refresh recent history so answered/on-time rows remain in the report instead of vanishing.
+  try{const dialogs=await loadDialogsForNotifications(session,{maxPages:2,filter:'all'});await syncRecentLeadJournal(session,store,dialogs,{...settings,enabled:false,dialogFilter:'unanswered',manager:'',queueAlerts:false},{limit:60});await resolveNotificationJournalReplies(store,session,new Set(),30)}catch(err){console.warn('[sla report sync]',err?.message||err)}
   const nowMs=Date.now(),rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,nowMs)).filter(row=>slaReportStatusMatches(row,settings)&&slaReportManagerMatches(row.responsibleManager,settings));
   const map=new Map();for(const row of rows){const key=row.responsibleManager||'Не назначен',stat=map.get(key)||{manager:key,total:0,answered:0,onTime:0,violations:0,waiting:0,responseTotal:0,responseCount:0,maxResponseMinutes:0};stat.total++;if(row.waiting)stat.waiting++;else{stat.answered++;stat.responseTotal+=row.workingResponseMinutes;stat.responseCount++;stat.maxResponseMinutes=Math.max(stat.maxResponseMinutes,row.workingResponseMinutes);if(row.onTime)stat.onTime++}if(row.violated)stat.violations++;map.set(key,stat)}
   const managers=[...map.values()].map(x=>({...x,averageResponseMinutes:x.responseCount?Math.round(x.responseTotal/x.responseCount):0,responseTotal:undefined,responseCount:undefined})).sort((a,b)=>b.violations-a.violations||b.total-a.total||a.manager.localeCompare(b.manager,'ru'));
   const totals=managers.reduce((a,x)=>({total:a.total+x.total,answered:a.answered+x.answered,onTime:a.onTime+x.onTime,violations:a.violations+x.violations,waiting:a.waiting+x.waiting}),{total:0,answered:0,onTime:0,violations:0,waiting:0});
-  return {settings,rows:rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0)),managers,totals,checkedAt:Date.now(),bootstrap:readDialogBootstrapState(),refresh:{mode:'background',running:slaRecentSyncRunning}};
+  await writeNotificationStore(store);
+  return {settings,rows:rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0)),managers,totals,checkedAt:Date.now()};
 }
 
 // v28.19: one-time historical bootstrap. It scans every VK conversation once,
@@ -2809,7 +2710,7 @@ async function runDialogBootstrapOnce(session){
   const resumeAt=Math.max(0,Number(before.currentBatchEnd||0));
   const state={...before,status:'running',startedAt:before.startedAt||Date.now(),lastError:'',processedDialogs:Math.max(0,Number(before.processedDialogs||0)),failedDialogs:Math.max(0,Number(before.failedDialogs||0)),totalDialogs:Math.max(0,Number(before.totalDialogs||0)),currentBatchEnd:resumeAt};await writeDialogBootstrapState(state);
   try{
-    const dialogs=await loadDialogsForNotifications(session,{maxPages:0,filter:'all'});state.totalDialogs=dialogs.length;state.scanLimitDialogs=100000;state.possibleTruncation=dialogs.length>=100000;const store=await readNotificationStore(),settings={...slaReportSettingsFor(session),managerFilters:[],statuses:[]},rule={...settings,manager:'',warningAlerts:false,violationAlerts:false,outboxAlerts:false,dialogFilter:'unanswered'};
+    const dialogs=await loadDialogsForNotifications(session,{maxPages:50,filter:'all'});state.totalDialogs=dialogs.length;const store=await readNotificationStore(),settings={...slaReportSettingsFor(session),managerFilters:[],statuses:[]},rule={...settings,manager:'',warningAlerts:false,violationAlerts:false,outboxAlerts:false,dialogFilter:'unanswered'};
     // A crashed deploy resumes from the last committed batch instead of rescanning old dialogs.
     const startAt=Math.min(resumeAt,dialogs.length);
     for(let i=startAt;i<dialogs.length;i+=4){const batch=dialogs.slice(i,i+4);const results=await Promise.all(batch.map(async d=>{try{const params={peer_id:Number(d.peerId),count:200,offset:0,extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;const raw=await vkCall(session.vkToken,'messages.getHistory',params),maps=vkIdentityMaps(raw||{}),messages=(raw?.items||[]).map(m=>normalizeVkMessage(m,maps));ingestNotificationJournalMessages(store,{peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule});return true}catch(err){console.warn('[bootstrap dialogs]',d.peerId,err?.message||err);return false}}));state.processedDialogs+=results.filter(Boolean).length;state.failedDialogs+=results.filter(x=>!x).length;await writeNotificationStore(store);await writeDialogBootstrapState({...state,currentBatchEnd:Math.min(i+batch.length,dialogs.length)});if(i+4<dialogs.length)await sleep(220)}
@@ -2944,13 +2845,7 @@ async function apiRouter(req, res, url) {
     if(!requireAdminSession(s,res)||!requireCsrf(req,res,s))return;try{return sendJson(res,200,{ok:true,settings:await saveOutboxWatchSettings(await readJson(req))})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/history' && req.method === 'GET') {
-    try{
-      const store=await readNotificationStore();
-      const backfill=await ensureHistoricalNotificationBackfill(store,s);
-      const rows=notificationDeliveryRows(store,s,{admin:isAdminSession(s)});
-      await writeNotificationStore(store);
-      return sendJson(res,200,{ok:true,rows,summary:notificationHistorySummary(rows),backfill,bootstrap:readDialogBootstrapState(),storage:storage.enabled?'postgresql':'json'});
-    }catch(err){return handleApiError(res,err)}
+    try{const store=await readNotificationStore(),rows=notificationDeliveryRows(store,s,{admin:isAdminSession(s)});await writeNotificationStore(store);return sendJson(res,200,{ok:true,rows,storage:storage.enabled?'postgresql':'json'})}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/browser-pending' && req.method === 'GET') {
     try{const store=await readNotificationStore(),rows=notificationDeliveryRows(store,s).filter(row=>row?.channels?.browser?.status==='pending').slice(0,30);await writeNotificationStore(store);return sendJson(res,200,{ok:true,rows})}catch(err){return handleApiError(res,err)}
@@ -2975,11 +2870,7 @@ async function apiRouter(req, res, url) {
     if(!requireCsrf(req,res,s))return;try{const body=await readJson(req),settings=await saveSlaReportSettings(s,body);return sendJson(res,200,{ok:true,settings,storage:storage.enabled?'postgresql':'json'});}catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/sla/report' && req.method === 'GET') {
-    try{
-      const data=await buildSlaReport(s);
-      scheduleRecentSlaSync(s);
-      return sendJson(res,200,{ok:true,...data,storage:storage.enabled?'postgresql':'json'});
-    }catch(err){return handleApiError(res,err)}
+    try{return sendJson(res,200,{ok:true,...await buildSlaReport(s),storage:storage.enabled?'postgresql':'json'});}catch(err){return handleApiError(res,err)}
   }
 
   if (pathname === '/api/notifications/settings' && req.method === 'GET') {

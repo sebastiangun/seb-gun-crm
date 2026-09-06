@@ -7,14 +7,17 @@ import { useSessionStore } from '../stores/session'
 import { useUiStore } from '../stores/ui'
 
 const route=useRoute(),router=useRouter(),outbox=useOutboxStore(),session=useSessionStore(),ui=useUiStore()
-const loading=ref(false),saving=ref(false),serverQueue=ref([]),storage=ref('json')
+const loading=ref(false),saving=ref(false),serverQueue=ref([]),storage=ref('json'),loadError=ref('')
 const settings=reactive({enabled:true,stuckMinutes:3,repeatMinutes:0})
 const queue=computed(()=>{const map=new Map();for(const m of serverQueue.value)map.set(String(m.requestId||m.localId),m);for(const m of outbox.active)map.set(String(m.clientRequestId||m.localId),{...map.get(String(m.clientRequestId||m.localId)),...m});return [...map.values()].sort((a,b)=>Number(a.createdAt||0)-Number(b.createdAt||0))})
+const stuckCount=computed(()=>queue.value.filter(m=>ageMinutes(m)>=Number(settings.stuckMinutes||3)&&m.status!=='sent').length)
+const errorCount=computed(()=>queue.value.filter(m=>m.status==='error').length)
+const notifiedCount=computed(()=>queue.value.filter(m=>m.alerted||m.alertedAt).length)
 function statusLabel(m){return m.status==='error'?'Не отправлено':m.status==='sending'?'Отправляется':'Стоит в очереди'}
 function dateTime(value){return value?new Date(Number(value)).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'—'}
 function ageMinutes(m){return Math.max(0,Math.floor((Date.now()-Number(m.createdAt||Date.now()))/60000))}
 function openDialog(peerId){router.push({path:`/dialogs/${peerId}`,query:{from:route.fullPath}})}
-async function load(){loading.value=true;try{const [q,s]=await Promise.all([api.outboxOverview(),api.outboxSettings()]);serverQueue.value=q.outbox||[];storage.value=q.storage||s.storage||'json';Object.assign(settings,s.settings||{})}catch(e){ui.toast(e.message,'error')}finally{loading.value=false}}
+async function load(){loading.value=true;loadError.value='';try{const [q,s]=await Promise.all([api.outboxOverview(),api.outboxSettings()]);serverQueue.value=q.outbox||[];storage.value=q.storage||s.storage||'json';Object.assign(settings,s.settings||{})}catch(e){loadError.value=e.message||'Не удалось загрузить очередь';ui.toast(loadError.value,'error')}finally{loading.value=false}}
 async function saveSettings(){if(!session.isAdmin)return;saving.value=true;try{const d=await api.saveOutboxSettings({...settings});Object.assign(settings,d.settings||{});ui.toast('Контроль зависших сообщений сохранён','ok')}catch(e){ui.toast(e.message,'error',7000)}finally{saving.value=false}}
 async function dismiss(m){if(m.localId)outbox.remove(m.localId);else await api.outboxEvent({requestId:m.requestId,peerId:m.peerId,status:'removed'});await load()}
 onMounted(()=>{outbox.init(session.loginName);load()})
@@ -31,7 +34,14 @@ onMounted(()=>{outbox.init(session.loginName);load()})
       <button v-if="session.isAdmin" class="primary-btn" :disabled="saving" @click="saveSettings">{{saving?'Сохраняю…':'Сохранить контроль очереди'}}</button>
     </section>
 
-    <section class="settings-card notification-summary"><div><b>Активных сообщений: {{queue.length}}</b><span>Список содержит только очередь исходящих. SLA и история уведомлений находятся в отдельных разделах.</span></div></section>
+    <section class="sla-summary-grid outbox-summary-grid">
+      <article><small>В очереди</small><b>{{queue.length}}</b><span>все активные</span></article>
+      <article class="danger-stat"><small>Уже зависли</small><b>{{stuckCount}}</b><span>старше {{settings.stuckMinutes}} мин</span></article>
+      <article><small>С ошибкой</small><b>{{errorCount}}</b><span>последняя отправка не удалась</span></article>
+      <article><small>Уведомлены</small><b>{{notifiedCount}}</b><span>сервер уже создал событие</span></article>
+    </section>
+    <section class="status-panel compact-status-panel"><div class="status-panel-head"><div><small>КАК РАБОТАЕТ</small><h3>Серверный watchdog очереди</h3></div><b>{{settings.enabled?'Включён':'Выключен'}}</b></div><p>Сообщение старше {{settings.stuckMinutes}} мин считается зависшим. Дальше сервер проверяет строгий фильтр уведомлений и записывает результат Telegram/браузера в отдельный журнал.</p></section>
+    <section v-if="loadError" class="inline-error-card"><div><b>Очередь не обновилась</b><span>{{loadError}}</span><small>Локальные неотправленные сообщения остаются видимыми.</small></div><button class="secondary-btn" @click="load">Повторить</button></section>
     <div v-if="loading" class="list-status"><span class="tiny-spinner"></span> Обновляю очередь…</div>
     <section class="notification-block">
       <article v-for="m in queue" :key="m.requestId||m.localId" class="notification-row queue-row">

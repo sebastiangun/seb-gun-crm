@@ -28,6 +28,8 @@ async function request(path, options = {}) {
     timeout = 35000,
     dedupe = method === 'GET',
     raw = false,
+    retries = 0,
+    retryDelay = 700,
   } = options
 
   const key = dedupe && method === 'GET' ? path : ''
@@ -73,7 +75,15 @@ async function request(path, options = {}) {
       if (data?.csrf) csrf = data.csrf
       return data
     } catch (err) {
-      if (err?.name === 'AbortError') throw new ApiError('Сервер отвечает слишком долго. Повторите действие.', { code: 'TIMEOUT' })
+      if (err?.name === 'AbortError') {
+        if (method === 'GET' && retries > 0) { await new Promise(r=>setTimeout(r,retryDelay)); return request(path,{...options,retries:retries-1,dedupe:false}) }
+        throw new ApiError('Сервер отвечает слишком долго. Повторите действие.', { code: 'TIMEOUT' })
+      }
+      if (method === 'GET' && retries > 0 && (err instanceof TypeError || err?.code === 'NETWORK_ERROR')) {
+        await new Promise(r=>setTimeout(r,retryDelay))
+        return request(path,{...options,retries:retries-1,dedupe:false})
+      }
+      if (err instanceof TypeError) throw new ApiError('Соединение с сервером было прервано. CRM автоматически попробует снова при обновлении.', { code:'NETWORK_ERROR' })
       throw err
     } finally {
       clearTimeout(timer)
@@ -124,14 +134,14 @@ export const api = {
   outboxOverview: () => request('/api/outbox/overview', { timeout: 15000, dedupe: false }),
   slaSettings: () => request('/api/sla/settings', { timeout: 15000, dedupe: false }),
   saveSlaSettings: payload => request('/api/sla/settings', { method: 'POST', body: payload, timeout: 20000 }),
-  slaReport: () => request('/api/sla/report', { timeout: 90000, dedupe: false }),
+  slaReport: () => request('/api/sla/report', { timeout: 30000, dedupe: false, retries: 1, retryDelay: 900 }),
   notificationSettings: () => request('/api/notifications/settings'),
   saveNotificationSettings: (payload) => request('/api/notifications/settings', { method: 'POST', body: payload }),
   pairTelegram: (manager) => request('/api/notifications/pair', { method: 'POST', body: { manager } }),
   testTelegram: (manager) => request('/api/notifications/test', { method: 'POST', body: { manager } }),
   checkNotifications: () => request('/api/notifications/check-now', { method: 'POST', body: '{}', timeout: 65000 }),
   notificationOverview: () => request('/api/notifications/overview', { timeout: 60000, dedupe: false }),
-  notificationHistory: () => request('/api/notifications/history', { timeout:30000, dedupe:false }),
+  notificationHistory: () => request('/api/notifications/history', { timeout:30000, dedupe:false, retries:1, retryDelay:900 }),
   browserPendingNotifications: () => request('/api/notifications/browser-pending', { timeout:20000, dedupe:false }),
   browserDelivery: (id,status,error='') => request('/api/notifications/browser-delivery', { method:'POST', body:{id,status,error}, timeout:15000 }),
   exportNotificationRules: () => request('/api/admin/notification-rules-export', { timeout: 15000, dedupe: false }),

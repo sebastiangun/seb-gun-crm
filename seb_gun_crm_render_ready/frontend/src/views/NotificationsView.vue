@@ -56,9 +56,16 @@ onMounted(()=>load().catch(e=>ui.toast(e.message,'error',7000)))
   <main class="page page-with-nav notifications-page">
     <header class="page-header sticky-header"><div><small>НАСТРОЙКА ДОСТАВКИ · МСК</small><h1>Настройка уведомлений</h1></div><button class="header-action" @click="load">↻</button></header>
 
-    <section class="settings-card control-links-card"><button @click="router.push('/notification-history')"><span>🧾</span><div><b>История уведомлений</b><small>Отдельный журнал: кому, когда, Telegram/браузер/оба/не доставлено</small></div><em>›</em></button></section>
+    <section class="settings-card control-links-card"><button class="control-link" @click="router.push('/notification-history')"><span>🧾</span><div><b>История уведомлений</b><small>Отдельный журнал: кому, когда, Telegram/браузер/оба/не доставлено</small></div><em>›</em></button></section>
 
     <section class="settings-card notification-channel-banner" :class="{ready:deliveryReady}"><div class="channel-banner-copy"><small>КАНАЛЫ ДОСТАВКИ</small><h3>{{deliveryReady?'Telegram и это устройство подключены':'Настройте каналы'}}</h3><p>Каналы подключаются отдельно от фильтра и отдельно от журналов SLA/неотправленных.</p></div><div class="channel-banner-statuses"><span :class="selectedRule()?.telegramConnected?'ready':'warn'">✈️ Telegram: {{selectedRule()?.telegramConnected?'да':'нет'}}</span><span :class="browserReady?'ready':'warn'">🔔 Устройство: {{browserReady?'да':'нет'}}</span></div><button class="primary-btn" @click="channelsSheet=true">{{deliveryReady?'Проверить каналы':'Подключить каналы'}}</button></section>
+
+    <section class="status-panel notification-rule-status">
+      <div class="status-panel-head"><div><small>КАК СЕЙЧАС РАБОТАЕТ ПРАВИЛО</small><h3>{{manager||'Получатель не выбран'}}</h3></div><b :class="ruleEnabled&&strictReady?'connected-text':'muted-text'">{{ruleEnabled&&strictReady?'Активно':'Не готово'}}</b></div>
+      <p>{{filterDescription}}</p>
+      <div class="data-status-grid four"><span><small>События</small><b>{{[form.warningAlerts,form.violationAlerts,form.outboxAlerts].filter(Boolean).length}}</b></span><span><small>Менеджеры лидов</small><b>{{form.managerFilters.length}}</b></span><span><small>CRM-статусы</small><b>{{form.statuses.length}}</b></span><span><small>Последняя проверка</small><b>{{checkTime(notification?.lastCheck?.lastAt)}}</b></span></div>
+      <div class="folder-mini-stats"><span>Telegram <b>{{selectedRule()?.telegramConnected?'подключён':'нет'}}</b></span><span>Браузер <b>{{browserReady?'разрешён':'нет'}}</b></span><span>Фоновая проверка <b>{{backgroundReady?'готова':'не готова'}}</b></span></div>
+    </section>
 
     <section class="settings-card notification-settings">
       <div class="section-title-row"><div><h3>Кому и по какому фильтру отправлять</h3><p>Здесь нет статистики нарушений и очереди сообщений — только маршрутизация уведомлений.</p></div><b class="storage-badge">{{notification?.storage==='postgresql'?'PostgreSQL':'JSON'}}</b></div>
