@@ -1,0 +1,119 @@
+seb_gun CRM v28.23 — APPEND-ONLY EVENT LOG + MATERIALIZED LEAD STATE
+==================================================================
+
+Цель
+====
+Сохранить старый рабочий проект BlueSales + VK + Telegram + Vue, но убрать главную причину 500/502/503/429: тяжёлый пересчёт всей SLA-истории при открытии экранов.
+
+Что изменено
+============
+
+1. Старый server.js сохранён как базовый функционал
+--------------------------------------------------
+BlueSales, VK-диалоги, сообщения, создание клиентов, карточки, заказы, услуги, быстрые фразы, Telegram, browser notifications, outbox, админка и текущая маршрутизация не переписываются с нуля.
+
+Запуск идёт через server-v2823.js. Он подключает новый backend event-state и заменяет только дорогие read-path SLA/history.
+
+2. crm_event_log — append-only история
+--------------------------------------
+Новая таблица crm_event_log работает как надёжный JSONL-журнал в PostgreSQL.
+Каждое изменение lead_journal получает детерминированный dedupe_key и добавляется INSERT ... ON CONFLICT DO NOTHING.
+
+История не переписывается целиком и не зависит от файловой системы Render.
+
+3. lead_state — готовая проекция для интерфейса
+----------------------------------------------
+Новая таблица lead_state хранит рассчитанное состояние SLA по записи:
+- peer_id;
+- ответственный менеджер;
+- текущий менеджер;
+- CRM-статус;
+- waiting / answered;
+- on_time;
+- violated;
+- warning/notified;
+- working_minutes;
+- received_at / answered_at;
+- нормализованные manager/status history values;
+- payload;
+- готовый report_row.
+
+При новом событии обновляется только нужная строка lead_state.
+
+4. SLA больше не сканирует весь lead_journal
+--------------------------------------------
+/api/sla/report использует lead_state:
+- SQL GROUP BY для статистики;
+- LIMIT для последних строк;
+- динамический пересчёт только ограниченного списка waiting/recent записей;
+- старый полный scanLeadJournal на каждый GET больше не вызывается.
+
+Во время первой миграции интерфейс получает частичные данные и projection.status=building вместо блокировки Node/Render.
+
+5. Автоматическая фоновая миграция старых данных
+------------------------------------------------
+Старый lead_journal не удаляется.
+Фоновый worker переносит записи небольшими пакетами в lead_state и crm_event_log.
+Progress хранится в event_projection_state:
+- lead_state_backfill cursor;
+- lead_events_cursor.
+
+После restart/redeploy продолжает с сохранённого cursor.
+
+6. Новые изменения не теряются
+------------------------------
+upsertLeadJournalBatch автоматически ставит изменённые строки в очередь materialized state.
+Дополнительно worker читает append-only lead_events по numeric cursor, поэтому даже legacy write-path догоняется после перезапуска.
+
+7. История уведомлений стала read-only на GET
+---------------------------------------------
+/api/notifications/history больше не запускает expire/backfill/write внутри обычного GET.
+Список читается LIMIT 1500.
+Summary кэшируется на 60 секунд и инвалидируется при новой записи notification_history.
+
+Stale browser pending обрабатывается фоновым worker примерно раз в 5 минут.
+
+8. Защита старых данных
+-----------------------
+managerHistory/statusHistory/incomingTexts нормализуются через Array.isArray.
+Старые null/object значения не должны приводить к .flatMap/.is not iterable в SLA report.
+
+9. Render Free
+==============
+SLA_RECENT_SYNC_MIN_MS по умолчанию для v28.23 = 300000 (5 минут), если переменная явно не задана.
+Открытие экрана не должно запускать полный исторический пересчёт.
+
+10. Rollback
+============
+server.js остаётся неизменённым v28.22.
+Для rollback достаточно вернуть npm start на node server.js.
+Новые crm_event_log/lead_state таблицы не повреждают старые таблицы.
+
+Render
+======
+Build Command оставьте прежним:
+
+cd seb_gun_crm_render_ready && npm ci --include=dev && npm run build && npm run check:runtime && npm run test:v2819 && npm run test:database
+
+Start Command оставьте:
+
+cd seb_gun_crm_render_ready && npm start
+
+npm start внутри v28.23 запускает server-v2823.js.
+
+Ожидаемые build checks:
+- v28.19 integration checks: OK
+- v28.20 integration checks: OK
+- v28.21 integration checks: OK
+- v28.22 integration checks: OK
+- v28.23 integration checks: OK
+- PASS: v28.23 append-only event log, lead_state projection, cached SLA/history reads
+
+После deploy
+============
+1. Закрыть старые вкладки CRM.
+2. Открыть сайт заново / Ctrl+Shift+R.
+3. Первые минуты lead_state может строиться фоном. Это нормально.
+4. /api/sla/report не должен выполнять полный scan старой истории.
+5. Если старые данные ещё переносятся, UI получает projection.status=building и processed/cursor.
+6. После complete обычные GET работают только по готовой проекции.
