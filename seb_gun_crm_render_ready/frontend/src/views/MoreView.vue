@@ -8,17 +8,17 @@ import { useBrowserNotificationsStore } from '../stores/browserNotifications'
 
 const session=useSessionStore(),ui=useUiStore(),router=useRouter()
 const browserNotifications=useBrowserNotificationsStore()
-const databaseSyncing=ref(false),bootstrap=ref(null),pollTimer=ref(0),notificationSummary=ref(null)
+const databaseSyncing=ref(false),bootstrap=ref(null),pollTimer=ref(0),notificationSummary=ref(null),pollCount=ref(0)
 const bootstrapProgress=computed(()=>{const total=Number(bootstrap.value?.totalDialogs||0),done=Number(bootstrap.value?.currentBatchEnd||bootstrap.value?.processedDialogs||0);return total?Math.min(100,Math.round(done/total*100)):0})
 const bootstrapRunning=computed(()=>['running','starting'].includes(String(bootstrap.value?.status||'')))
 
 async function enableBrowserNotifications(){try{await browserNotifications.enable();await browserNotifications.test();ui.toast('Браузерные уведомления включены, тестовая плашка отправлена','ok')}catch(e){ui.toast(e.message,'error',7000)}}
 async function testBrowserNotifications(){try{await browserNotifications.test();ui.toast('Тестовое уведомление отправлено','ok')}catch(e){ui.toast(e.message,'error',7000)}}
 async function syncDatabase(){databaseSyncing.value=true;try{const d=await api.syncDatabase();ui.toast(`Сохранено карточек: ${d.clients}`,'ok')}catch(e){ui.toast(e.message,'error')}finally{databaseSyncing.value=false}}
-async function loadStatus(){try{const [b,h]=await Promise.all([api.bootstrapDialogsStatus(),api.notificationHistory().catch(()=>null)]);bootstrap.value=b.state||null;notificationSummary.value=h?.summary||null}catch{}}
-async function poll(){await loadStatus();if(bootstrapRunning.value)pollTimer.value=window.setTimeout(poll,3000)}
+async function loadStatus({withHistory=false}={}){try{const b=await api.bootstrapDialogsStatus();bootstrap.value=b.state||null;if(withHistory){const h=await api.notificationHistory().catch(()=>null);notificationSummary.value=h?.summary||notificationSummary.value}}catch{}}
+async function poll(){pollCount.value++;await loadStatus({withHistory:pollCount.value%4===0});if(bootstrapRunning.value||bootstrap.value?.status==='paused_rate_limit')pollTimer.value=window.setTimeout(poll,15000)}
 async function logout(){await session.logout();router.replace('/dialogs')}
-onMounted(()=>poll())
+onMounted(async()=>{await loadStatus({withHistory:true});if(bootstrapRunning.value||bootstrap.value?.status==='paused_rate_limit')pollTimer.value=window.setTimeout(poll,12000)})
 onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
 </script>
 
@@ -31,7 +31,7 @@ onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
       <div class="setting-row"><span>BlueSales</span><b>{{session.account?.name||session.loginName}}</b></div>
       <div class="setting-row"><span>VK</span><b>{{session.vk?.groupName||'Подключён'}}</b></div>
       <div class="setting-row"><span>Права</span><b>{{session.isAdmin?'Администратор':'Менеджер'}}</b></div>
-      <div class="setting-row"><span>Версия</span><b>v28.20 Vue</b></div>
+      <div class="setting-row"><span>Версия</span><b>v28.21 Vue</b></div>
       <div class="setting-row timezone-row"><span>Время проекта</span><b>Москва (МСК)</b></div>
     </section>
 

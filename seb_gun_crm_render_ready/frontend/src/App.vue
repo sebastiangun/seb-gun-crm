@@ -18,7 +18,7 @@ const route = useRoute()
 const outbox = useOutboxStore()
 const browserNotifications = useBrowserNotificationsStore()
 watch(() => route.fullPath, () => rememberListRoute(route), { immediate: true })
-watch(() => session.authenticated, value => { if(value){browserNotifications.start();api.bootstrapDialogsOnce().catch(()=>{})}else browserNotifications.stop() })
+watch(() => session.authenticated, value => { if(value)browserNotifications.start();else browserNotifications.stop() })
 
 async function authExpired() {
   ui.toast('Сессия BlueSales завершилась. Войдите снова.', 'error', 5000)

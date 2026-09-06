@@ -9,7 +9,7 @@ import MultiFilterSheet from '../components/MultiFilterSheet.vue'
 
 const route=useRoute(),router=useRouter(),meta=useMetaStore(),session=useSessionStore(),ui=useUiStore()
 const loading=ref(false),saving=ref(false),filterSheet=ref(''),report=ref({rows:[],managers:[],totals:{}}),tab=ref('managers'),dialogFolder=ref('all'),dateFrom=ref(''),dateTo=ref('')
-const bootstrap=ref(null),loadError=ref(''),lastLoadedAt=ref(0),pollTimer=ref(0),reportRefreshCounter=ref(0)
+const bootstrap=ref(null),loadError=ref(''),lastLoadedAt=ref(0),pollTimer=ref(0),reportRefreshCounter=ref(0),pollFailures=ref(0),pollBusy=ref(false)
 const form=reactive({managerFilters:[],statuses:[],workDays:[1,2,3,4,5,6,7],workStart:'10:00',workEnd:'22:00',slaMinutes:8,violationMinutes:20,timezone:'Europe/Moscow'})
 const managerOptions=computed(()=>meta.users.map(u=>({value:u.name||u.login,label:u.name||u.login})).filter(x=>x.value))
 const statusOptions=computed(()=>meta.statuses.map(s=>({value:s.name||s,label:s.name||s})).filter(x=>x.value))
@@ -31,13 +31,24 @@ const visibleStats=computed(()=>{
 })
 const visibleTotals=computed(()=>visibleStats.value.reduce((a,x)=>({total:a.total+x.total,answered:a.answered+x.answered,onTime:a.onTime+x.onTime,violations:a.violations+x.violations,waiting:a.waiting+x.waiting}),{total:0,answered:0,onTime:0,violations:0,waiting:0}))
 const filterSummary=computed(()=>`${form.managerFilters.length?form.managerFilters.length+' менедж.':'все менеджеры'} · ${form.statuses.length?form.statuses.length+' статуса':'все статусы'} · ${form.workStart}–${form.workEnd} МСК`)
-async function loadBootstrap(){try{const d=await api.bootstrapDialogsStatus();bootstrap.value=d.state||null}catch{}}
-async function load({silent=false}={}){if(!silent)loading.value=true;loadError.value='';try{await meta.load();const [d]=await Promise.all([api.slaReport(),loadBootstrap()]);report.value=d;applySettings(d.settings);bootstrap.value=d.bootstrap||bootstrap.value;lastLoadedAt.value=Date.now()}catch(e){loadError.value=e.message||'Не удалось загрузить SLA';ui.toast(loadError.value,'error',7000)}finally{if(!silent)loading.value=false}}
-async function pollBootstrap(){await loadBootstrap();if(bootstrapRunning.value){reportRefreshCounter.value++;if(reportRefreshCounter.value%4===0)await load({silent:true});pollTimer.value=window.setTimeout(pollBootstrap,2500)}else if(bootstrap.value?.status==='completed'){await load({silent:true})}}
+async function loadBootstrap(){const d=await api.bootstrapDialogsStatus();bootstrap.value=d.state||null;return bootstrap.value}
+async function load({silent=false}={}){if(!silent)loading.value=true;loadError.value='';try{await meta.load();const d=await api.slaReport();report.value=d;applySettings(d.settings);bootstrap.value=d.bootstrap||bootstrap.value;lastLoadedAt.value=Date.now();pollFailures.value=0}catch(e){loadError.value=e.message||'Не удалось загрузить SLA';if(!silent)ui.toast(loadError.value,'error',7000);throw e}finally{if(!silent)loading.value=false}}
+async function pollBootstrap(){
+  if(pollBusy.value)return
+  pollBusy.value=true
+  let delay=12000
+  try{
+    await loadBootstrap();pollFailures.value=0
+    if(bootstrapRunning.value){reportRefreshCounter.value++;if(reportRefreshCounter.value%5===0)await load({silent:true})}
+    else if(bootstrap.value?.status==='completed'){await load({silent:true});return}
+  }catch(e){pollFailures.value=Math.min(pollFailures.value+1,4);delay=Math.min(60000,12000*(2**pollFailures.value));loadError.value=e.message||'Сервер временно занят'}
+  finally{pollBusy.value=false}
+  if(bootstrapRunning.value||['pending','starting','paused_rate_limit'].includes(String(bootstrap.value?.status||'')))pollTimer.value=window.setTimeout(pollBootstrap,delay)
+}
 async function save(){if(!form.workDays.length)return ui.toast('Выберите хотя бы один рабочий день','error');saving.value=true;try{const d=await api.saveSlaSettings({...form,timezone:'Europe/Moscow'});applySettings(d.settings);ui.toast('Фильтр и регламент сохранены в PostgreSQL','ok');await load()}catch(e){ui.toast(e.message,'error',7000)}finally{saving.value=false}}
 function openDialog(peerId){router.push({path:`/dialogs/${peerId}`,query:{from:route.fullPath}})}
 async function removeRow(row){if(!session.isAdmin||!confirm(`Удалить запись «${row.name}» из SLA-истории и статистики?`))return;try{await api.deleteAdminNotificationJournal(row.id);ui.toast('Запись удалена из статистики','ok');await load()}catch(e){ui.toast(e.message,'error')}}
-onMounted(async()=>{await load();pollBootstrap()})
+onMounted(async()=>{try{await load()}catch{};pollTimer.value=window.setTimeout(pollBootstrap,8000)})
 onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
 </script>
 
@@ -50,9 +61,9 @@ onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
       <p v-if="bootstrapRunning">Старые диалоги проверяются один раз. Уже обработанные записи сразу появляются в статистике — ждать окончания всей проверки не нужно.</p>
       <p v-else>Отчёт открывается из базы без тяжёлого запроса к VK. Обновление последних диалогов выполняется сервером в фоне.</p>
       <div v-if="bootstrap?.totalDialogs" class="progress-block"><div class="progress-track"><i :style="{width:`${bootstrapProgress}%`}"></i></div><div class="progress-meta"><b>{{bootstrapProgress}}%</b><span>{{bootstrap.currentBatchEnd||bootstrap.processedDialogs||0}} / {{bootstrap.totalDialogs}} диалогов</span><span v-if="bootstrap.failedDialogs">Ошибок: {{bootstrap.failedDialogs}}</span></div></div>
-      <div class="data-status-grid"><span><small>Записей SLA</small><b>{{report.rows?.length||0}}</b></span><span><small>Последнее чтение</small><b>{{dateTimeMs(lastLoadedAt)}}</b></span><span><small>Текущий фильтр</small><b>{{filterSummary}}</b></span></div>
+      <div class="data-status-grid"><span><small>Записей SLA</small><b>{{report.rowsTotal??report.rows?.length??0}}</b></span><span><small>Последнее чтение</small><b>{{dateTimeMs(lastLoadedAt)}}</b></span><span><small>Текущий фильтр</small><b>{{filterSummary}}</b></span></div>
       <div v-if="bootstrap?.folders" class="folder-mini-stats"><span>Нарушения <b>{{bootstrap.folders.violations||0}}</b></span><span>Вовремя <b>{{bootstrap.folders.onTime||0}}</b></span><span>Ждут <b>{{bootstrap.folders.waiting||0}}</b></span></div>
-      <div v-if="bootstrap?.lastError" class="inline-error">Последняя ошибка проверки: {{bootstrap.lastError}}</div>
+      <small v-if="report.rowsLimited" class="audit-note">Для быстрой работы на экране показаны последние {{report.rows.length}} записей из {{report.rowsTotal}}. Итоговая статистика сверху рассчитана по всей истории.</small><div v-if="bootstrap?.lastError" class="inline-error">Последняя ошибка проверки: {{bootstrap.lastError}}</div>
     </section>
 
     <section v-if="loadError" class="inline-error-card"><div><b>Не удалось обновить отчёт</b><span>{{loadError}}</span><small>Старые уже загруженные данные не очищены. Нажмите «Повторить».</small></div><button class="secondary-btn" @click="load()">Повторить</button></section>

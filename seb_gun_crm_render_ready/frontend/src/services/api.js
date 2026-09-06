@@ -1,5 +1,18 @@
 let csrf = ''
 const inflight = new Map()
+let apiCooldownUntil = 0
+
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0))) }
+function retryAfterMs(response, fallback = 1200) {
+  const raw = response?.headers?.get?.('retry-after')
+  if (raw) {
+    const seconds = Number(raw)
+    if (Number.isFinite(seconds)) return Math.max(500, seconds * 1000)
+    const when = Date.parse(raw)
+    if (Number.isFinite(when)) return Math.max(500, when - Date.now())
+  }
+  return Math.max(500, Number(fallback) || 1200)
+}
 
 export class ApiError extends Error {
   constructor(message, { status = 0, code = '', details = null } = {}) {
@@ -36,6 +49,7 @@ async function request(path, options = {}) {
   if (key && inflight.has(key)) return inflight.get(key)
 
   const job = (async () => {
+    if (method === 'GET' && apiCooldownUntil > Date.now()) await sleep(apiCooldownUntil - Date.now())
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeout)
     const headers = { ...customHeaders }
@@ -66,7 +80,22 @@ async function request(path, options = {}) {
         if (response.status === 401 && data?.error === 'AUTH_REQUIRED') {
           window.dispatchEvent(new CustomEvent('crm:auth-expired'))
         }
-        throw new ApiError(data?.message || `HTTP ${response.status}`, {
+        if (method === 'GET' && [429, 502, 503, 504].includes(response.status)) {
+          const backoff = retryAfterMs(response, response.status === 429 ? Math.max(2500, retryDelay) : Math.max(1800, retryDelay))
+          apiCooldownUntil = Math.max(apiCooldownUntil, Date.now() + backoff)
+          if (retries > 0) {
+            clearTimeout(timer)
+            await sleep(backoff)
+            return request(path, { ...options, retries: retries - 1, dedupe: false, retryDelay: Math.min(15000, Math.round(backoff * 1.8)) })
+          }
+        }
+        let message=data?.message || `HTTP ${response.status}`
+        if (!message || /^HTTP \d+$/.test(message)) {
+          if (response.status === 429) message = 'Сервер временно ограничил частоту запросов. CRM снизила частоту обновления и попробует позже.'
+          else if (response.status === 503) message = 'Render или сервер временно занят. Уже загруженные данные останутся на экране; повтор будет позже.'
+          else if ([502,504].includes(response.status)) message = 'Внешний сервис временно не ответил. CRM попробует обновиться позже.'
+        }
+        throw new ApiError(message, {
           status: response.status,
           code: data?.error || '',
           details: data?.details,
@@ -128,20 +157,20 @@ export const api = {
     headers: { 'Content-Type': file?.type || 'application/octet-stream', 'X-Upload-Mime': file?.type || '' },
   }),
   bootstrapDialogsOnce: () => request('/api/bootstrap/dialogs-once', { method:'POST', body:{}, timeout:15000, dedupe:false }),
-  bootstrapDialogsStatus: () => request('/api/bootstrap/dialogs-once', { timeout:15000, dedupe:false }),
+  bootstrapDialogsStatus: () => request('/api/bootstrap/dialogs-once', { timeout:15000, retries:1, retryDelay:3000 }),
   outboxSettings: () => request('/api/outbox/settings', { timeout:15000, dedupe:false }),
   saveOutboxSettings: payload => request('/api/outbox/settings', { method:'POST', body:payload, timeout:20000 }),
   outboxOverview: () => request('/api/outbox/overview', { timeout: 15000, dedupe: false }),
   slaSettings: () => request('/api/sla/settings', { timeout: 15000, dedupe: false }),
   saveSlaSettings: payload => request('/api/sla/settings', { method: 'POST', body: payload, timeout: 20000 }),
-  slaReport: () => request('/api/sla/report', { timeout: 30000, dedupe: false, retries: 1, retryDelay: 900 }),
+  slaReport: () => request('/api/sla/report', { timeout: 30000, retries: 1, retryDelay: 2500 }),
   notificationSettings: () => request('/api/notifications/settings'),
   saveNotificationSettings: (payload) => request('/api/notifications/settings', { method: 'POST', body: payload }),
   pairTelegram: (manager) => request('/api/notifications/pair', { method: 'POST', body: { manager } }),
   testTelegram: (manager) => request('/api/notifications/test', { method: 'POST', body: { manager } }),
   checkNotifications: () => request('/api/notifications/check-now', { method: 'POST', body: '{}', timeout: 65000 }),
   notificationOverview: () => request('/api/notifications/overview', { timeout: 60000, dedupe: false }),
-  notificationHistory: () => request('/api/notifications/history', { timeout:30000, dedupe:false, retries:1, retryDelay:900 }),
+  notificationHistory: () => request('/api/notifications/history', { timeout:30000, retries:1, retryDelay:3000 }),
   browserPendingNotifications: () => request('/api/notifications/browser-pending', { timeout:20000, dedupe:false }),
   browserDelivery: (id,status,error='') => request('/api/notifications/browser-delivery', { method:'POST', body:{id,status,error}, timeout:15000 }),
   exportNotificationRules: () => request('/api/admin/notification-rules-export', { timeout: 15000, dedupe: false }),

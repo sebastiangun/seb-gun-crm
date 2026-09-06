@@ -7,7 +7,7 @@ import { useUiStore } from '../stores/ui'
 
 const route=useRoute(),router=useRouter(),meta=useMetaStore(),ui=useUiStore()
 const loading=ref(false),rows=ref([]),recipient=ref(''),leadManager=ref(''),crmStatus=ref(''),eventType=ref(''),channel=ref(''),deliveryStatus=ref(''),dateFrom=ref(''),dateTo=ref(''),search=ref('')
-const summary=ref({total:0,actual:0,historical:0,sent:0,partial:0,pending:0,failed:0}),backfill=ref(null),bootstrap=ref(null),storage=ref('json'),loadError=ref(''),lastLoadedAt=ref(0),pollTimer=ref(0)
+const summary=ref({total:0,actual:0,historical:0,sent:0,partial:0,pending:0,failed:0}),backfill=ref(null),bootstrap=ref(null),storage=ref('json'),loadError=ref(''),lastLoadedAt=ref(0),pollTimer=ref(0),pollFailures=ref(0),pollBusy=ref(false),rowsTotal=ref(0),rowsLimited=ref(false)
 const eventOptions=[['','Все события'],['sla_warning','Предупреждение по времени ответа'],['sla_violation','Нарушение регламента'],['outbox_stuck','Зависшее исходящее']]
 const channelOptions=[['','Все каналы'],['telegram','Telegram'],['browser','Браузер'],['both','Telegram + браузер'],['none','Ничего не отправлено'],['historical','История до журнала доставки']]
 const statusOptions=[['','Любой результат'],['sent','Отправлено'],['partial','Частично'],['pending','Ожидает'],['failed','Не отправлено'],['historical','Историческое событие']]
@@ -29,10 +29,16 @@ const filtered=computed(()=>rows.value.filter(row=>{
   if(recipient.value&&row.recipientManager!==recipient.value)return false;if(leadManager.value&&row.leadManager!==leadManager.value)return false;if(crmStatus.value&&row.crmStatus!==crmStatus.value)return false;if(eventType.value&&row.eventType!==eventType.value)return false;if(deliveryStatus.value&&String(row.overallStatus)!==deliveryStatus.value)return false;if(dateFrom.value&&day(row.createdAt)<dateFrom.value)return false;if(dateTo.value&&day(row.createdAt)>dateTo.value)return false;return channelMatches(row)
 }))
 function reset(){recipient.value='';leadManager.value='';crmStatus.value='';eventType.value='';channel.value='';deliveryStatus.value='';dateFrom.value='';dateTo.value='';search.value=''}
-async function load({silent=false}={}){if(!silent)loading.value=true;loadError.value='';try{await meta.load();const d=await api.notificationHistory();rows.value=d.rows||[];summary.value=d.summary||summary.value;backfill.value=d.backfill||null;bootstrap.value=d.bootstrap||null;storage.value=d.storage||'json';lastLoadedAt.value=Date.now()}catch(e){loadError.value=e.message||'Не удалось загрузить историю';ui.toast(loadError.value,'error',7000)}finally{if(!silent)loading.value=false}}
-async function poll(){if(bootstrapRunning.value||['waiting_for_dialog_bootstrap','running'].includes(backfill.value?.status)){await load({silent:true});pollTimer.value=window.setTimeout(poll,3500)}}
+async function load({silent=false}={}){if(!silent)loading.value=true;loadError.value='';try{await meta.load();const d=await api.notificationHistory();rows.value=d.rows||[];rowsTotal.value=Number(d.rowsTotal??rows.value.length);rowsLimited.value=Boolean(d.rowsLimited);summary.value=d.summary||summary.value;backfill.value=d.backfill||null;bootstrap.value=d.bootstrap||null;storage.value=d.storage||'json';lastLoadedAt.value=Date.now();pollFailures.value=0;return d}catch(e){loadError.value=e.message||'Не удалось загрузить историю';if(!silent)ui.toast(loadError.value,'error',7000);throw e}finally{if(!silent)loading.value=false}}
+async function poll(){
+  if(pollBusy.value)return
+  pollBusy.value=true
+  let delay=15000
+  try{await load({silent:true});pollFailures.value=0}catch(e){pollFailures.value=Math.min(pollFailures.value+1,3);delay=Math.min(60000,15000*(2**pollFailures.value))}finally{pollBusy.value=false}
+  if(bootstrapRunning.value||['waiting_for_dialog_bootstrap','running','scheduled'].includes(backfill.value?.status))pollTimer.value=window.setTimeout(poll,delay)
+}
 function open(row){if(row.peerId)router.push({path:`/dialogs/${row.peerId}`,query:{from:route.fullPath}})}
-onMounted(async()=>{await load();poll()})
+onMounted(async()=>{try{await load()}catch{};if(bootstrapRunning.value||['waiting_for_dialog_bootstrap','running','scheduled'].includes(backfill.value?.status))pollTimer.value=window.setTimeout(poll,12000)})
 onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
 </script>
 
@@ -55,8 +61,8 @@ onBeforeUnmount(()=>{if(pollTimer.value)clearTimeout(pollTimer.value)})
 
     <section v-if="loadError" class="inline-error-card"><div><b>Не удалось обновить журнал</b><span>{{loadError}}</span><small>Уже загруженные записи остаются на экране.</small></div><button class="secondary-btn" @click="load()">Повторить</button></section>
 
-    <section class="settings-card history-filter-card"><div class="section-title-row"><div><h3>Журнал отправок</h3><p>Фильтры работают по фактическим и историческим событиям. Найдено: {{filtered.length}} из {{rows.length}}.</p></div><span class="info-chip">Обновлено {{dateTime(lastLoadedAt)}}</span></div>
-      <div class="search-control"><span>⌕</span><input v-model="search" placeholder="Клиент, менеджер, статус"></div>
+    <section class="settings-card history-filter-card"><div class="section-title-row"><div><h3>Журнал отправок</h3><p>Фильтры работают по фактическим и историческим событиям. Найдено на загруженной странице: {{filtered.length}} из {{rows.length}}<span v-if="rowsLimited"> · всего в журнале {{rowsTotal}}</span>.</p></div><span class="info-chip">Обновлено {{dateTime(lastLoadedAt)}}</span></div>
+      <small v-if="rowsLimited" class="audit-note">Для защиты Render загружены последние {{rows.length}} записей. Общие счётчики рассчитаны по всем {{rowsTotal}} записям.</small><div class="search-control"><span>⌕</span><input v-model="search" placeholder="Клиент, менеджер, статус"></div>
       <div class="history-filter-grid">
         <label>Получатель<select v-model="recipient"><option value="">Все</option><option v-for="x in recipients" :key="x">{{x}}</option></select></label>
         <label>Менеджер лида<select v-model="leadManager"><option value="">Все</option><option v-for="x in leadManagers" :key="x">{{x}}</option></select></label>

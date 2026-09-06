@@ -61,7 +61,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.20';
+const VERSION = '28.21';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -544,6 +544,31 @@ async function vkCall(token, method, params = {}) {
     throw new VkApiError(`VK API: ${msg}`, `VK_${code || 'ERROR'}`, e);
   }
   return parsed?.response;
+}
+
+
+let bootstrapVkLastCallAt=0;
+let bootstrapVkGate=Promise.resolve();
+async function vkCallPolite(token,method,params={},options={}){
+  const minGapMs=Math.max(320,Number(options.minGapMs||420));
+  const maxRetries=Math.max(0,Number(options.retries??5));
+  let attempt=0;
+  while(true){
+    const gate=bootstrapVkGate.then(async()=>{
+      const wait=Math.max(0,minGapMs-(Date.now()-bootstrapVkLastCallAt));
+      if(wait)await sleep(wait);
+      bootstrapVkLastCallAt=Date.now();
+    });
+    bootstrapVkGate=gate.catch(()=>{});
+    await gate;
+    try{return await vkCall(token,method,params)}
+    catch(err){
+      if(err?.code!=='VK_RATE_LIMIT'||attempt>=maxRetries)throw err;
+      const backoff=Math.min(15000,1600*(2**attempt))+Math.floor(Math.random()*350);
+      console.warn('[VK throttle]',method,`rate limit; retry ${attempt+1}/${maxRetries} in ${backoff}ms`);
+      await sleep(backoff);attempt++;
+    }
+  }
 }
 
 function normalizeVkCommunityHint(value) {
@@ -1641,9 +1666,10 @@ function serveStatic(req, res, pathname) {
       if (err2 && pathname==='/manifest.webmanifest') return sendJson(res,200,{name:'seb_gun CRM',short_name:'seb_gun CRM',start_url:'/#/dialogs',scope:'/',display:'standalone',background_color:'#f4f7f5',theme_color:'#151b17',icons:[{src:'/icon.svg',sizes:'any',type:'image/svg+xml',purpose:'any maskable'}]},{'Cache-Control':'no-cache'});
       if (err2 && pathname==='/icon.svg') return sendText(res,200,'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="116" fill="#0b966f"/><path fill="#fff" d="M352 143c-24-23-58-35-102-35-66 0-112 32-112 83 0 49 37 69 103 84 55 13 72 24 72 47 0 25-23 40-60 40-42 0-78-16-108-47l-37 43c36 39 84 58 143 58 73 0 121-36 121-91 0-50-34-73-105-90-55-13-70-22-70-43 0-22 21-36 53-36 34 0 62 11 86 33l16-46Z"/></svg>','image/svg+xml');
       if (err2) return sendText(res, 404, 'Not Found');
+      const immutableAsset=pathname.startsWith('/assets/');
       res.writeHead(200, {
         'Content-Type': mime[path.extname(target).toLowerCase()] || 'application/octet-stream',
-        'Cache-Control': path.basename(target) === 'sw.js' ? 'no-cache, no-store' : 'no-cache',
+        'Cache-Control': path.basename(target) === 'sw.js' ? 'no-cache, no-store' : immutableAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
         'X-Content-Type-Options': 'nosniff'
       });
       res.end(data);
@@ -2499,6 +2525,31 @@ async function ensureHistoricalNotificationBackfill(store,session){
   await writeNotificationHistoryBackfillState(state);
   return state;
 }
+
+let notificationHistoryBackfillRunning=false;
+let notificationHistoryBackfillTimer=null;
+function scheduleHistoricalNotificationBackfill(session,{delayMs=2500}={}){
+  const bootstrap=readDialogBootstrapState();
+  const current=readNotificationHistoryBackfillState();
+  if(bootstrap.status!=='completed'||current.status==='completed'||notificationHistoryBackfillRunning||notificationHistoryBackfillTimer)return current;
+  const scheduled={...current,status:current.status==='pending'?'scheduled':current.status};
+  notificationHistoryBackfillTimer=setTimeout(()=>{
+    notificationHistoryBackfillTimer=null;
+    notificationHistoryBackfillRunning=true;
+    let shouldContinue=false;
+    storage.run(async()=>{
+      try{
+        const store=await readNotificationStore();
+        const state=await ensureHistoricalNotificationBackfill(store,session);
+        shouldContinue=state.status==='running';
+      }catch(err){console.warn('[notification history backfill]',err?.message||err)}
+    }).catch(err=>console.warn('[notification history backfill storage]',err?.message||err)).finally(()=>{
+      notificationHistoryBackfillRunning=false;
+      if(shouldContinue)scheduleHistoricalNotificationBackfill(session,{delayMs:8000});
+    })
+  },Math.max(1000,Number(delayMs)||2500));
+  return scheduled;
+}
 function notificationHistorySummary(rows=[]){
   const out={total:rows.length,actual:0,historical:0,sent:0,partial:0,pending:0,failed:0};
   for(const row of rows){
@@ -2795,7 +2846,8 @@ async function buildSlaReport(session){
   const map=new Map();for(const row of rows){const key=row.responsibleManager||'Не назначен',stat=map.get(key)||{manager:key,total:0,answered:0,onTime:0,violations:0,waiting:0,responseTotal:0,responseCount:0,maxResponseMinutes:0};stat.total++;if(row.waiting)stat.waiting++;else{stat.answered++;stat.responseTotal+=row.workingResponseMinutes;stat.responseCount++;stat.maxResponseMinutes=Math.max(stat.maxResponseMinutes,row.workingResponseMinutes);if(row.onTime)stat.onTime++}if(row.violated)stat.violations++;map.set(key,stat)}
   const managers=[...map.values()].map(x=>({...x,averageResponseMinutes:x.responseCount?Math.round(x.responseTotal/x.responseCount):0,responseTotal:undefined,responseCount:undefined})).sort((a,b)=>b.violations-a.violations||b.total-a.total||a.manager.localeCompare(b.manager,'ru'));
   const totals=managers.reduce((a,x)=>({total:a.total+x.total,answered:a.answered+x.answered,onTime:a.onTime+x.onTime,violations:a.violations+x.violations,waiting:a.waiting+x.waiting}),{total:0,answered:0,onTime:0,violations:0,waiting:0});
-  return {settings,rows:rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0)),managers,totals,checkedAt:Date.now(),bootstrap:readDialogBootstrapState(),refresh:{mode:'background',running:slaRecentSyncRunning}};
+  const sortedRows=rows.sort((a,b)=>Number(b.receivedAt||0)-Number(a.receivedAt||0)),visibleRows=sortedRows.slice(0,2000);
+  return {settings,rows:visibleRows,rowsTotal:sortedRows.length,rowsLimited:sortedRows.length>visibleRows.length,managers,totals,checkedAt:Date.now(),bootstrap:readDialogBootstrapState(),refresh:{mode:'background',running:slaRecentSyncRunning}};
 }
 
 // v28.19: one-time historical bootstrap. It scans every VK conversation once,
@@ -2804,20 +2856,85 @@ function dialogBootstrapPath(){return path.join(ROOT,'data','dialog-bootstrap-v2
 function readDialogBootstrapState(){try{const x=readStoredJson(dialogBootstrapPath());return x&&typeof x==='object'?x:{status:'pending',version:1}}catch{return {status:'pending',version:1}}}
 async function writeDialogBootstrapState(value){await storage.writeDocument(dialogBootstrapPath(),{version:1,...value,updatedAt:Date.now()})}
 let dialogBootstrapRunning=false;
-async function runDialogBootstrapOnce(session){
-  if(dialogBootstrapRunning)return readDialogBootstrapState();const before=readDialogBootstrapState();if(before.status==='completed')return before;dialogBootstrapRunning=true;
-  const resumeAt=Math.max(0,Number(before.currentBatchEnd||0));
-  const state={...before,status:'running',startedAt:before.startedAt||Date.now(),lastError:'',processedDialogs:Math.max(0,Number(before.processedDialogs||0)),failedDialogs:Math.max(0,Number(before.failedDialogs||0)),totalDialogs:Math.max(0,Number(before.totalDialogs||0)),currentBatchEnd:resumeAt};await writeDialogBootstrapState(state);
-  try{
-    const dialogs=await loadDialogsForNotifications(session,{maxPages:0,filter:'all'});state.totalDialogs=dialogs.length;state.scanLimitDialogs=100000;state.possibleTruncation=dialogs.length>=100000;const store=await readNotificationStore(),settings={...slaReportSettingsFor(session),managerFilters:[],statuses:[]},rule={...settings,manager:'',warningAlerts:false,violationAlerts:false,outboxAlerts:false,dialogFilter:'unanswered'};
-    // A crashed deploy resumes from the last committed batch instead of rescanning old dialogs.
-    const startAt=Math.min(resumeAt,dialogs.length);
-    for(let i=startAt;i<dialogs.length;i+=4){const batch=dialogs.slice(i,i+4);const results=await Promise.all(batch.map(async d=>{try{const params={peer_id:Number(d.peerId),count:200,offset:0,extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;const raw=await vkCall(session.vkToken,'messages.getHistory',params),maps=vkIdentityMaps(raw||{}),messages=(raw?.items||[]).map(m=>normalizeVkMessage(m,maps));ingestNotificationJournalMessages(store,{peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule});return true}catch(err){console.warn('[bootstrap dialogs]',d.peerId,err?.message||err);return false}}));state.processedDialogs+=results.filter(Boolean).length;state.failedDialogs+=results.filter(x=>!x).length;await writeNotificationStore(store);await writeDialogBootstrapState({...state,currentBatchEnd:Math.min(i+batch.length,dialogs.length)});if(i+4<dialogs.length)await sleep(220)}
-    const rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,Date.now())),folders={waiting:0,onTime:0,violations:0,total:rows.length};for(const row of rows){if(row.waiting)folders.waiting++;else if(row.violated)folders.violations++;else folders.onTime++}
-    Object.assign(state,{status:'completed',completedAt:Date.now(),folders,currentBatchEnd:dialogs.length});await writeDialogBootstrapState(state);return state
-  }catch(err){Object.assign(state,{status:'failed',lastError:String(err?.message||err).slice(0,500),failedAt:Date.now()});await writeDialogBootstrapState(state);throw err}finally{dialogBootstrapRunning=false}
+let dialogBootstrapResumeTimer=null;
+function scheduleDialogBootstrapResume(session,delayMs){
+  if(dialogBootstrapResumeTimer)return;
+  dialogBootstrapResumeTimer=setTimeout(()=>{dialogBootstrapResumeTimer=null;startDialogBootstrapOnce(session)},Math.max(1000,Number(delayMs)||1000));
 }
-function startDialogBootstrapOnce(session){const state=readDialogBootstrapState();if(state.status==='completed'||dialogBootstrapRunning)return state;setTimeout(()=>storage.run(()=>runDialogBootstrapOnce(session)).catch(err=>console.warn('[dialog bootstrap]',err?.message||err)),50);return {...state,status:'starting'}}
+async function loadDialogBootstrapPage(session,offset=0,count=100){
+  const safeCount=Math.min(100,Math.max(20,Number(count)||100));
+  const params={count:safeCount,offset:Math.max(0,Number(offset)||0),filter:'all',extended:1,fields:'photo_100,screen_name'};
+  if(session.vkGroupId)params.group_id=session.vkGroupId;
+  const raw=await vkCallPolite(session.vkToken,'messages.getConversations',params,{minGapMs:450,retries:6});
+  const maps=vkIdentityMaps(raw||{}),rows=(raw?.items||[]).map(x=>normalizeVkDialog(x,maps));
+  const vkIds=rows.filter(d=>d.peerType==='user'&&d.peerId>0).map(d=>d.peerId);
+  if(vkIds.length){
+    try{
+      const linked=await getCustomersByVkIds(session,vkIds),byVk=new Map(linked.filter(c=>c.social?.vkId).map(c=>[Number(c.social.vkId),c]));
+      for(const d of rows){const c=byVk.get(d.peerId);if(c)d.crm={clientId:c.id,fullName:c.fullName,crmStatus:c.crmStatus,manager:c.manager,managerLogin:c.managerLogin,tags:c.tags}}
+    }catch(err){console.warn('[bootstrap crm link]',err?.message||err)}
+  }
+  return {rows,total:Math.max(0,Number(raw?.count||0))};
+}
+async function runDialogBootstrapOnce(session){
+  if(dialogBootstrapRunning)return readDialogBootstrapState();
+  const before=readDialogBootstrapState();
+  const legacyTruncated=before.status==='completed'&&(Boolean(before.possibleTruncation)||(Number(before.scanLimitDialogs||0)===10000&&Number(before.totalDialogs||0)>=10000));
+  if(before.status==='completed'&&!legacyTruncated)return before;
+  dialogBootstrapRunning=true;
+  const hardLimit=100000,resumeAt=Math.max(0,Number(before.currentBatchEnd||0));
+  const state={...before,status:'running',startedAt:before.startedAt||Date.now(),lastError:'',processedDialogs:Math.max(0,Number(before.processedDialogs||0)),failedDialogs:Math.max(0,Number(before.failedDialogs||0)),totalDialogs:Math.max(0,Number(before.totalDialogs||0)),currentBatchEnd:resumeAt,scanLimitDialogs:hardLimit,possibleTruncation:false};
+  await writeDialogBootstrapState(state);
+  try{
+    const store=await readNotificationStore(),settings={...slaReportSettingsFor(session),managerFilters:[],statuses:[]},rule={...settings,manager:'',warningAlerts:false,violationAlerts:false,outboxAlerts:false,dialogFilter:'unanswered'};
+    let offset=resumeAt,lastPersisted=resumeAt,total=Math.max(resumeAt,state.totalDialogs||0);
+    while(offset<hardLimit){
+      const page=await loadDialogBootstrapPage(session,offset,100);
+      const reportedTotal=Math.max(0,Number(page.total||0));
+      if(reportedTotal)total=Math.min(hardLimit,reportedTotal);
+      state.totalDialogs=total;state.possibleTruncation=reportedTotal>hardLimit;
+      if(!page.rows.length||offset>=total)break;
+      for(const d of page.rows){
+        if(offset>=hardLimit)break;
+        try{
+          const params={peer_id:Number(d.peerId),count:200,offset:0,extended:1,fields:'photo_100,screen_name'};if(session.vkGroupId)params.group_id=session.vkGroupId;
+          const raw=await vkCallPolite(session.vkToken,'messages.getHistory',params,{minGapMs:450,retries:6}),maps=vkIdentityMaps(raw||{}),messages=(raw?.items||[]).map(m=>normalizeVkMessage(m,maps));
+          ingestNotificationJournalMessages(store,{peerId:d.peerId,name:d.crm?.fullName||d.name||`VK ${d.peerId}`,manager:d.crm?.manager||d.crm?.managerLogin||'',crmStatus:d.crm?.crmStatus||'',messages,rule});
+          state.processedDialogs++;
+        }catch(err){
+          if(err?.code==='VK_RATE_LIMIT')throw err;
+          state.failedDialogs++;console.warn('[bootstrap dialogs]',d.peerId,err?.message||err);
+        }
+        offset++;state.currentBatchEnd=offset;
+        // Persist in coarse chunks. v28.20 wrote the entire notification snapshot after every 4 dialogs,
+        // which saturated PostgreSQL/Render while the UI was polling it.
+        if(offset-lastPersisted>=25){await writeNotificationStore(store);await writeDialogBootstrapState(state);lastPersisted=offset}
+      }
+      if(offset-lastPersisted>0){await writeNotificationStore(store);await writeDialogBootstrapState(state);lastPersisted=offset}
+      if(offset>=total)break;
+      await sleep(700);
+    }
+    const rows=notificationJournalRows(store,{admin:true}).map(row=>slaReportRow(row,settings,Date.now())),folders={waiting:0,onTime:0,violations:0,total:rows.length};for(const row of rows){if(row.waiting)folders.waiting++;else if(row.violated)folders.violations++;else folders.onTime++}
+    Object.assign(state,{status:'completed',completedAt:Date.now(),folders,currentBatchEnd:Math.min(offset,total||offset),totalDialogs:total||offset});
+    await writeNotificationStore(store);await writeDialogBootstrapState(state);scheduleHistoricalNotificationBackfill(session,{delayMs:5000});return state;
+  }catch(err){
+    if(err?.code==='VK_RATE_LIMIT'){
+      const retryAt=Date.now()+60000;Object.assign(state,{status:'paused_rate_limit',lastError:'VK временно ограничил частоту запросов. Проверка автоматически продолжится через минуту.',retryAt});
+      await writeDialogBootstrapState(state);
+      scheduleDialogBootstrapResume(session,61000);
+      return state;
+    }
+    Object.assign(state,{status:'failed',lastError:String(err?.message||err).slice(0,500),failedAt:Date.now()});await writeDialogBootstrapState(state);throw err;
+  }finally{dialogBootstrapRunning=false}
+}
+function startDialogBootstrapOnce(session){
+  const state=readDialogBootstrapState();
+  const legacyTruncated=state.status==='completed'&&(Boolean(state.possibleTruncation)||(Number(state.scanLimitDialogs||0)===10000&&Number(state.totalDialogs||0)>=10000));
+  if((state.status==='completed'&&!legacyTruncated)||dialogBootstrapRunning)return state;
+  if(state.status==='paused_rate_limit'&&Number(state.retryAt||0)>Date.now()){scheduleDialogBootstrapResume(session,Number(state.retryAt)-Date.now()+500);return state}
+  setTimeout(()=>storage.run(()=>runDialogBootstrapOnce(session)).catch(err=>console.warn('[dialog bootstrap]',err?.message||err)),400);
+  return {...state,status:'starting'};
+}
 async function runScheduledNotificationCheck(){
   if(notificationCheckRunning||!NOTIFICATION_BS_LOGIN||!NOTIFICATION_BS_PASSWORD||!PRESET_VK_TOKEN)return;
   notificationCheckRunning=true;try{await executeNotificationCheck({manual:false},'internal')}catch(err){console.warn('[notifications scheduler]',err?.message||err)}finally{notificationCheckRunning=false}
@@ -2946,10 +3063,15 @@ async function apiRouter(req, res, url) {
   if (pathname === '/api/notifications/history' && req.method === 'GET') {
     try{
       const store=await readNotificationStore();
-      const backfill=await ensureHistoricalNotificationBackfill(store,s);
-      const rows=notificationDeliveryRows(store,s,{admin:isAdminSession(s)});
-      await writeNotificationStore(store);
-      return sendJson(res,200,{ok:true,rows,summary:notificationHistorySummary(rows),backfill,bootstrap:readDialogBootstrapState(),storage:storage.enabled?'postgresql':'json'});
+      const expired=expirePendingBrowserDeliveries(store);
+      const names=notificationActorNames(s).map(notificationRuleKey),admin=isAdminSession(s);
+      const allRows=Object.values(store.deliveryLog||{}).filter(row=>admin||names.includes(notificationRuleKey(row.recipientManager))).sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0));
+      if(expired)await writeNotificationStore(store);
+      const backfill=scheduleHistoricalNotificationBackfill(s,{delayMs:4000});
+      // Keep the audit page responsive even after years of history. Summary is over all rows;
+      // the UI receives the newest slice instead of a multi-megabyte JSON response.
+      const rows=allRows.slice(0,1500);
+      return sendJson(res,200,{ok:true,rows,rowsTotal:allRows.length,rowsLimited:allRows.length>rows.length,summary:notificationHistorySummary(allRows),backfill,bootstrap:readDialogBootstrapState(),storage:storage.enabled?'postgresql':'json'});
     }catch(err){return handleApiError(res,err)}
   }
   if (pathname === '/api/notifications/browser-pending' && req.method === 'GET') {

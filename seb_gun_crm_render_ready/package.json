@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.20.0",
+  "version": "28.21.0",
   "private": true,
-  "description": "seb_gun CRM v28.20: observable SLA progress, fast DB reports, historical notification backfill and control-area UX",
+  "description": "seb_gun CRM v28.21: Render/VK overload protection, paced one-time bootstrap, API backoff and lightweight audit polling",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -54,9 +54,10 @@
     "test:database": "node tests/postgres-storage.js && node tests/create-safety.js && node tests/phrase-source.js",
     "test:v2817": "node tests/integration-v2817.js",
     "test:v2818": "node tests/integration-v2818.js",
-    "test:v2819": "node tests/integration-v2819.js && node tests/integration-v2820.js",
+    "test:v2819": "node tests/integration-v2819.js && node tests/integration-v2820.js && node tests/integration-v2821.js",
     "test:v2820": "node tests/integration-v2820.js",
-    "test:release": "node tests/integration-v2819.js && node tests/integration-v2820.js && npm run test:database"
+    "test:release": "node tests/integration-v2819.js && node tests/integration-v2820.js && node tests/integration-v2821.js && npm run test:database",
+    "test:v2821": "node tests/integration-v2821.js"
   },
   "engines": {
     "node": ">=18"
