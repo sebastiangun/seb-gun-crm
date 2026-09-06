@@ -1,4 +1,4 @@
-> Версия 28.22: сначала прочитайте [START_HERE_POSTGRESQL.md](START_HERE_POSTGRESQL.md), затем UPDATE_V28.22.txt. PostgreSQL обязателен; SLA/история теперь читаются direct SQL, bootstrap пишет lead_journal инкрементально.
+> Версия 28.25: Google Sheets через Apps Script Web App. PostgreSQL и Google Cloud Console не нужны. Начните с [GOOGLE_APPS_SCRIPT_STORAGE_SETUP.md](GOOGLE_APPS_SCRIPT_STORAGE_SETUP.md).
 
 # seb_gun CRM v28.3 — Vue workspace
 

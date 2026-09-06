@@ -61,7 +61,7 @@ const REMINDER_SCAN_LIMIT = Number(process.env.REMINDER_SCAN_LIMIT || 50000); //
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 12000);
 const BLUESALES_PAGE_SIZE = Math.min(Math.max(Number(process.env.BLUESALES_PAGE_SIZE || 500), 1), 500);
 const COOKIE_NAME = 'bs_mobile_session';
-const VERSION = '28.24';
+const VERSION = '28.25';
 const PRESET_VK_TOKEN = String(process.env.VK_TOKEN || '').trim();
 const PRESET_VK_COMMUNITY = String(process.env.VK_COMMUNITY || process.env.VK_GROUP_ID || '').trim();
 const PRESET_VK_COMMUNITY_URL = String(process.env.VK_COMMUNITY_URL || '').trim();
@@ -4131,7 +4131,7 @@ if(String(process.env.SESSION_SECRET||'').length<32)throw new Error('SESSION_SEC
 await storage.init();
 await storage.applyPhraseUpdate();
 if(storage.enabled)await storage.refreshDocuments();
-console.log(storage.enabled?'[storage] Google Sheets подключён; листы готовы':'[storage] Google Sheets НЕ подключён. Проверьте GOOGLE_SPREADSHEET_ID / GOOGLE_SERVICE_ACCOUNT_EMAIL / GOOGLE_PRIVATE_KEY.');
+console.log(storage.enabled?'[storage] Google Sheets подключён; листы готовы':'[storage] Google Apps Script / Sheets НЕ подключён. Проверьте GOOGLE_SPREADSHEET_ID / GOOGLE_SHEETS_WEBAPP_URL / GOOGLE_SHEETS_API_SECRET.');
 server.listen(PORT, HOST, () => {
   console.log('');
   console.log(`seb_gun CRM + VK DIRECT v${VERSION}`);

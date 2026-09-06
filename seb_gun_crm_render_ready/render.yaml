@@ -94,12 +94,12 @@ services:
       - key: VK_COMMUNITY_URL
         sync: false
 
-      # v28.24 Google Sheets storage. No PostgreSQL / DATABASE_URL is used.
+      # v28.25 Google Apps Script + Sheets storage. No PostgreSQL, SQL or Google Cloud Console is used.
       - key: GOOGLE_SPREADSHEET_ID
         sync: false
-      - key: GOOGLE_SERVICE_ACCOUNT_EMAIL
+      - key: GOOGLE_SHEETS_WEBAPP_URL
         sync: false
-      - key: GOOGLE_PRIVATE_KEY
+      - key: GOOGLE_SHEETS_API_SECRET
         sync: false
       - key: REQUIRE_GOOGLE_STORAGE
         value: "1"

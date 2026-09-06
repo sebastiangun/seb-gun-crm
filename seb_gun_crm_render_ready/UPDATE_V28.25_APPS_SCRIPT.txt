@@ -1,0 +1,23 @@
+seb_gun CRM v28.25 — Google Apps Script Web App storage
+
+Главное:
+- PostgreSQL отсутствует.
+- Google Cloud Console не нужен.
+- Service Account / private key не нужны.
+- Render общается с Apps Script по HTTPS.
+- Apps Script пишет в seb_gun_crm_storage.
+- Включены пакетные upsert до 100 строк за запрос.
+- LeadEvents сохраняет append-like историю CRM.
+- Leads хранит текущее состояние.
+- Runtime хранит bootstrap/session/create guards/documents.
+- setup автоматически проверяет/создаёт листы и заголовки.
+
+Render vars:
+GOOGLE_SPREADSHEET_ID
+GOOGLE_SHEETS_WEBAPP_URL
+GOOGLE_SHEETS_API_SECRET
+REQUIRE_GOOGLE_STORAGE=1
+SESSION_SECRET
+
+Apps Script source:
+google-apps-script/Code.gs

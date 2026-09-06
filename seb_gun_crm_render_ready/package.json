@@ -1,8 +1,8 @@
 {
   "name": "seb-gun-crm-vk",
-  "version": "28.24.0",
+  "version": "28.25.0",
   "private": true,
-  "description": "seb_gun CRM v28.24: Google Sheets file-like storage, no PostgreSQL/SQL database",
+  "description": "seb_gun CRM v28.25: Google Apps Script + Sheets storage, no PostgreSQL and no Google Cloud Console",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -48,19 +48,17 @@
     "test:v2813": "node tests/integration-v2813.js",
     "test:v2814": "node tests/integration-v2814.js",
     "test:v2815": "node tests/integration-v2815.js",
-    "db:migrate": "node scripts/database.js migrate",
-    "db:import": "node scripts/database.js import",
-    "db:status": "node scripts/database.js status",
-    "test:database": "node tests/google-sheets-storage-v2824.js && node tests/create-safety.js && node tests/phrase-source.js",
+    "test:database": "node tests/google-apps-script-storage-v2825.js && node tests/create-safety.js && node tests/phrase-source.js",
     "test:v2817": "node tests/integration-v2817.js",
     "test:v2818": "node tests/integration-v2818.js",
-    "test:v2819": "node tests/integration-v2824.js",
+    "test:v2819": "node tests/integration-v2825.js",
     "test:v2820": "node tests/integration-v2820.js",
     "test:release": "npm run test:v2819 && npm run test:database",
     "test:v2821": "node tests/integration-v2821.js",
     "test:v2822": "node tests/integration-v2822.js",
     "test:v2823": "node tests/integration-v2823.js && node tests/event-state-v2823.js",
-    "test:v2824": "node tests/integration-v2824.js"
+    "test:v2824": "node tests/integration-v2824.js",
+    "test:v2825": "node tests/integration-v2825.js && node tests/google-apps-script-storage-v2825.js"
   },
   "engines": {
     "node": ">=18"
